@@ -1,0 +1,211 @@
+import warnings
+
+import torch
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+from typing import Callable, Union
+
+import click
+import nvtx
+
+import distributed_recommender.utils.initialize as init
+from distributed_recommender.configs.hstu_config import (
+    HSTULayerType,
+    KernelBackend,
+    get_hstu_config,
+)
+from distributed_recommender.modules.fused_hstu_layer import FusedHSTULayer
+from distributed_recommender.modules.jagged_module import JaggedData
+from distributed_recommender.modules.native_hstu_layer import HSTULayer
+from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
+from distributed_recommender.utils.gpu_timer import IGPUTimer
+
+_backend_str_to_type = {
+    "cutlass": KernelBackend.CUTLASS,
+    "triton": KernelBackend.TRITON,
+    "pytorch": KernelBackend.PYTORCH,
+}
+
+_layer_type_str_to_type = {"native": HSTULayerType.NATIVE, "fused": HSTULayerType.FUSED}
+
+_dtype_str_to_type = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
+
+@click.group()
+def cli() -> None:
+    pass
+
+
+def create_hstu_layer(
+    layer_type: HSTULayerType,
+    hidden_size: int,
+    kv_channels: int,
+    num_attention_heads: int,
+    init_method: Callable[[torch.Tensor], torch.Tensor],
+    dtype: torch.dtype,
+    kernel_backend: KernelBackend,
+    learnable_input_layernorm: bool = False,
+) -> Union[HSTULayer, FusedHSTULayer]:
+    hstu_config = get_hstu_config(
+        hidden_size=hidden_size,
+        kv_channels=kv_channels,
+        num_attention_heads=num_attention_heads,
+        init_method=init_method,
+        num_layers=1,
+        dtype=dtype,
+        kernel_backend=kernel_backend,
+        hstu_layer_type=layer_type,
+        learnable_input_layernorm=learnable_input_layernorm,
+    )
+    if layer_type == HSTULayerType.NATIVE:
+        module = HSTULayer(hstu_config).to(dtype).cuda()
+    else:
+        module = FusedHSTULayer(hstu_config).to(dtype).cuda()
+
+    return module
+
+
+@cli.command()
+@click.option("--iters", type=int, default=100, required=False)
+@click.option("--warmup-iters", type=int, default=50, required=False)
+@click.option(
+    "--layer-type",
+    type=click.Choice(_layer_type_str_to_type.keys()),
+    default="fused",
+    required=False,
+)
+@click.option(
+    "--kernel-backend",
+    type=click.Choice(_backend_str_to_type.keys()),
+    default="cutlass",
+    required=False,
+)
+@click.option("--dim-per-head", type=int, default=128, required=True)
+@click.option("--num-heads", type=int, default=8, required=True)
+@click.option(
+    "--dtype",
+    type=click.Choice(_dtype_str_to_type.keys()),
+    default="bfloat16",
+    required=False,
+)
+@click.option("--max-seqlen", type=int, default=1024, required=True)
+@click.option("--full-sequence", type=bool, default=False, required=True)
+@click.option("--batchsize", type=int, default=32, required=True)
+@click.option("--profiler-start", type=int, default=20, required=False)
+@click.option("--profiler-end", type=int, default=40, required=False)
+def run(
+    iters,
+    warmup_iters,
+    layer_type,
+    dim_per_head,
+    num_heads,
+    dtype,
+    kernel_backend,
+    max_seqlen,
+    batchsize,
+    profiler_start,
+    profiler_end,
+    full_sequence,
+):
+    log_layer_type = layer_type.upper()
+    layer_type = _layer_type_str_to_type[layer_type]
+    kernel_backend = _backend_str_to_type[kernel_backend]
+    dtype = _dtype_str_to_type[dtype]
+
+    hidden_size = dim_per_head * num_heads
+    init_method = torch.nn.init.xavier_uniform_
+    hstu_layer = create_hstu_layer(
+        layer_type=layer_type,
+        hidden_size=hidden_size,
+        kv_channels=dim_per_head,
+        num_attention_heads=num_heads,
+        init_method=init_method,
+        dtype=dtype,
+        kernel_backend=kernel_backend,
+        learnable_input_layernorm=True,
+    )
+    # generate random input
+    if full_sequence:
+        lengths = torch.full((batchsize,), max_seqlen, dtype=torch.int32, device="cuda")
+    else:
+        lengths = torch.randint(
+            low=1,
+            high=max_seqlen + 1,
+            size=(batchsize,),
+            dtype=torch.int32,
+            device="cuda",
+        )
+    seq_offsets = length_to_complete_offsets(lengths)
+    L = int(seq_offsets[-1].item())
+    input = torch.randn(L, hidden_size, dtype=dtype, device="cuda")
+    # invoke backward
+    input.requires_grad_()
+    ctor_nograd_dict = {
+        "seqlen": lengths,
+        "seqlen_offsets": seq_offsets,
+        "max_seqlen": max_seqlen,
+        "max_num_candidates": 0,
+        "num_candidates": None,
+        "num_candidates_offsets": None,
+        "contextual_max_seqlen": 0,
+        "contextual_seqlen": None,
+        "contextual_seqlen_offsets": None,
+    }
+    jagged_input = JaggedData(values=input, **ctor_nograd_dict)
+    grad_output = torch.randn_like(input)
+    # warmup
+    for _ in range(warmup_iters):
+        ret_jd = hstu_layer(jagged_input)
+        ret_jd.values.backward(grad_output)
+
+    # benchmark
+    igpu_timer = IGPUTimer(max_iters=iters)
+    # fwd
+    for iteration in range(iters):
+        igpu_timer.start(iteration)
+        ret_jd = hstu_layer(jagged_input)
+        # ret_jd.values.backward(grad_output)
+        igpu_timer.stop(iteration)
+
+    fwd_median_time = igpu_timer.elapsed_time(reduction="median")
+    print(
+        f"[{log_layer_type}] [fwd] tokens {L};time (median): {fwd_median_time:.4f} ms."
+    )
+
+    # bwd
+    for iteration in range(iters):
+        ret_jd = hstu_layer(jagged_input)
+        igpu_timer.start(iteration)
+        ret_jd.values.backward(grad_output)
+        igpu_timer.stop(iteration)
+
+    bwd_median_time = igpu_timer.elapsed_time(reduction="median")
+    print(
+        f"[{log_layer_type}] [bwd] tokens {L};time (median): {bwd_median_time:.4f} ms."
+    )
+    print(
+        f"[{log_layer_type}] [e2e] tokens {L};time: {fwd_median_time + bwd_median_time:.4f} ms."
+    )
+    # nsys
+    for iteration in range(iters):
+        if iteration == profiler_start or iteration == iters - 1:
+            torch.cuda.profiler.start()
+
+        with nvtx.annotate(f"hstu_layer_fwd {iteration}", color="ORANGE"):
+            ret_jd = hstu_layer(jagged_input)
+
+        with nvtx.annotate(f"hstu_layer_bwd {iteration}", color="PURPLE"):
+            ret_jd.values.backward(grad_output)
+
+        if iteration == profiler_end or iteration == iters - 1:
+            torch.cuda.profiler.stop()
+
+
+if __name__ == "__main__":
+    init.initialize_single_rank()
+    init.set_random_seed(1234)
+    cli()

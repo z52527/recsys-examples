@@ -19,10 +19,23 @@ import torch
 from megatron.core import parallel_state, tensor_parallel
 
 
+def initialize_single_rank():
+    if torch.distributed.is_initialized():
+        return
+    torch.set_printoptions(precision=6, sci_mode=False)
+    rank = 0
+    device: torch.device = torch.device(f"cuda:{rank}")
+    backend = "nccl"
+    torch.cuda.set_device(device)
+    torch.distributed.init_process_group(
+        backend=backend, init_method="tcp://127.0.0.1:12345", rank=rank, world_size=1
+    )
+
+
 def initialize_distributed():
     if torch.distributed.is_initialized():
         return
-
+    torch.set_printoptions(precision=6, sci_mode=False)
     rank = int(os.environ["LOCAL_RANK"])
     device: torch.device = torch.device(f"cuda:{rank}")
     backend = "nccl"

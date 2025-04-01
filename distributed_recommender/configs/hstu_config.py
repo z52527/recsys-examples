@@ -22,6 +22,20 @@ from megatron.core.transformer import TransformerConfig
 
 
 @unique
+class HSTULayerType(Enum):
+    """
+    Enum class representing different HSTU layer types.
+
+    Attributes:
+      FUSED: Represents the fused type. The fused layer is scheduleable and pipelineable
+      NATIVE: Represents the non-fused type.
+    """
+
+    FUSED = "FUSED"
+    NATIVE = "NATIVE"
+
+
+@unique
 class KernelBackend(Enum):
     """
     Enum class representing different kernel backends.
@@ -72,8 +86,12 @@ class HSTUConfig(TransformerConfig):
     enable_relative_attention_bias: bool = False
 
     kernel_backend: KernelBackend = KernelBackend.CUTLASS
+    hstu_layer_type: HSTULayerType = HSTULayerType.NATIVE
 
     target_group_size: int = 1
+    learnable_input_layernorm: bool = False
+    # whether to add residual connection
+    residual: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -92,6 +110,9 @@ def get_hstu_config(
     is_causal: bool = True,
     kernel_backend: KernelBackend = KernelBackend.CUTLASS,
     target_group_size: int = 1,
+    hstu_layer_type: HSTULayerType = HSTULayerType.NATIVE,
+    learnable_input_layernorm: bool = False,
+    residual: bool = True,
 ) -> HSTUConfig:
     """
     Create the HSTU configuration.
@@ -132,4 +153,7 @@ def get_hstu_config(
         is_causal=is_causal,
         kernel_backend=kernel_backend,
         target_group_size=target_group_size,
+        hstu_layer_type=hstu_layer_type,
+        learnable_input_layernorm=learnable_input_layernorm,
+        residual=residual,
     )

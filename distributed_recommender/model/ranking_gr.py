@@ -28,7 +28,7 @@ from distributed_recommender.configs import HSTUConfig, RankingConfig
 from distributed_recommender.data.utils import RankingBatch
 from distributed_recommender.model.base_model import BaseModel
 from distributed_recommender.modules.embedding import ShardedEmbedding
-from distributed_recommender.modules.hstu import HSTUBlock
+from distributed_recommender.modules.hstu_block import HSTUBlock
 from distributed_recommender.modules.metrics import get_multi_event_metric_module
 from distributed_recommender.modules.mlp import MLP
 from distributed_recommender.modules.multi_task_loss_module import MultiTaskLossModule

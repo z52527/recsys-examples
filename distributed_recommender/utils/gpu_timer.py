@@ -84,5 +84,9 @@ class IGPUTimer(GPUTimer):
 
         return ret_time
 
+    def reset(self):
+        self._recorded_start_events.clear()
+        self._recorded_end_events.clear()
+
     def dist_sync(self):
         torch.distributed.barrier(device_ids=[torch.cuda.current_device()])

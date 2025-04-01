@@ -14,157 +14,39 @@
 # limitations under the License.
 
 
+
+from typing import Optional
+
 import fbgemm_gpu  # pylint: disable-unused-import
 import pytest
 import torch
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
+from megatron.core.transformer.module import Float16Module
 
 import distributed_recommender.utils.initialize as init
 from distributed_recommender.configs import get_hstu_config
-from distributed_recommender.configs.hstu_config import KernelBackend
-from distributed_recommender.data.utils import Batch, FeatureConfig
-from distributed_recommender.modules.hstu import HSTUBlock, create_hstu_attention
+from distributed_recommender.configs.hstu_config import HSTULayerType, KernelBackend
+from distributed_recommender.modules.fused_hstu_layer import FusedHSTULayer
+from distributed_recommender.modules.jagged_module import JaggedData
+from distributed_recommender.modules.native_hstu_layer import HSTULayer
 from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
-from distributed_recommender.utils.tensor_initializer import UniformInitializer
+from distributed_recommender.utils.hstu_assert_close import assert_hstu_close
 
 
-@pytest.mark.parametrize(
-    "contextual_feature_names", [[], ["user_feature0", "user_feature1"]]
-)
-@pytest.mark.parametrize("action_feature_name", ["action", None])
-@pytest.mark.parametrize("max_num_candidates", [10, 0])
-def test_hstu_preprocess(
-    contextual_feature_names,
-    action_feature_name,
-    max_num_candidates,
-    dim_size=8,
-    batch_size=32,
-    max_seqlen=20,
-):
-    init.initialize_distributed()
-    init.set_random_seed(1234)
-    device = torch.cuda.current_device()
+def init_weights_from_native(native_module: HSTULayer, fused_module: FusedHSTULayer):
+    import re
 
-    item_feature_name = "item"
-    item_and_action_feature_names = (
-        [item_feature_name]
-        if action_feature_name is None
-        else [item_feature_name, action_feature_name]
-    )
-    feature_configs = [
-        FeatureConfig(
-            feature_names=item_and_action_feature_names,
-            max_item_ids=[1000 for _ in item_and_action_feature_names],
-            max_sequence_length=max_seqlen,
-            is_jagged=True,
+    for name, param in native_module.named_parameters():
+        # linear layer weight is transposed in the fused module
+        fused_accessor = name.replace(".weight", "_weight").replace(".bias", "_bias")
+        src_data = (
+            param.data.t()
+            if re.match(r".*linear\w*_weight$", fused_accessor)
+            else param.data
         )
-    ]
-    for n in contextual_feature_names:
-        feature_configs.append(
-            FeatureConfig(
-                feature_names=[n],
-                max_item_ids=[1000],
-                max_sequence_length=max_seqlen,
-                is_jagged=True,
-            )
-        )
-
-    batch = Batch.random(
-        batch_size=batch_size,
-        feature_configs=feature_configs,
-        item_feature_name=item_feature_name,
-        contextual_feature_names=contextual_feature_names,
-        action_feature_name=action_feature_name,
-        max_num_candidates=max_num_candidates,
-        device=device,
-    )
-
-    hstu_config = get_hstu_config(
-        hidden_size=dim_size,
-        kv_channels=128,
-        num_attention_heads=4,
-        num_layers=1,
-        init_method=UniformInitializer,
-        position_encoding_config=None,
-        dtype=torch.float,
-    )
-    hstu_block = HSTUBlock(hstu_config)
-
-    seqlen_sum = torch.sum(batch.features.lengths()).cpu().item()
-    embeddings = KeyedJaggedTensor.from_lengths_sync(
-        keys=batch.features.keys(),
-        values=torch.rand((seqlen_sum, dim_size), device=device),
-        lengths=batch.features.lengths(),
-    )
-    embedding_dict = embeddings.to_dict()
-    item_embedding = embedding_dict[item_feature_name].values()
-    item_embedding_offests_cpu = embedding_dict[item_feature_name].offsets().cpu()
-    if action_feature_name is not None:
-        action_embedding = embedding_dict[action_feature_name].values()
-
-    jd = hstu_block.hstu_preprocess(embeddings=embeddings, batch=batch)
-    for sample_id in range(batch_size):
-        start, end = jd.seqlen_offsets[sample_id], jd.seqlen_offsets[sample_id + 1]
-        cur_sequence_embedding = jd.values[start:end, :]
-        idx = 0
-        for contextual_feature_name in contextual_feature_names:
-            contextual_embedding = embedding_dict[contextual_feature_name].values()
-            contextual_embedding_offsets_cpu = (
-                embedding_dict[contextual_feature_name].offsets().cpu()
-            )
-            cur_start, cur_end = (
-                contextual_embedding_offsets_cpu[sample_id],
-                contextual_embedding_offsets_cpu[sample_id + 1],
-            )
-            for i in range(cur_start, cur_end):
-                assert torch.allclose(
-                    cur_sequence_embedding[idx, :], contextual_embedding[i, :]
-                ), "contextual embedding not match"
-                idx += 1
-        cur_start, cur_end = (
-            item_embedding_offests_cpu[sample_id],
-            item_embedding_offests_cpu[sample_id + 1],
-        )
-        for i in range(cur_start, cur_end):
-            assert torch.allclose(
-                cur_sequence_embedding[idx, :], item_embedding[i, :]
-            ), "item embedding not match"
-            idx += 1
-            if action_feature_name is not None:
-                assert torch.allclose(
-                    cur_sequence_embedding[idx, :], action_embedding[i, :]
-                ), "action embedding not match"
-                idx += 1
-
-    result_jd = hstu_block.hstu_postprocess(jd)
-    for sample_id in range(batch_size):
-        start, end = (
-            result_jd.seqlen_offsets[sample_id],
-            result_jd.seqlen_offsets[sample_id + 1],
-        )
-        result_embedding = result_jd.values[start:end, :]
-        cur_start, cur_end = (
-            item_embedding_offests_cpu[sample_id],
-            item_embedding_offests_cpu[sample_id + 1],
-        )
-        if max_num_candidates > 0:
-            num_candidates_cpu = batch.num_candidates.cpu()
-            cur_num_candidates_cpu = num_candidates_cpu[sample_id].item()
-            candidate_embedding = item_embedding[
-                cur_end - cur_num_candidates_cpu : cur_end, :
-            ]
-            assert torch.allclose(
-                result_embedding, candidate_embedding
-            ), "candidate embedding not match"
-        else:
-            all_item_embedding = item_embedding[cur_start:cur_end, :]
-            assert torch.allclose(
-                result_embedding, all_item_embedding
-            ), "all item embedding not match"
+        if param.requires_grad:
+            fused_module.state_dict()[fused_accessor].data.copy_(src_data)
 
 
-@pytest.mark.parametrize("heads", [8])
-@pytest.mark.parametrize("hidden_dim", [128])
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -172,145 +54,186 @@ def test_hstu_preprocess(
         #    torch.float16
     ],
 )
-@pytest.mark.parametrize(
-    "max_seqlen,max_num_candidates,max_num_contextuals",
-    [
-        (1024, 128, 6),
-        (32, 0, 0),
-        (1024, 128, 0),
-    ],
-)
-@pytest.mark.parametrize("target_group_size", [2, 16, 256, 1])
-@pytest.mark.parametrize("batchsize", [32])
-@pytest.mark.parametrize(
-    "is_causal,kernel_backend,fwd_rtol,fwd_atol,bwd_rtol,bwd_atol",
-    [
-        (True, KernelBackend.TRITON, 1e-7, 1e-5, 1e-7, 1e-5),
-        (True, KernelBackend.CUTLASS, 1e-7, 1e-5, 1e-7, 1e-5),
-        (False, KernelBackend.CUTLASS, 1e-7, 1e-5, 1e-7, 1e-5),
-    ],
-)
-def test_hstu_attn(
-    heads,
-    hidden_dim,
-    is_causal,
-    dtype,
-    max_seqlen,
-    max_num_candidates,
-    max_num_contextuals,
-    target_group_size,
-    batchsize,
-    kernel_backend,
-    fwd_rtol,
-    fwd_atol,
-    bwd_rtol,
-    bwd_atol,
+@pytest.mark.parametrize("batchsize", [2])
+@pytest.mark.parametrize("max_history_seqlen", [128, 200])
+@pytest.mark.parametrize("max_num_targets", [16])
+@pytest.mark.parametrize("max_num_contextuals", [2, 0])
+@pytest.mark.parametrize("num_heads", [1, 8])
+@pytest.mark.parametrize("hidden_dim_per_head", [64, 128])
+@pytest.mark.parametrize("dropout_ratio", [0.0])
+@pytest.mark.parametrize("attn_backend", [KernelBackend.CUTLASS])
+@pytest.mark.parametrize("target_group_size", [1])
+@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("seed", [None])
+@pytest.mark.parametrize("learnable_ln", [True])
+@pytest.mark.parametrize("residual", [False, True])
+@pytest.mark.parametrize("input_sparsity", [0.75])
+def test_fused_hstu_layer(
+    dtype: torch.dtype,
+    batchsize: int,
+    max_history_seqlen: int,  # N
+    max_num_targets: int,
+    max_num_contextuals: int,
+    num_heads: int,
+    hidden_dim_per_head: int,
+    dropout_ratio: float,
+    attn_backend: KernelBackend,
+    target_group_size: int,
+    causal: bool,
+    seed: Optional[int],
+    learnable_ln: bool,
+    residual: bool,
+    input_sparsity: float,
 ):
-    if kernel_backend == KernelBackend.TRITON and target_group_size > 1:
-        pytest.skip("Triton is not supported when target_group_size > 1")
-    if kernel_backend == KernelBackend.TRITON and max_num_contextuals > 0:
-        pytest.skip("Triton is not supported when max_num_contextuals > 0")
-    # TODO: uncomment this once cutlass supports causal attention
-    if not is_causal and max_num_contextuals > 0:
-        pytest.skip("Only causal attention is supported when max_num_contextuals > 0")
-    # TODO: remove this once Hopper supports contextual mask
-    sm_major_version = torch.cuda.get_device_properties(0).major
-    if sm_major_version > 8 and max_num_contextuals > 0:
-        pytest.skip("Hopper does not support contextual mask")
-
     init.initialize_distributed()
     init.set_random_seed(1234)
     device = torch.cuda.current_device()
-
-    if not is_causal:
-        max_num_candidates = 0
-
-    ref_hstu_attn = create_hstu_attention(
-        KernelBackend.PYTORCH,
-        num_heads=heads,
-        attention_dim=hidden_dim,
-        linear_dim=hidden_dim,
-        is_causal=is_causal,
+    ln_eps = 1e-5
+    hstu_config = get_hstu_config(
+        hidden_size=hidden_dim_per_head * num_heads,
+        kv_channels=hidden_dim_per_head,
+        num_attention_heads=num_heads,
+        num_layers=1,
+        init_method=torch.nn.init.xavier_uniform_,
+        dtype=dtype,
+        hidden_dropout=dropout_ratio,
+        norm_epsilon=ln_eps,
+        is_causal=causal,
+        kernel_backend=attn_backend,  # attn_backend
+        target_group_size=target_group_size,
+        hstu_layer_type=HSTULayerType.NATIVE,
+        learnable_input_layernorm=learnable_ln,
+        residual=residual,
     )
-    hstu_attn = create_hstu_attention(
-        kernel_backend,
-        num_heads=heads,
-        attention_dim=hidden_dim,
-        linear_dim=hidden_dim,
-        is_causal=is_causal,
+    # hstu_config.kernel_backend = KernelBackend.PYTORCH
+    ref_hstu_layer = HSTULayer(hstu_config)
+    # to create fused hstu layer
+    hstu_config.hstu_layer_type = HSTULayerType.FUSED
+
+    fused_hstu_layer = FusedHSTULayer(hstu_config)
+    fused_hstu_layer.cuda()
+    ref_hstu_layer.cuda()
+
+    hstu_config.kernel_backend = KernelBackend.PYTORCH
+    hstu_config.dtype = torch.float32
+    hstu_config.hstu_layer_type = HSTULayerType.NATIVE
+    fp32_ref_hstu_layer = HSTULayer(hstu_config)
+
+    fp32_ref_hstu_layer.cuda()
+    fp32_ref_hstu_layer.load_state_dict(ref_hstu_layer.state_dict())
+
+    init_weights_from_native(
+        native_module=ref_hstu_layer, fused_module=fused_hstu_layer
+    )
+    if dtype != torch.float32:
+        ref_hstu_layer = Float16Module(hstu_config, ref_hstu_layer)
+        fused_hstu_layer = Float16Module(hstu_config, fused_hstu_layer)
+    ref_hstu_layer.cuda()
+
+    # generate input
+    # TODO: this is not exact, but should be close
+    max_seqlen = max_history_seqlen + max_num_targets + max_num_contextuals
+    lengths = torch.randint(
+        low=1, high=max_seqlen + 1, size=(batchsize,), device=device, dtype=torch.int
     )
 
-    for _ in range(100):
-        lengths = torch.randint(
-            1, max_seqlen + 1, (batchsize,), device=device, dtype=torch.int
+    seq_offsets = length_to_complete_offsets(lengths)
+
+    L = int(seq_offsets[-1].item())
+
+    if attn_backend == KernelBackend.TRITON and max_num_contextuals > 0:
+        pytest.skip("TRITON does not support contextuals")
+
+    if attn_backend == KernelBackend.TRITON and target_group_size > 1:
+        pytest.skip("TRITON does not support target grouped attention")
+    sm_major_version = torch.cuda.get_device_properties(0).major
+
+    if (
+        attn_backend == KernelBackend.CUTLASS
+        and sm_major_version == 9
+        and (target_group_size > 1 or max_num_contextuals > 0)
+    ):
+        pytest.skip(
+            "CUTLASS does not support Hopper with target group size > 1 or contextuals"
         )
-        seq_offsets = length_to_complete_offsets(lengths)
-        L = int(seq_offsets[-1].item())
-        if max_num_candidates == 0:
-            num_candidates = None
-        else:
-            num_candidates = torch.randint(
-                0, max_num_candidates + 1, (batchsize,), device=device
-            )
-            num_candidates = torch.clamp(
-                num_candidates, max=lengths - 1, min=torch.zeros_like(num_candidates)
-            )  # at least 1 history
-        if max_num_contextuals == 0:
-            num_contextuals = None
-        else:
-            num_contextuals = torch.randint(
-                0, max_num_contextuals + 1, (batchsize,), device=device, dtype=torch.int
-            )
-            num_contextuals = torch.clamp(
-                num_contextuals,
-                max=lengths - 1 - num_candidates
-                if num_candidates is not None
-                else lengths - 1,
-                min=torch.zeros_like(num_contextuals),
-            )  # at least 1 history!!
 
-        x = torch.empty(
-            (L, heads, hidden_dim * 3),
-            dtype=dtype,
-            device=torch.device("cuda"),
-        ).uniform_(-0.1, 0.1)
-        q, k, v = torch.split(x, [hidden_dim, hidden_dim, hidden_dim], dim=-1)
-        q = q.requires_grad_(True)
-        k = k.requires_grad_(True)
-        v = v.requires_grad_(True)
+    num_targets = None
+    num_contextuals = None
 
-        ref_out = ref_hstu_attn(
-            q,
-            k,
-            v,
-            seq_offsets,
-            num_candidates=num_candidates,
-            num_contextuals=num_contextuals,
-            max_seqlen=max_seqlen,
+    if max_num_targets > 0:
+        num_targets = torch.randint(
+            low=0,
+            high=max_num_targets + 1,
+            size=(batchsize,),
+            device=device,
+            dtype=torch.int32,
         )
-        dout = torch.randn_like(ref_out) * 0.01
-        ref_out.backward(dout)
-        ref_dq = q.grad.clone()
-        ref_dk = k.grad.clone()
-        ref_dv = v.grad.clone()
+        num_targets = torch.clamp(
+            num_targets, max=lengths - 1, min=torch.zeros_like(num_targets)
+        )  # at least 1 history
 
-        q = q.detach().clone().requires_grad_()
-        k = k.detach().clone().requires_grad_()
-        v = v.detach().clone().requires_grad_()
-        dout = dout.detach().clone()
-        out = hstu_attn(
-            q,
-            k,
-            v,
-            seq_offsets,
-            num_candidates=num_candidates,
-            num_contextuals=num_contextuals,
-            max_seqlen=max_seqlen,
+    if max_num_contextuals > 0:
+        num_contextuals = torch.randint(
+            low=0,
+            high=max_num_contextuals + 1,
+            size=(batchsize,),
+            device=device,
+            dtype=torch.int32,
         )
-        out.backward(dout)
+        num_contextuals = torch.clamp(
+            num_contextuals,
+            max=lengths - 1 - num_targets if num_targets is not None else lengths - 1,
+            min=torch.zeros_like(num_contextuals),
+        )  # at least 1 history!!
 
-        torch.testing.assert_close(ref_out, out, atol=fwd_atol, rtol=fwd_rtol)
-        torch.testing.assert_close(ref_dq, q.grad, atol=bwd_atol, rtol=bwd_rtol)
-        torch.testing.assert_close(ref_dk, k.grad, atol=bwd_atol, rtol=bwd_rtol)
-        torch.testing.assert_close(ref_dv, v.grad, atol=bwd_atol, rtol=bwd_rtol)
-    init.destroy_global_state()
+    input = torch.empty(
+        (L, hidden_dim_per_head * num_heads),
+        dtype=dtype,
+        device=device,
+    ).uniform_(-0.1, 0.1)
+    # sparse the input
+    with torch.no_grad():
+        input = torch.nn.functional.dropout(input, p=input_sparsity, training=True)
+    input.requires_grad_()
+    ref_input = input.detach().clone().requires_grad_()
+    fp32_ref_input = input.float().detach().clone().requires_grad_()
+
+    ctor_nograd_dict = {
+        "seqlen": lengths,
+        "seqlen_offsets": seq_offsets,
+        "max_seqlen": max_seqlen,
+        "max_num_candidates": max_num_targets,
+        "num_candidates": num_targets,
+        "num_candidates_offsets": length_to_complete_offsets(num_targets)
+        if num_targets is not None
+        else None,
+        "contextual_max_seqlen": max_num_contextuals,
+        "contextual_seqlen": num_contextuals,
+        "contextual_seqlen_offsets": length_to_complete_offsets(num_contextuals)
+        if num_contextuals is not None
+        else None,
+    }
+    jd = JaggedData(values=input, **ctor_nograd_dict)
+    ref_jd = JaggedData(values=ref_input, **ctor_nograd_dict)
+    fp32_ref_jd = JaggedData(values=fp32_ref_input, **ctor_nograd_dict)
+
+    out_native = ref_hstu_layer(ref_jd).values
+    out_fused = fused_hstu_layer(jd).values
+    fp32_ref_out_native = fp32_ref_hstu_layer(fp32_ref_jd).values
+
+    assert_hstu_close(out_fused, out_native, fp32_ref_out_native, fwd=True)
+
+    # make the grad_output sparse
+    with torch.no_grad():
+        dout = torch.ones_like(out_native) / (2**8)
+        dout = torch.nn.functional.dropout(dout, p=input_sparsity, training=True)
+
+    # dropout
+    out_native.backward(dout)
+    out_fused.backward(dout)
+    fp32_ref_out_native.backward(dout.float())
+    grad_native = ref_input.grad
+    fp32_grad_ref_native = fp32_ref_input.grad
+    grad_fused = input.grad
+
+    assert_hstu_close(grad_fused, grad_native, fp32_grad_ref_native, fwd=False)

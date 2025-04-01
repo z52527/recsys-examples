@@ -28,7 +28,7 @@ from distributed_recommender.configs import HSTUConfig, RetrievalConfig
 from distributed_recommender.data.utils import RetrievalBatch
 from distributed_recommender.model.base_model import BaseModel
 from distributed_recommender.modules.embedding import ShardedEmbedding
-from distributed_recommender.modules.hstu import HSTUBlock
+from distributed_recommender.modules.hstu_block import HSTUBlock
 from distributed_recommender.modules.metrics.metric_modules import (
     RetrievalTaskMetricWithSampling,
 )

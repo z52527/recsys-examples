@@ -1,0 +1,144 @@
+import pytest
+import torch
+from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
+
+import distributed_recommender.utils.initialize as init
+from distributed_recommender.configs import get_hstu_config
+from distributed_recommender.data.utils import Batch, FeatureConfig
+from distributed_recommender.modules.hstu_block import HSTUBlock
+from distributed_recommender.utils.tensor_initializer import UniformInitializer
+
+
+@pytest.mark.parametrize(
+    "contextual_feature_names", [[], ["user_feature0", "user_feature1"]]
+)
+@pytest.mark.parametrize("action_feature_name", ["action", None])
+@pytest.mark.parametrize("max_num_candidates", [10, 0])
+def test_hstu_preprocess(
+    contextual_feature_names,
+    action_feature_name,
+    max_num_candidates,
+    dim_size=8,
+    batch_size=32,
+    max_seqlen=20,
+):
+    init.initialize_distributed()
+    init.set_random_seed(1234)
+    device = torch.cuda.current_device()
+
+    item_feature_name = "item"
+    item_and_action_feature_names = (
+        [item_feature_name]
+        if action_feature_name is None
+        else [item_feature_name, action_feature_name]
+    )
+    feature_configs = [
+        FeatureConfig(
+            feature_names=item_and_action_feature_names,
+            max_item_ids=[1000 for _ in item_and_action_feature_names],
+            max_sequence_length=max_seqlen,
+            is_jagged=True,
+        )
+    ]
+    for n in contextual_feature_names:
+        feature_configs.append(
+            FeatureConfig(
+                feature_names=[n],
+                max_item_ids=[1000],
+                max_sequence_length=max_seqlen,
+                is_jagged=True,
+            )
+        )
+
+    batch = Batch.random(
+        batch_size=batch_size,
+        feature_configs=feature_configs,
+        item_feature_name=item_feature_name,
+        contextual_feature_names=contextual_feature_names,
+        action_feature_name=action_feature_name,
+        max_num_candidates=max_num_candidates,
+        device=device,
+    )
+
+    hstu_config = get_hstu_config(
+        hidden_size=dim_size,
+        kv_channels=128,
+        num_attention_heads=4,
+        num_layers=1,
+        init_method=UniformInitializer,
+        position_encoding_config=None,
+        dtype=torch.float,
+    )
+    hstu_block = HSTUBlock(hstu_config)
+
+    seqlen_sum = torch.sum(batch.features.lengths()).cpu().item()
+    embeddings = KeyedJaggedTensor.from_lengths_sync(
+        keys=batch.features.keys(),
+        values=torch.rand((seqlen_sum, dim_size), device=device),
+        lengths=batch.features.lengths(),
+    )
+    embedding_dict = embeddings.to_dict()
+    item_embedding = embedding_dict[item_feature_name].values()
+    item_embedding_offests_cpu = embedding_dict[item_feature_name].offsets().cpu()
+    if action_feature_name is not None:
+        action_embedding = embedding_dict[action_feature_name].values()
+
+    jd = hstu_block.hstu_preprocess(embeddings=embeddings, batch=batch)
+    for sample_id in range(batch_size):
+        start, end = jd.seqlen_offsets[sample_id], jd.seqlen_offsets[sample_id + 1]
+        cur_sequence_embedding = jd.values[start:end, :]
+        idx = 0
+        for contextual_feature_name in contextual_feature_names:
+            contextual_embedding = embedding_dict[contextual_feature_name].values()
+            contextual_embedding_offsets_cpu = (
+                embedding_dict[contextual_feature_name].offsets().cpu()
+            )
+            cur_start, cur_end = (
+                contextual_embedding_offsets_cpu[sample_id],
+                contextual_embedding_offsets_cpu[sample_id + 1],
+            )
+            for i in range(cur_start, cur_end):
+                assert torch.allclose(
+                    cur_sequence_embedding[idx, :], contextual_embedding[i, :]
+                ), "contextual embedding not match"
+                idx += 1
+        cur_start, cur_end = (
+            item_embedding_offests_cpu[sample_id],
+            item_embedding_offests_cpu[sample_id + 1],
+        )
+        for i in range(cur_start, cur_end):
+            assert torch.allclose(
+                cur_sequence_embedding[idx, :], item_embedding[i, :]
+            ), "item embedding not match"
+            idx += 1
+            if action_feature_name is not None:
+                assert torch.allclose(
+                    cur_sequence_embedding[idx, :], action_embedding[i, :]
+                ), "action embedding not match"
+                idx += 1
+
+    result_jd = hstu_block.hstu_postprocess(jd)
+    for sample_id in range(batch_size):
+        start, end = (
+            result_jd.seqlen_offsets[sample_id],
+            result_jd.seqlen_offsets[sample_id + 1],
+        )
+        result_embedding = result_jd.values[start:end, :]
+        cur_start, cur_end = (
+            item_embedding_offests_cpu[sample_id],
+            item_embedding_offests_cpu[sample_id + 1],
+        )
+        if max_num_candidates > 0:
+            num_candidates_cpu = batch.num_candidates.cpu()
+            cur_num_candidates_cpu = num_candidates_cpu[sample_id].item()
+            candidate_embedding = item_embedding[
+                cur_end - cur_num_candidates_cpu : cur_end, :
+            ]
+            assert torch.allclose(
+                result_embedding, candidate_embedding
+            ), "candidate embedding not match"
+        else:
+            all_item_embedding = item_embedding[cur_start:cur_end, :]
+            assert torch.allclose(
+                result_embedding, all_item_embedding
+            ), "all item embedding not match"

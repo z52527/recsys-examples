@@ -1,0 +1,58 @@
+TrainerArgs.train_batch_size = 32
+TrainerArgs.eval_batch_size = 32
+TrainerArgs.log_interval = 50
+TrainerArgs.eval_interval = 5000
+TrainerArgs.profile = True
+TrainerArgs.profile_step_start = 50
+TrainerArgs.profile_step_end = 80
+TrainerArgs.max_train_iters = 512
+TrainerArgs.max_eval_iters = 16
+
+item_and_action_feature/FeatureArgs.feature_names = ['item', 'action']
+item_and_action_feature/FeatureArgs.max_sequence_length = 4096
+# if False, the generated sequence length per user is fixed to max_sequence_length
+item_and_action_feature/FeatureArgs.is_jagged = False
+
+BenchmarkDatasetArgs.feature_args = [
+    @item_and_action_feature/FeatureArgs(),
+]
+
+item_embedding/DynamicEmbeddingArgs.feature_names = ['item']
+item_embedding/DynamicEmbeddingArgs.table_name = 'item'
+item_embedding/DynamicEmbeddingArgs.item_vocab_size_or_capacity = 400000000 # gross 400M embedding rows
+item_embedding/DynamicEmbeddingArgs.item_vocab_gpu_capacity_ratio = 0.1
+item_embedding/DynamicEmbeddingArgs.evict_strategy = 'lru'
+item_embedding/DynamicEmbeddingArgs.bucket_capacity = 128
+
+action_embedding/EmbeddingArgs.feature_names = ['action']
+action_embedding/EmbeddingArgs.table_name = 'action'
+action_embedding/EmbeddingArgs.item_vocab_size_or_capacity = 100
+action_embedding/EmbeddingArgs.sharding_type = 'data_parallel'
+
+BenchmarkDatasetArgs.embedding_args = [
+    @item_embedding/DynamicEmbeddingArgs(),
+    @action_embedding/EmbeddingArgs(),
+]
+
+BenchmarkDatasetArgs.item_feature_name='item'
+BenchmarkDatasetArgs.contextual_feature_names=[]
+BenchmarkDatasetArgs.action_feature_name='action'
+BenchmarkDatasetArgs.max_num_candidates=0
+
+NetworkArgs.num_layers = 8
+NetworkArgs.num_attention_heads = 4
+NetworkArgs.hidden_size = 256
+# per head dim
+NetworkArgs.kv_channels = 256
+NetworkArgs.dense_initializer_type = 'xavier_uniform'
+NetworkArgs.kernel_backend = 'cutlass'
+
+RankingArgs.prediction_head_arch = [
+    [1],
+]
+RankingArgs.prediction_head_bias = True
+
+OptimizerArgs.optimizer_str = 'adam'
+OptimizerArgs.learning_rate = 1e-3
+
+TensorModelParallelArgs.tensor_model_parallel_size = 1

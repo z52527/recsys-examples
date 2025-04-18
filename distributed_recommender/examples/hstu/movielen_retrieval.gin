@@ -1,0 +1,32 @@
+# torchrun --nproc_per_node 1 --master_addr localhost --master_port 6000  examples/hstu/pretrain_gr_retrieval.py --gin-config-file examples/hstu/movielen_ranking.gin 
+TrainerArgs.train_batch_size = 128
+TrainerArgs.eval_batch_size = 128
+TrainerArgs.eval_interval = 100
+TrainerArgs.log_interval = 100
+TrainerArgs.ckpt_save_interval = -1
+TrainerArgs.seed = 1234
+
+DatasetArgs.dataset_name = 'ml-20m'
+DatasetArgs.max_sequence_length = 200
+DatasetArgs.shuffle = True
+
+NetworkArgs.dtype_str = "bfloat16"
+NetworkArgs.num_layers = 4
+NetworkArgs.num_attention_heads = 4
+NetworkArgs.hidden_size = 256
+NetworkArgs.kv_channels = 64
+NetworkArgs.hidden_dropout = 0
+NetworkArgs.norm_epsilon = 1e-6
+NetworkArgs.is_causal = True
+NetworkArgs.dense_initializer_type = 'normal'
+NetworkArgs.dense_initializer_normal_std = 0.02
+
+OptimizerArgs.optimizer_str = 'adam'
+OptimizerArgs.learning_rate = 1e-3
+OptimizerArgs.adam_beta1 = 0.9
+OptimizerArgs.adam_beta2 = 0.98
+
+RetrievalArgs.num_negatives = 128
+RetrievalArgs.eval_metrics = ("NDCG@10", "NDCG@20", "HR@10")
+
+TensorModelParallelArgs.tensor_model_parallel_size = 1

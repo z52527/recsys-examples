@@ -1,0 +1,7 @@
+sphinx>=7.0
+sphinx-argparse
+sphinx-mdinclude
+sphinx-click
+sphinx-rtd-theme
+myst_parser
+sphinx_copybutton

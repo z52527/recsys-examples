@@ -16,7 +16,7 @@ from typing import List
 
 import torch
 
-from distributed_recommender.utils.nvtx_op import output_nvtx_hook
+from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class MultiTaskLossModule(torch.nn.Module):

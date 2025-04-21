@@ -17,7 +17,7 @@ from typing import List, Tuple, Union, cast
 
 from dynamicemb import DynamicEmbCheckMode, DynamicEmbEvictStrategy
 
-from distributed_recommender.utils.tensor_initializer import BaseInitializer
+from commons.utils.tensor_initializer import BaseInitializer
 
 
 @dataclass
@@ -132,7 +132,7 @@ class RankingConfig(BaseTaskConfig):
         prediction_head_arch (List[List[int]]): Architecture of the prediction head.
         prediction_head_act_type (Union[List[str], str]): Activation types for the prediction head. Defaults to ``'relu'``
         prediction_head_bias (Union[List[bool], bool]): Bias flags for the prediction head. Defaults to ``True``
-        eval_metrics (Tuple[str], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~distributed_recommender.modules.metrics.metric_modules.MetricType`
+        eval_metrics (Tuple[str], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~modules.metrics.metric_modules.MetricType`
           for available metrics. Defaults to ``'AUC'``.
     """
 
@@ -174,7 +174,7 @@ class RetrievalConfig(BaseTaskConfig):
         temperature (float, optional): Temperature for softmax in loss computation. Defaults to 0.05.
         l2_norm_eps (float, optional): Epsilon for L2 normalization. Defaults to 1e-6.
         num_negatives (int, optional): Number of negative samples for loss computation. Defaults to -1.
-        eval_metrics (Tuple[str], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~distributed_recommender.modules.metrics.metric_modules.MetricType`
+        eval_metrics (Tuple[str], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~modules.metrics.metric_modules.MetricType`
           for available metrics. Defaults to ``'NDCG@10'``. Note that for retrieval tasks, a eval metric type str is composed of <MetricTypeStr>+'@'+<k> where k is designated as the top-k retrieval.
     """
 

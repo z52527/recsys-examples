@@ -20,11 +20,11 @@ import torch
 from torch import distributed as dist
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.data import get_data_loader
-from distributed_recommender.data.dummy_dataset import DummySequenceDataset
-from distributed_recommender.data.sequence_dataset import get_dataset
-from distributed_recommender.data.utils import (
+import commons.utils.initialize as init
+from data import get_data_loader
+from data.dummy_dataset import DummySequenceDataset
+from data.sequence_dataset import get_dataset
+from data.utils import (
     FeatureConfig,
     RankingBatch,
     RetrievalBatch,

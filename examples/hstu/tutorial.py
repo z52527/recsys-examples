@@ -24,18 +24,18 @@ import torch
 from dynamicemb import DynamicEmbEvictStrategy
 
 import distributed_recommender
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs import (
+import utils.initialize as init
+from configs import (
     DynamicShardedEmbeddingConfig,
     KernelBackend,
     RankingConfig,
     ShardedEmbeddingConfig,
     get_hstu_config,
 )
-from distributed_recommender.data.utils import RankingBatch
-from distributed_recommender.model.ranking_gr import RankingGR
-from distributed_recommender.modules.embedding import EmbeddingOptimizerParam
-from distributed_recommender.utils.tensor_initializer import UniformInitializer
+from data.utils import RankingBatch
+from model.ranking_gr import RankingGR
+from modules.embedding import EmbeddingOptimizerParam
+from commons.utils.tensor_initializer import UniformInitializer
 
 init.initialize_distributed()
 init.initialize_model_parallel()
@@ -111,19 +111,19 @@ ranking_model_train = RankingGR(hstu_config=hstu_config, task_config=task_config
 batch = RankingBatch.random(
     batch_size=128,
     feature_configs=[
-        distributed_recommender.data.utils.FeatureConfig(
+        data.utils.FeatureConfig(
             feature_names=["user_feat0"],
             max_item_ids=[user_vocab_size],
             max_sequence_length=10,
             is_jagged=True,
         ),
-        distributed_recommender.data.utils.FeatureConfig(
+        data.utils.FeatureConfig(
             feature_names=["user_feat1"],
             max_item_ids=[user_vocab_size],
             max_sequence_length=10,
             is_jagged=True,
         ),
-        distributed_recommender.data.utils.FeatureConfig(
+        data.utils.FeatureConfig(
             feature_names=["item_feat", "act_feat"],
             max_item_ids=[item_vocab_size, action_vocab_size],
             max_sequence_length=180,
@@ -144,5 +144,5 @@ init.destroy_global_state()
 
 save_path = "./checkpoint"
 os.makedirs(save_path, exist_ok=True)
-distributed_recommender.checkpoint.save(save_path, ranking_model_train)
-distributed_recommender.checkpoint.load(save_path, ranking_model_train)
+checkpoint.save(save_path, ranking_model_train)
+checkpoint.load(save_path, ranking_model_train)

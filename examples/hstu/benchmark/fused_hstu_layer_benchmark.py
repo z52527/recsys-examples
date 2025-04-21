@@ -9,17 +9,17 @@ from typing import Callable, Union
 import click
 import nvtx
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs.hstu_config import (
+import utils.initialize as init
+from configs.hstu_config import (
     HSTULayerType,
     KernelBackend,
     get_hstu_config,
 )
-from distributed_recommender.modules.fused_hstu_layer import FusedHSTULayer
-from distributed_recommender.modules.jagged_module import JaggedData
-from distributed_recommender.modules.native_hstu_layer import HSTULayer
-from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
-from distributed_recommender.utils.gpu_timer import IGPUTimer
+from modules.fused_hstu_layer import FusedHSTULayer
+from modules.jagged_module import JaggedData
+from modules.native_hstu_layer import HSTULayer
+from ops.length_to_offsets import length_to_complete_offsets
+from commons.utils.gpu_timer import IGPUTimer
 
 _backend_str_to_type = {
     "cutlass": KernelBackend.CUTLASS,

@@ -31,8 +31,8 @@ import abc
 import torch
 import torch.nn.functional as F
 
-from distributed_recommender.modules.negatives_sampler import NegativesSampler
-from distributed_recommender.modules.similarity.dot_product import DotProductSimilarity
+from modules.negatives_sampler import NegativesSampler
+from modules.similarity.dot_product import DotProductSimilarity
 
 
 class AutoregressiveLoss(torch.nn.Module):

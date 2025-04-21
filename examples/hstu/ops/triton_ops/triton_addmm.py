@@ -25,8 +25,8 @@ import triton
 # @manual=//triton:triton
 import triton.language as tl
 
-from distributed_recommender.ops.triton_ops.common import triton_autotune
-from distributed_recommender.ops.triton_ops.triton_silu import triton_silu_bwd
+from ops.triton_ops.common import triton_autotune
+from ops.triton_ops.triton_silu import triton_silu_bwd
 
 ENABLE_FULL_TURNING_SPACE = False
 

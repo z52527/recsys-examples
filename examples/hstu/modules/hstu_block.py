@@ -5,19 +5,19 @@ from typing import Dict, Optional
 import torch
 from torchrec.sparse.jagged_tensor import JaggedTensor
 
-from distributed_recommender.configs.hstu_config import HSTUConfig, HSTULayerType
-from distributed_recommender.data.utils import RankingBatch
-from distributed_recommender.modules.fused_hstu_layer import FusedHSTULayer
-from distributed_recommender.modules.jagged_module import JaggedData, JaggedModule
-from distributed_recommender.modules.native_hstu_layer import HSTULayer
-from distributed_recommender.modules.position_encoder import HSTUPositionalEncoder
-from distributed_recommender.ops.jagged_tensor_op import concat_2D_jagged_tensors
-from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
-from distributed_recommender.ops.triton_ops.triton_jagged import (  # type: ignore[attr-defined]
+from configs.hstu_config import HSTUConfig, HSTULayerType
+from data.utils import RankingBatch
+from modules.fused_hstu_layer import FusedHSTULayer
+from modules.jagged_module import JaggedData, JaggedModule
+from modules.native_hstu_layer import HSTULayer
+from modules.position_encoder import HSTUPositionalEncoder
+from ops.jagged_tensor_op import concat_2D_jagged_tensors
+from ops.length_to_offsets import length_to_complete_offsets
+from ops.triton_ops.triton_jagged import (  # type: ignore[attr-defined]
     triton_concat_2D_jagged,
     triton_split_2D_jagged,
 )
-from distributed_recommender.utils.nvtx_op import output_nvtx_hook
+from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class HSTUBlock(JaggedModule):

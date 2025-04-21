@@ -6,20 +6,20 @@ import hstu_hopper_cuda as flash_attn_cuda_hopper
 import nvtx
 import torch
 
-from distributed_recommender.configs import KernelBackend
-from distributed_recommender.ops.triton_ops.triton_addmm import (
+from configs import KernelBackend
+from ops.triton_ops.triton_addmm import (
     triton_addmm_bwd,
     triton_addmm_fwd,
 )
-from distributed_recommender.ops.triton_ops.triton_hstu_attention import (
+from ops.triton_ops.triton_hstu_attention import (
     triton_hstu_attention_bwd,
     triton_hstu_attention_fwd,
 )
-from distributed_recommender.ops.triton_ops.triton_layer_norm import (
+from ops.triton_ops.triton_layer_norm import (
     triton_weighted_layer_norm_bwd,
     triton_weighted_layer_norm_fwd,
 )
-from distributed_recommender.ops.triton_ops.triton_norm_mul_dropout import (
+from ops.triton_ops.triton_norm_mul_dropout import (
     triton_layer_norm_mul_dropout_bwd,
     triton_layer_norm_mul_dropout_fwd,
 )

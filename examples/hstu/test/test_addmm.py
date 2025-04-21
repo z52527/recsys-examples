@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from distributed_recommender.ops.triton_ops.triton_addmm import triton_addmm
+from ops.triton_ops.triton_addmm import triton_addmm
 
 
 @pytest.mark.parametrize("m,n,k", [(62, 512, 128), [128, 128, 128]])

@@ -1,11 +1,11 @@
 import pytest
 import torch
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.ops.pt_ops.pt_norm_mul_dropout import (
+import commons.utils.initialize as init
+from ops.pt_ops.pt_norm_mul_dropout import (
     pytorch_norm_mul_dropout,
 )
-from distributed_recommender.ops.triton_ops.triton_norm_mul_dropout import (
+from ops.triton_ops.triton_norm_mul_dropout import (
     triton_norm_mul_dropout,
 )
 

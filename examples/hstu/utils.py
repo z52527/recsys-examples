@@ -26,25 +26,27 @@ from megatron.core import parallel_state
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.optimizer import OptimizerConfig
 
-import distributed_recommender
-from distributed_recommender.configs import (
+from configs import (
     KernelBackend,
     PositionEncodingConfig,
     get_hstu_config,
 )
-from distributed_recommender.model import RankingGR, RetrievalGR
-from distributed_recommender.modules.embedding import (
+from model import RankingGR, RetrievalGR
+from modules.embedding import (
     DynamicShardedEmbeddingConfig,
     EmbeddingOptimizerParam,
     ShardedEmbeddingConfig,
     get_nonfused_embedding_optimizer,
 )
-from distributed_recommender.utils.distributed_utils import collective_assert
-from distributed_recommender.utils.gpu_timer import GPUTimer
-from distributed_recommender.utils.logging import print_rank_0
-from distributed_recommender.utils.stringify import stringify_dict
-from distributed_recommender.utils.tensor_initializer import get_initializer_from_type
+from commons.utils.distributed_utils import collective_assert
+from commons.utils.gpu_timer import GPUTimer
+from commons.utils.logging import print_rank_0
+from commons.utils.stringify import stringify_dict
+from commons.utils.tensor_initializer import get_initializer_from_type
 
+import configs
+import data
+import commons.checkpoint as checkpoint
 
 @gin.configurable
 @dataclass
@@ -312,7 +314,7 @@ def get_data_loader(
         "retrieval",
     ], f"task type should be ranking or retrieval not {task_type}"
     if isinstance(dataset_args, BenchmarkDatasetArgs):
-        from distributed_recommender.data.utils import FeatureConfig
+        from data.utils import FeatureConfig
 
         assert (
             trainer_args.max_train_iters is not None
@@ -348,10 +350,10 @@ def get_data_loader(
             num_generated_batches=100,
             num_tasks=1 if task_type == "ranking" else None,
         )
-        train_dataset = distributed_recommender.data.dummy_dataset.DummySequenceDataset(
+        train_dataset = data.dummy_dataset.DummySequenceDataset(
             batch_size=trainer_args.train_batch_size, **kwargs
         )
-        test_dataset = distributed_recommender.data.dummy_dataset.DummySequenceDataset(
+        test_dataset = data.dummy_dataset.DummySequenceDataset(
             batch_size=trainer_args.eval_batch_size, **kwargs
         )
     else:
@@ -359,7 +361,7 @@ def get_data_loader(
         (
             train_dataset,
             test_dataset,
-        ) = distributed_recommender.data.sequence_dataset.get_dataset(
+        ) = data.sequence_dataset.get_dataset(
             dataset_name=dataset_args.dataset_name,
             max_sequence_length=dataset_args.max_sequence_length,
             max_num_candidates=dataset_args.max_num_candidates,
@@ -371,9 +373,9 @@ def get_data_loader(
             random_seed=trainer_args.seed,
             eval_batch_size=trainer_args.eval_batch_size,
         )
-    return distributed_recommender.data.get_data_loader(
+    return data.get_data_loader(
         train_dataset
-    ), distributed_recommender.data.get_data_loader(test_dataset)
+    ), data.get_data_loader(test_dataset)
 
 
 def create_optimizer_config(network_args: NetworkArgs, optimizer_args: OptimizerArgs):
@@ -426,7 +428,7 @@ def create_embedding_config(
             safe_check_mode = DynamicEmbCheckMode.WARNING
         else:
             safe_check_mode = DynamicEmbCheckMode.IGNORE
-        return distributed_recommender.configs.DynamicShardedEmbeddingConfig(
+        return configs.DynamicShardedEmbeddingConfig(
             feature_names=embedding_args.feature_names,
             table_name=embedding_args.table_name,
             vocab_size=embedding_args.item_vocab_size_or_capacity,
@@ -440,7 +442,7 @@ def create_embedding_config(
             safe_check_mode=safe_check_mode,
             bucket_capacity=embedding_args.bucket_capacity,
         )
-    return distributed_recommender.configs.ShardedEmbeddingConfig(
+    return configs.ShardedEmbeddingConfig(
         feature_names=embedding_args.feature_names,
         table_name=embedding_args.table_name,
         vocab_size=embedding_args.item_vocab_size_or_capacity,
@@ -491,7 +493,7 @@ def maybe_load_ckpts(
     ), f"ckpt_load_dir {ckpt_load_dir} does not exist"
 
     print_rank_0(f"Loading checkpoints from {ckpt_load_dir}")
-    distributed_recommender.checkpoint.load(
+    checkpoint.load(
         ckpt_load_dir, model, dense_optimizer=dense_optimizer
     )
     print_rank_0(f"Checkpoints loaded!!")
@@ -513,7 +515,7 @@ def save_ckpts(
         except Exception as e:
             raise Exception("can't build path:", ckpt_save_dir) from e
     dist.barrier(device_ids=[torch.cuda.current_device()])
-    distributed_recommender.checkpoint.save(
+    checkpoint.save(
         ckpt_save_dir, model, dense_optimizer=dense_optimizer
     )
     print_rank_0(f"Checkpoints saved!!")

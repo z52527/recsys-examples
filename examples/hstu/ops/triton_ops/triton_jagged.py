@@ -39,7 +39,7 @@ import triton
 # @manual=//triton:triton
 import triton.language as tl
 
-from distributed_recommender.ops.triton_ops.common import (
+from ops.triton_ops.common import (
     autotune_max_seq_len,
     switch_to_contiguous_if_needed,
     triton_autotune,

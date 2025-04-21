@@ -21,18 +21,18 @@ import torch
 from megatron.core import parallel_state, tensor_parallel
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.modules.embedding import (
+import commons.utils.initialize as init
+from modules.embedding import (
     DynamicShardedEmbeddingConfig,
     EmbeddingOptimizerParam,
     ShardedEmbedding,
     ShardedEmbeddingConfig,
 )
-from distributed_recommender.modules.metrics.metric_modules import (
+from modules.metrics.metric_modules import (
     RetrievalTaskMetricWithSampling,
 )
-from distributed_recommender.ops.collective_ops import grouped_allgatherv_tensor_list
-from distributed_recommender.utils.tensor_initializer import NormalInitializer
+from ops.collective_ops import grouped_allgatherv_tensor_list
+from commons.utils.tensor_initializer import NormalInitializer
 
 
 @pytest.mark.parametrize("num_embeddings", [10000])

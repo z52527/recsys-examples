@@ -44,7 +44,7 @@ try:
 except OSError:
     pass
 
-from distributed_recommender.ops.triton_ops.common import (
+from ops.triton_ops.common import (
     autotune_max_seq_len,
     prev_power_of_2,
     switch_to_contiguous_if_needed,

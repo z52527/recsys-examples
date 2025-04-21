@@ -4,15 +4,15 @@ import nvtx
 import torch
 import torch.nn.functional as F
 
-from distributed_recommender.configs import HSTUConfig
-from distributed_recommender.configs.hstu_config import HSTULayerType
-from distributed_recommender.modules.hstu_attention import create_hstu_attention
-from distributed_recommender.modules.jagged_module import JaggedData, JaggedModule
-from distributed_recommender.modules.utils import init_mlp_weights_optional_bias
-from distributed_recommender.ops.pt_ops.pt_norm_mul_dropout import (
+from configs import HSTUConfig
+from configs.hstu_config import HSTULayerType
+from modules.hstu_attention import create_hstu_attention
+from modules.jagged_module import JaggedData, JaggedModule
+from modules.utils import init_mlp_weights_optional_bias
+from ops.pt_ops.pt_norm_mul_dropout import (
     pytorch_norm_mul_dropout,
 )
-from distributed_recommender.utils.nvtx_op import output_nvtx_hook
+from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class HSTULayer(JaggedModule):

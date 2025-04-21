@@ -392,31 +392,31 @@ def get_common_preprocessors():
     """
     ml_1m_dp = MovielensDataProcessor(
         "http://files.grouplens.org/datasets/movielens/ml-1m.zip",
-        data_path="data/",
+        data_path="tmp_data/",
         file_name="movielens1m.zip",
         prefix="ml-1m",
     )
     ml_20m_dp = MovielensDataProcessor(
         "http://files.grouplens.org/datasets/movielens/ml-20m.zip",
-        data_path="data/",
+        data_path="tmp_data/",
         file_name="movielens20m.zip",
         prefix="ml-20m",
     )
     kuairand_pure_dp = DLRMKuaiRandProcessor(
         download_url="https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz",
-        data_path="data/",
+        data_path="tmp_data/",
         file_name="KuaiRand-Pure.tar.gz",
         prefix="KuaiRand-Pure",
     )
     kuairand_1k_dp = DLRMKuaiRandProcessor(
         download_url="https://zenodo.org/records/10439422/files/KuaiRand-1K.tar.gz",
-        data_path="data/",
+        data_path="tmp_data/",
         file_name="KuaiRand-1K.tar.gz",
         prefix="KuaiRand-1K",
     )
     kuairand_27k_dp = DLRMKuaiRandProcessor(
         download_url="https://zenodo.org/records/10439422/files/KuaiRand-27K.tar.gz",
-        data_path="data/",
+        data_path="tmp_data/",
         file_name="KuaiRand-27K.tar.gz",
         prefix="KuaiRand-27K",
     )

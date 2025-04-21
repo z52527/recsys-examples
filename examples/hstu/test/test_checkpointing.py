@@ -22,14 +22,19 @@ import torch.distributed as dist
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from torch.distributed._shard.sharded_tensor import ShardedTensor
 
-import distributed_recommender
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.modules.embedding import (
+import commons.utils as init
+from commons.utils.tensor_initializer import NormalInitializer
+from modules.embedding import (
     EmbeddingOptimizerParam,
     ShardedEmbedding,
 )
-from distributed_recommender.utils.distributed_utils import collective_assert
-
+from commons.utils.distributed_utils import collective_assert
+import configs
+import commons.checkpoint as checkpoint
+import data
+import modules
+import commons.utils as utils
+import model
 
 def flatten_state_dict(state_dict):
     search_list = [("", state_dict)]
@@ -75,7 +80,7 @@ def create_model(
     init.set_random_seed(seed)
     device = torch.cuda.current_device()
     embdim = 128
-    hstu_config = distributed_recommender.configs.get_hstu_config(
+    hstu_config = configs.get_hstu_config(
         hidden_size=embdim,
         kv_channels=128,
         num_attention_heads=4,
@@ -84,9 +89,7 @@ def create_model(
         hidden_dropout=0.2,
         dtype=dtype,
     )
-    embedding_initializer = (
-        distributed_recommender.utils.tensor_initializer.NormalInitializer()
-    )
+    embedding_initializer = NormalInitializer()
     embedding_optimizer_param = EmbeddingOptimizerParam(
         optimizer_str=optimizer_type_str,
         learning_rate=1e-3,
@@ -97,7 +100,7 @@ def create_model(
     item_emb_size = 1000
     action_vocab_size = 10
     emb_configs = [
-        distributed_recommender.configs.ShardedEmbeddingConfig(
+        configs.ShardedEmbeddingConfig(
             feature_names=[action_feature_name],
             table_name="act",
             vocab_size=action_vocab_size,
@@ -106,7 +109,7 @@ def create_model(
             initializer=embedding_initializer,
             optimizer_param=embedding_optimizer_param,
         ),
-        distributed_recommender.configs.DynamicShardedEmbeddingConfig(
+        configs.DynamicShardedEmbeddingConfig(
             feature_names=contextual_feature_names + [item_feature_name],
             table_name="item",
             vocab_size=item_emb_size,
@@ -119,13 +122,13 @@ def create_model(
     batch_kwargs = dict(
         batch_size=32,
         feature_configs=[
-            distributed_recommender.data.utils.FeatureConfig(
+            data.utils.FeatureConfig(
                 feature_names=contextual_feature_names,
                 max_item_ids=[item_emb_size for _ in contextual_feature_names],
                 max_sequence_length=10,
                 is_jagged=True,
             ),
-            distributed_recommender.data.utils.FeatureConfig(
+            data.utils.FeatureConfig(
                 feature_names=[item_feature_name, action_feature_name],
                 max_item_ids=[item_emb_size, action_vocab_size],
                 max_sequence_length=100,
@@ -140,25 +143,25 @@ def create_model(
     )
     if task_type == "ranking":
         num_tasks = 1
-        task_config = distributed_recommender.configs.RankingConfig(
+        task_config = configs.RankingConfig(
             embedding_configs=emb_configs,
             prediction_head_arch=[[128, 10, 1] for _ in range(num_tasks)],
         )
-        model_train = distributed_recommender.model.RankingGR(
+        model_train = model.RankingGR(
             hstu_config=hstu_config, task_config=task_config
         )
-        batch = distributed_recommender.data.utils.RankingBatch.random(
+        batch = data.utils.RankingBatch.random(
             num_tasks=num_tasks, **batch_kwargs
         )
     else:
         assert task_type == "retrieval"
-        task_config = distributed_recommender.configs.RetrievalConfig(
+        task_config = configs.RetrievalConfig(
             embedding_configs=emb_configs
         )
-        model_train = distributed_recommender.model.RetrievalGR(
+        model_train = model.RetrievalGR(
             hstu_config=hstu_config, task_config=task_config
         )
-        batch = distributed_recommender.data.utils.RetrievalBatch.random(**batch_kwargs)
+        batch = data.utils.RetrievalBatch.random(**batch_kwargs)
     dense_optimizer_config = OptimizerConfig(
         optimizer=optimizer_type_str,
         lr=1e-3,
@@ -169,7 +172,7 @@ def create_model(
     )
     megatron_module = [
         m
-        for n, m in distributed_recommender.checkpoint.filter_megatron_module(
+        for n, m in checkpoint.filter_megatron_module(
             model_train
         )
     ]
@@ -178,7 +181,7 @@ def create_model(
         megatron_module,
     )
     nonfused_embedding_optimizers = list(
-        distributed_recommender.modules.embedding.get_nonfused_embedding_optimizer(
+        modules.embedding.get_nonfused_embedding_optimizer(
             model_train
         )
     )
@@ -244,11 +247,11 @@ def test_checkpoint_model(
 
     os.makedirs(save_path, exist_ok=True)
 
-    distributed_recommender.checkpoint.save(
+    checkpoint.save(
         save_path, model, dense_optimizer=dense_optimizer
     )
 
-    distributed_recommender.checkpoint.load(
+    checkpoint.load(
         save_path, new_model, dense_optimizer=new_dense_optimizer
     )
 
@@ -270,8 +273,8 @@ def test_checkpoint_model(
         new_dense_optimizer.state_dict(), dense_optimizer.state_dict()
     )
     for a, b in zip(
-        distributed_recommender.checkpoint.find_sharded_modules(model),
-        distributed_recommender.checkpoint.find_sharded_modules(new_model),
+        checkpoint.find_sharded_modules(model),
+        checkpoint.find_sharded_modules(new_model),
     ):
         _, _, sharded_module = a
         _, _, new_sharded_module = b
@@ -281,12 +284,12 @@ def test_checkpoint_model(
         )
 
     nonfused_embedding_optimizers = list(
-        distributed_recommender.modules.embedding.get_nonfused_embedding_optimizer(
+        modules.embedding.get_nonfused_embedding_optimizer(
             model
         )
     )
     new_nonfused_embedding_optimizers = list(
-        distributed_recommender.modules.embedding.get_nonfused_embedding_optimizer(
+        modules.embedding.get_nonfused_embedding_optimizer(
             new_model
         )
     )
@@ -309,14 +312,14 @@ def test_checkpoint_embedding(
 
     embdim = 128
     embedding_initializer = (
-        distributed_recommender.utils.tensor_initializer.NormalInitializer()
+        utils.tensor_initializer.NormalInitializer()
     )
     embedding_optimizer_param = EmbeddingOptimizerParam(
         optimizer_str=optimizer_type_str,
         learning_rate=1e-3,
     )
     emb_configs = [
-        distributed_recommender.configs.ShardedEmbeddingConfig(
+        configs.ShardedEmbeddingConfig(
             feature_names=["feature0"],
             table_name="table0",
             vocab_size=10000,
@@ -325,7 +328,7 @@ def test_checkpoint_embedding(
             initializer=embedding_initializer,
             optimizer_param=embedding_optimizer_param,
         ),
-        distributed_recommender.configs.ShardedEmbeddingConfig(
+        configs.ShardedEmbeddingConfig(
             feature_names=["feature1"],
             table_name="table1",
             vocab_size=10000,
@@ -334,7 +337,7 @@ def test_checkpoint_embedding(
             initializer=embedding_initializer,
             optimizer_param=embedding_optimizer_param,
         ),
-        distributed_recommender.configs.DynamicShardedEmbeddingConfig(
+        configs.DynamicShardedEmbeddingConfig(
             feature_names=["feature2"],
             table_name="table2",
             vocab_size=10000,
@@ -354,7 +357,7 @@ def test_checkpoint_embedding(
 
     os.makedirs(save_path, exist_ok=True)
 
-    distributed_recommender.checkpoint.save(save_path, embedding)
-    distributed_recommender.checkpoint.load(save_path, embedding)
+    checkpoint.save(save_path, embedding)
+    checkpoint.load(save_path, embedding)
 
     init.destroy_global_state()

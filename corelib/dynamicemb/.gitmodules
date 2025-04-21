@@ -1,0 +1,4 @@
+[submodule "HierarchicalKV"]
+	path = HierarchicalKV
+	url = https://github.com/NVIDIA-Merlin/HierarchicalKV.git
+	branch = master

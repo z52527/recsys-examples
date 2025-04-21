@@ -34,18 +34,10 @@ The lookup kernel algorithms implemented in DynamicEmb primarily leverage portio
 
 ## Pre-requisites
 
-This version depends on the latest TorchRE：
-- Branch [main](https://github.com/pytorch/torchrec) and checkout this commit[6aaf1fa72e884642f39c49ef232162fa3772055e](https://github.com/pytorch/torchrec/commit/6aaf1fa72e884642f39c49ef232162fa3772055e) which supports customized embedding lookup kernel.
+This version depends on the latest TorchRec and FBGEMM_GPU：
+- TorchRec [main](https://github.com/pytorch/torchrec) with commit[6aaf1fa72e884642f39c49ef232162fa3772055e](https://github.com/pytorch/torchrec/commit/6aaf1fa72e884642f39c49ef232162fa3772055e) which supports customized embedding lookup kernel.
+- FBGEMM_GPU using commit [642ccb980d05aa1be00ccd131c5991b0914e2e64](https://github.com/pytorch/FBGEMM/commit/642ccb980d05aa1be00ccd131c5991b0914e2e64)
 - We would like to thank the Meta team and [Huanyu He](https://github.com/TroyGarden) for their support in TorchRec.
-
-### Version Compatibility
-
-Relationship between Different Versions of DynamicEmb and Their Pre-requisites
-
-| DynamicEmb Version | Pre-requisites Version |
-|--------------------|------------------------|
-| v0.1               | TorchREC v0.7          |
-| v0.2               | TorchREC main          |
 
 ## Installation
 

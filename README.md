@@ -4,17 +4,18 @@
 NVIDIA RecSys Examples is a collection of optimized recommender models and components. 
 
 The project includes:
-- distributed-recommender library for large-scale recommendation systems
-- Distributed training capabilities through TorchRec and Megatron-Core integration
+- Examples for large-scale HSTU ranking and retrieval models through TorchRec and Megatron-Core integration
 - HSTU (Hierarchical Sequential Transduction Unit) attention operator support
-- Examples for HSTU ranking and retrieval models
 - Dynamic Embeddings with GPU acceleration
 
 # Get Started
 
-See component-specific documentation for more details:
-- [HSTU documentation](./hstu/README.md)
-- [Distributed recommender examples](./distributed_recommender/examples/hstu/README.md)
+Before running examples, install libs under corelib following instruction in documentaion:
+- [HSTU attention documentation](./corelib/hstu/README.md)
+- [Dynamic Embeddings documentation](./corelib/dynamicemb/README.md)
+
+The examples we supported:
+- [HSTU recommender examples](./examples/hstu/README.md)
 
 # Contribution Guidelines
 Please see our [contributing guidelines](./CONTRIBUTING.md) for details on how to contribute to this project.

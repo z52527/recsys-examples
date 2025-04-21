@@ -17,8 +17,8 @@ from typing import Optional, Union
 
 import torch
 
-from distributed_recommender.configs import KernelBackend
-from distributed_recommender.utils.nvtx_op import output_nvtx_hook
+from configs import KernelBackend
+from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class HSTUAttention(torch.nn.Module):
@@ -106,7 +106,7 @@ class TorchHSTUAttention(HSTUAttention):
         Returns:
             torch.Tensor: Output tensor of shape (T, d).
         """
-        from distributed_recommender.ops.pt_ops.pt_hstu_attention import (
+        from ops.pt_ops.pt_hstu_attention import (
             pytorch_hstu_mha,
         )
 
@@ -186,7 +186,7 @@ class TritonHSTUAttention(HSTUAttention):
         Returns:
             torch.Tensor: Output tensor of shape (T, d).
         """
-        from distributed_recommender.ops.triton_ops.triton_hstu_attention import (  # type: ignore[attr-defined]
+        from ops.triton_ops.triton_hstu_attention import (  # type: ignore[attr-defined]
             triton_hstu_mha,
         )
 

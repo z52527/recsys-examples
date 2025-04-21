@@ -23,9 +23,9 @@ import torchmetrics.classification as classification_metrics
 from megatron.core import parallel_state
 from tqdm import tqdm
 
-from distributed_recommender.modules.embedding import ShardedEmbedding
-from distributed_recommender.ops.collective_ops import grouped_allgatherv_tensor_list
-from distributed_recommender.utils.nvtx_op import output_nvtx_hook
+from modules.embedding import ShardedEmbedding
+from ops.collective_ops import grouped_allgatherv_tensor_list
+from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class MetricType(Enum):

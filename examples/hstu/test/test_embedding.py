@@ -20,15 +20,15 @@ import pytest
 import torch
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
-import distributed_recommender
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.modules.embedding import (
+import commons.utils.initialize as init
+import commons.checkpoint as checkpoint
+from modules.embedding import (
     DynamicShardedEmbeddingConfig,
     EmbeddingOptimizerParam,
     ShardedEmbedding,
     ShardedEmbeddingConfig,
 )
-from distributed_recommender.utils.tensor_initializer import (
+from commons.utils.tensor_initializer import (
     NormalInitializer,
     UniformInitializer,
 )
@@ -108,7 +108,7 @@ def test_embedding(
                 assert param_sharding.compute_kernel == "DynamicEmb"
 
     world_size = torch.distributed.get_world_size()
-    sharded_module = distributed_recommender.checkpoint.find_sharded_modules(embedding)
+    sharded_module = checkpoint.find_sharded_modules(embedding)
     for _, _, m in sharded_module:
         for n, p in m.named_parameters():
             if "table2" in n:

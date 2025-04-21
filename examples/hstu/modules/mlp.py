@@ -17,7 +17,7 @@ from typing import Callable, List, Optional, Union
 import torch
 from megatron.core.transformer.module import MegatronModule
 
-from distributed_recommender.modules.jagged_module import JaggedData, JaggedModule
+from modules.jagged_module import JaggedData, JaggedModule
 
 
 class MLP(JaggedModule):

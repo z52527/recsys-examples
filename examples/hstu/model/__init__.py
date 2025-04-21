@@ -2,9 +2,9 @@ from typing import Optional
 
 from megatron.core.distributed import DistributedDataParallelConfig
 
-from distributed_recommender.configs import HSTUConfig, RankingConfig, RetrievalConfig
-from distributed_recommender.model.ranking_gr import RankingGR
-from distributed_recommender.model.retrieval_gr import RetrievalGR
+from configs import HSTUConfig, RankingConfig, RetrievalConfig
+from model.ranking_gr import RankingGR
+from model.retrieval_gr import RetrievalGR
 
 from . import ranking_gr, retrieval_gr
 

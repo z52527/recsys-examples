@@ -2,11 +2,11 @@ import pytest
 import torch
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs import get_hstu_config
-from distributed_recommender.data.utils import Batch, FeatureConfig
-from distributed_recommender.modules.hstu_block import HSTUBlock
-from distributed_recommender.utils.tensor_initializer import UniformInitializer
+import commons.utils.initialize as init
+from configs import get_hstu_config
+from data.utils import Batch, FeatureConfig
+from modules.hstu_block import HSTUBlock
+from commons.utils.tensor_initializer import UniformInitializer
 
 
 @pytest.mark.parametrize(

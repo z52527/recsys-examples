@@ -16,20 +16,19 @@ import pytest
 import torch
 from megatron.core import tensor_parallel
 
-import distributed_recommender
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs import (
+import commons.utils.initialize as init
+from configs import (
     DynamicShardedEmbeddingConfig,
     RankingConfig,
     RetrievalConfig,
     ShardedEmbeddingConfig,
     get_hstu_config,
 )
-from distributed_recommender.data.utils import RankingBatch, RetrievalBatch
-from distributed_recommender.model.ranking_gr import RankingGR
-from distributed_recommender.model.retrieval_gr import RetrievalGR
-from distributed_recommender.modules.embedding import EmbeddingOptimizerParam
-from distributed_recommender.utils.tensor_initializer import UniformInitializer
+from data.utils import RankingBatch, RetrievalBatch
+from model.ranking_gr import RankingGR
+from model.retrieval_gr import RetrievalGR
+from modules.embedding import EmbeddingOptimizerParam
+from commons.utils.tensor_initializer import UniformInitializer
 
 
 @pytest.mark.parametrize("model_type", ["ranking", "retrieval"])
@@ -97,7 +96,7 @@ def test_gr_forward_backward(
         ),
     ]
     feature_configs = [
-        distributed_recommender.data.utils.FeatureConfig(
+        data.utils.FeatureConfig(
             feature_names=["item_feat", "act_feat"],
             max_item_ids=[item_emb_size, action_vocab_size],
             max_sequence_length=item_max_seqlen + max_num_candidates,
@@ -106,7 +105,7 @@ def test_gr_forward_backward(
     ]
     if max_contextual_seqlen > 0:
         feature_configs.append(
-            distributed_recommender.data.utils.FeatureConfig(
+            data.utils.FeatureConfig(
                 feature_names=["context_feat"],
                 max_item_ids=[context_emb_size],
                 max_sequence_length=10,

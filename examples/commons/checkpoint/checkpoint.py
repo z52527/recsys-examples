@@ -27,7 +27,7 @@ from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.transformer.module import Float16Module, MegatronModule
 from torch import nn
 
-from distributed_recommender.utils.logging import print_rank_0
+from commons.utils.logging import print_rank_0
 
 
 def get_unwrapped_megatron_module(module):

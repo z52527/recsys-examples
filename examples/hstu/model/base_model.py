@@ -17,7 +17,7 @@ from typing import Tuple
 
 import torch
 
-from distributed_recommender.data.utils import Batch
+from data.utils import Batch
 
 
 class BaseModel(torch.nn.Module):

@@ -40,9 +40,9 @@ from utils import (
     train,
 )
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs import RetrievalConfig
-from distributed_recommender.model import get_retrieval_model
+import commons.utils.initialize as init
+from configs import RetrievalConfig
+from model import get_retrieval_model
 
 
 @gin.configurable

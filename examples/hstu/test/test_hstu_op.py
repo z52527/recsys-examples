@@ -6,15 +6,15 @@ import pytest
 import torch
 from megatron.core.transformer.module import Float16Module
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs import get_hstu_config
-from distributed_recommender.configs.hstu_config import HSTULayerType, KernelBackend
-from distributed_recommender.modules.hstu_attention import create_hstu_attention
-from distributed_recommender.modules.jagged_module import JaggedData
-from distributed_recommender.modules.native_hstu_layer import HSTULayer
-from distributed_recommender.ops.fused_hstu_op import fused_hstu_op
-from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
-from distributed_recommender.utils.hstu_assert_close import assert_hstu_close
+import commons.utils.initialize as init
+from configs import get_hstu_config
+from configs.hstu_config import HSTULayerType, KernelBackend
+from modules.hstu_attention import create_hstu_attention
+from modules.jagged_module import JaggedData
+from modules.native_hstu_layer import HSTULayer
+from ops.fused_hstu_op import fused_hstu_op
+from ops.length_to_offsets import length_to_complete_offsets
+from commons.utils.hstu_assert_close import assert_hstu_close
 
 
 def generate_or_copy_parameters(

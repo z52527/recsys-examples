@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from distributed_recommender.ops.triton_ops.triton_silu import triton_silu
+from ops.triton_ops.triton_silu import triton_silu
 
 
 @pytest.mark.parametrize(

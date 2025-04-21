@@ -14,7 +14,7 @@ except ImportError:
         # @manual=//triton:triton
         from triton.language.math import fast_dividef
 
-from distributed_recommender.ops.triton_ops.common import triton_autotune
+from ops.triton_ops.common import triton_autotune
 
 
 def silu_configs():

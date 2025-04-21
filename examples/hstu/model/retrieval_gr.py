@@ -24,24 +24,24 @@ from megatron.core.distributed import (
 )
 from megatron.core.transformer.module import Float16Module
 
-from distributed_recommender.configs import HSTUConfig, RetrievalConfig
-from distributed_recommender.data.utils import RetrievalBatch
-from distributed_recommender.model.base_model import BaseModel
-from distributed_recommender.modules.embedding import ShardedEmbedding
-from distributed_recommender.modules.hstu_block import HSTUBlock
-from distributed_recommender.modules.metrics.metric_modules import (
+from configs import HSTUConfig, RetrievalConfig
+from data.utils import RetrievalBatch
+from model.base_model import BaseModel
+from modules.embedding import ShardedEmbedding
+from modules.hstu_block import HSTUBlock
+from modules.metrics.metric_modules import (
     RetrievalTaskMetricWithSampling,
 )
-from distributed_recommender.modules.negatives_sampler import InBatchNegativesSampler
-from distributed_recommender.modules.output_postprocessors import (
+from modules.negatives_sampler import InBatchNegativesSampler
+from modules.output_postprocessors import (
     L2NormEmbeddingPostprocessor,
 )
-from distributed_recommender.modules.sampled_softmax_loss import SampledSoftmaxLoss
-from distributed_recommender.modules.similarity.dot_product import DotProductSimilarity
-from distributed_recommender.ops.triton_ops.triton_jagged import (  # type: ignore[attr-defined]
+from modules.sampled_softmax_loss import SampledSoftmaxLoss
+from modules.similarity.dot_product import DotProductSimilarity
+from ops.triton_ops.triton_jagged import (  # type: ignore[attr-defined]
     triton_split_2D_jagged,
 )
-from distributed_recommender.utils.nvtx_op import output_nvtx_hook
+from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class RetrievalGR(BaseModel):

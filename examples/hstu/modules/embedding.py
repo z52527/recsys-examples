@@ -48,12 +48,12 @@ from torchrec.modules.embedding_modules import EmbeddingCollection
 from torchrec.optim.optimizers import in_backward_optimizer_filter
 from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
 
-from distributed_recommender.configs.task_config import (
+from configs.task_config import (
     DynamicShardedEmbeddingConfig,
     EmbeddingOptimizerParam,
     ShardedEmbeddingConfig,
 )
-from distributed_recommender.utils.tensor_initializer import BaseInitializer
+from commons.utils.tensor_initializer import BaseInitializer
 
 _optimizer_str_to_optim_type = {
     "adam": EmbOptimType.ADAM,
@@ -314,10 +314,10 @@ class ShardedEmbedding(torch.nn.Module):
         Example:
             >>> # assume we have 2 ranks
             >>> import torch
-            >>> from distributed_recommender.modules.embedding import ShardedEmbedding
-            >>> from distributed_recommender.configs.task_config import ShardedEmbeddingConfig
-            >>> from distributed_recommender.utils.initialize as init
-            >>> from distributed_recommender.utils.logging import print_rank_0
+            >>> from modules.embedding import ShardedEmbedding
+            >>> from configs.task_config import ShardedEmbeddingConfig
+            >>> from commons.utils.initialize as init
+            >>> from commons.utils.logging import print_rank_0
             >>> init.initialize_model_parallel(1) # dp size is 1
             >>> config = ShardedEmbeddingConfig(
             ...     feature_names=["test"],

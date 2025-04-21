@@ -2,11 +2,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from distributed_recommender.ops.triton_ops.triton_layer_norm import (  # triton_rms_norm,
+from ops.triton_ops.triton_layer_norm import (  # triton_rms_norm,
     triton_layer_norm,
     triton_swish_layer_norm,
 )
-from distributed_recommender.utils import initialize as init
+from commons.utils import initialize as init
 
 
 def ref_layernorm(x, weight, bias, eps, swish=False):

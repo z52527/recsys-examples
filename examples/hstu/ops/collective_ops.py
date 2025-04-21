@@ -17,7 +17,7 @@ from typing import List, Optional
 import torch
 import torch.distributed as dist
 
-from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
+from ops.length_to_offsets import length_to_complete_offsets
 
 
 def _split_along_first_dim(input_, pg: Optional[dist.ProcessGroup] = None):

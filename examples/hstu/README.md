@@ -18,7 +18,7 @@ refer to [KuaiRand](https://kuairand.com/).
 ### Preprocessing
 The **distributed-recommender** provides preprocessor scripts to assist in downloading raw data if it is not already present. It processes the raw data into NPZ files and splits the data into training and testing sets.
 ```
-mkdir -p ./tmp && python3 -m distributed_recommender.data.preprocessor --dataset_name ml-1m
+mkdir -p ./tmp && python3 -m data.preprocessor --dataset_name ml-1m
 ```
 The following dataset name is supported:
 * ml-1m

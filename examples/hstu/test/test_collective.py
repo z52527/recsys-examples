@@ -17,13 +17,13 @@ import pytest
 import torch
 from megatron.core import parallel_state, tensor_parallel
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.ops.collective_ops import (
+import commons.utils.initialize as init
+from ops.collective_ops import (
     gather_along_first_dim,
     gatherv_along_first_dim,
     grouped_allgatherv_tensor_list,
 )
-from distributed_recommender.ops.length_to_offsets import length_to_complete_offsets
+from ops.length_to_offsets import length_to_complete_offsets
 
 
 def get_source_and_ref_tensor(shape=(128, 1), dtype=torch.float):

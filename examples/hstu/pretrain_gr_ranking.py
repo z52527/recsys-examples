@@ -40,10 +40,10 @@ from utils import (
     train,
 )
 
-import distributed_recommender.utils.initialize as init
-from distributed_recommender.configs import RankingConfig
-from distributed_recommender.model import get_ranking_model
-from distributed_recommender.utils.logging import print_rank_0
+import commons.utils.initialize as init
+from configs import RankingConfig
+from model import get_ranking_model
+from commons.utils.logging import print_rank_0
 
 
 @gin.configurable

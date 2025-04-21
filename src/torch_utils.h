@@ -1,0 +1,55 @@
+/******************************************************************************
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+******************************************************************************/
+/******************************************************************************
+ * Copyright (c) 2024, Tri Dao.
+ * Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES.
+ ******************************************************************************/
+
+#pragma once
+#include "check.h"
+#include "utils.h"
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <torch/extension.h>
+#include <torch/torch.h>
+// #include <ATen/cuda/DeviceUtils.cuh>
+#include "ATen/AccumulateType.h"
+#include <pybind11/pybind11.h>
+// #include <torch/python.h>
+#include <stdexcept>
+#include <type_traits>
+#include <cstdint>
+
+namespace dyn_emb {
+
+// see
+// https://github.com/pytorch/pytorch/blob/main/torch/csrc/api/include/torch/types.h
+// torch provide a ScalarType 2 cpp type
+// https://discuss.pytorch.org/t/how-to-convert-at-scalartype-to-c-type/195374
+// TODO figure out torch's datatype now have caffe2::TypeMeta and
+// c10::ScalarType
+DataType scalartype_to_datatype(at::ScalarType scalar_type);
+at::ScalarType datatype_to_scalartype(dyn_emb::DataType dtype);
+at::ScalarType convertTypeMetaToScalarType(const caffe2::TypeMeta& typeMeta);
+
+uint64_t device_timestamp();
+
+} // namespace dyn_emb
+
+//PYTHON WRAP
+void bind_utils(py::module& m);

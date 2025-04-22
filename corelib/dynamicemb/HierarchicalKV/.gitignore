@@ -1,0 +1,10 @@
+.DS_Store
+.idea
+.vscode
+build
+.clwb
+cmake-build-debug/
+docs/build
+docs/source/README.md
+docs/source/CONTRIBUTING.md
+docs/source/api

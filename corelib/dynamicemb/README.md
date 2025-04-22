@@ -16,6 +16,7 @@ The lookup kernel algorithms implemented in DynamicEmb primarily leverage portio
   - [DynamicEmb Insertion Behavior Checking Modes](#dynamicemb-insertion-behavior-checking-modes)
 - [Getting Started](#getting-started)
 - [Future Plans](#future-plans)
+- [Acknowledgements](#acknowledgements)
 
 ## Features
 
@@ -34,14 +35,43 @@ The lookup kernel algorithms implemented in DynamicEmb primarily leverage portio
 
 ## Pre-requisites
 
-This version depends on the latest TorchRec and FBGEMM_GPU：
-- TorchRec [main](https://github.com/pytorch/torchrec) with commit[6aaf1fa72e884642f39c49ef232162fa3772055e](https://github.com/pytorch/torchrec/commit/6aaf1fa72e884642f39c49ef232162fa3772055e) which supports customized embedding lookup kernel.
-- FBGEMM_GPU using commit [642ccb980d05aa1be00ccd131c5991b0914e2e64](https://github.com/pytorch/FBGEMM/commit/642ccb980d05aa1be00ccd131c5991b0914e2e64)
-- We would like to thank the Meta team and [Huanyu He](https://github.com/TroyGarden) for their support in TorchRec.
+Currently, dynamicemb is integrated into latest TorchRec main branch, while TorchRec requires FBGEMM_GPU main branch, both of which are not packaged. Temporarily, installing from source code is required. Before installing the 2 libraries, make sure you have PyTorch CUDA version installed (refer to [PyTorch documentation](https://pytorch.org/get-started/locally/)).
+
+1. **FBGEMM_GPU**
+
+Please follow below instructions to build fbgemm_gpu from source code. It may take minutes to finish. 
+
+```bash
+# install setup tools
+pip install --no-cache setuptools==69.5.1 setuptools-git-versioning scikit-build
+git clone --recursive -b main https://github.com/pytorch/FBGEMM.git fbgemm
+cd fbgemm/fbgemm_gpu
+git checkout 642ccb980d05aa1be00ccd131c5991b0914e2e64
+# please specify the proper TORCH_CUDA_ARCH_LIST for your ENV
+python setup.py bdist_wheel --package_variant=cuda -DTORCH_CUDA_ARCH_LIST="8.0 9.0"
+python setup.py install --package_variant=cuda -DTORCH_CUDA_ARCH_LIST="8.0 9.0"
+```
+
+Once above processing is done, please execute `python -c 'import fbgemm_gpu'` to make sure it's properly installed.
+
+2. **TorchRec**
+
+After fbgemm_gpu is installed, you can install TorchRec with below commands.
+
+```bash
+# torchrec depends on below 2 libs
+pip install --no-deps tensordict orjson
+git clone --recursive -b main https://github.com/pytorch/torchrec.git torchrec
+cd torchrec && git checkout 6aaf1fa72e884642f39c49ef232162fa3772055e
+# with --no-deps to prevent from installing dependencies
+pip install --no-deps .
+```
+
+Once above processing is done, please execute `python -c 'import torchrec'` to make sure it's properly installed.
 
 ## Installation
 
-To install DynamicEmb, use the following command:
+To install DynamicEmb, please use the following command:
 
 ```bash
 python setup.py install
@@ -98,3 +128,7 @@ This notebook is designed as an interactive guide, so you can quickly experiment
 4. Support more configurations for dynamic embedding table eviction mechanisms and incremental dump.
 5. Support the separation of backward and optimizer update (required by certain large language model frameworks like Megatron), to better support large-scale GR training.
 6. Add more shard types for dynamic embedding tables, including `table-wise`, `table-row-wise` and `column-wise`.
+
+## Acknowledgements
+
+We would like to thank the Meta team and specially [Huanyu He](https://github.com/TroyGarden) for their support in [TorchRec](https://github.com/pytorch/torchrec). 

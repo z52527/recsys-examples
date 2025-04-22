@@ -13,68 +13,50 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
-import math
 import argparse
+import math
+import sys
 import time
+from typing import Dict, List
+
 import numpy as np
-from typing import List, Dict
 import torch
 import torch.cuda
-import torchrec
 import torch.distributed as dist
-from torchrec.distributed.comm import get_local_size
-from torchrec.distributed.fbgemm_qcomm_codec import (
-    get_qcomm_codecs_registry,
-    QCommsConfig,
-    CommType,
+import torchrec
+from dynamicemb import (
+    DynamicEmbInitializerArgs,
+    DynamicEmbInitializerMode,
+    DynamicEmbTableOptions,
 )
-from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
-
-from torchrec.distributed.planner import (
-    EmbeddingShardingPlanner,
-    Topology,
-    ParameterConstraints,
+from dynamicemb.planner import (
+    DynamicEmbeddingEnumerator,
+    DynamicEmbeddingShardingPlanner,
+    DynamicEmbParameterConstraints,
 )
-from torchrec.distributed.embedding import EmbeddingCollectionSharder
-from torchrec.distributed.types import (
-    ModuleSharder,
-    ShardingType,
-)
-from torchrec.distributed.planner.storage_reservations import (
-    HeuristicalStorageReservation,
-)
-from torchrec import DataType
-from torchrec.distributed.types import (
-    BoundsCheckMode,
-)
+from dynamicemb.shard import DynamicEmbeddingCollectionSharder
+from fbgemm_gpu.split_embedding_configs import EmbOptimType, SparseType
 from torch.distributed.elastic.multiprocessing.errors import record
-
 from torch.distributed.optim import (
     _apply_optimizer_in_backward as apply_optimizer_in_backward,
 )
-
+from torchrec import DataType
+from torchrec.distributed.comm import get_local_size
+from torchrec.distributed.embedding import EmbeddingCollectionSharder
+from torchrec.distributed.fbgemm_qcomm_codec import (
+    CommType,
+    QCommsConfig,
+    get_qcomm_codecs_registry,
+)
 from torchrec.distributed.model_parallel import (
     DefaultDataParallelWrapper,
     DistributedModelParallel,
 )
-
-from fbgemm_gpu.split_embedding_configs import EmbOptimType
-
-
-from dynamicemb.planner import (
-    DynamicEmbParameterConstraints,
-    DynamicEmbParameterSharding,
-    DynamicEmbeddingShardingPlanner,
+from torchrec.distributed.planner import Topology
+from torchrec.distributed.planner.storage_reservations import (
+    HeuristicalStorageReservation,
 )
-from dynamicemb.planner import DynamicEmbeddingEnumerator
-from dynamicemb.shard import DynamicEmbeddingCollectionSharder
-from dynamicemb import (
-    DynamicEmbInitializerMode,
-    DynamicEmbInitializerArgs,
-    DynamicEmbTableOptions,
-)
-from fbgemm_gpu.split_embedding_configs import SparseType
+from torchrec.distributed.types import BoundsCheckMode, ShardingType
 
 
 def str2bool(v):
@@ -122,7 +104,7 @@ def get_comm_precission(precision_str):
 
 def get_planner(args, device, eb_configs):
     dict_const = {}
-    # fuse all table in one table , and use featrue in table
+    # fuse all table in one table , and use feature in table
     use_dynamicemb = True if args.num_dyn_emb_table > 0 else False
     if use_dynamicemb:
         eb_config = eb_configs[0]
@@ -509,8 +491,8 @@ def main(argv: List[str]) -> None:
         "--optimizer_type",
         type=str,
         default="adam",
-        choices=["sgd", "adam", "exact_adagrad" , "row_wise_adagrad"],
-        help="optimzier type.",
+        choices=["sgd", "adam", "exact_adagrad", "row_wise_adagrad"],
+        help="optimizer type.",
     )
 
     parser.add_argument(

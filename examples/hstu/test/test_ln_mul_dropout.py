@@ -12,16 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import commons.utils.initialize as init
 import pytest
 import torch
-
-import commons.utils.initialize as init
-from ops.pt_ops.pt_norm_mul_dropout import (
-    pytorch_norm_mul_dropout,
-)
-from ops.triton_ops.triton_norm_mul_dropout import (
-    triton_norm_mul_dropout,
-)
+from ops.pt_ops.pt_norm_mul_dropout import pytorch_norm_mul_dropout
+from ops.triton_ops.triton_norm_mul_dropout import triton_norm_mul_dropout
 
 
 @pytest.mark.parametrize("training", [True])

@@ -20,11 +20,15 @@ warnings.filterwarnings("ignore", category=SyntaxWarning)
 import argparse
 from dataclasses import dataclass
 from functools import partial  # pylint: disable-unused-import
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, cast
 
+import commons.utils.initialize as init
 import gin
 import torch  # pylint: disable-unused-import
+from commons.utils.logging import print_rank_0
+from configs import RankingConfig
 from megatron.core.optimizer import get_megatron_optimizer
+from model import get_ranking_model
 from utils import (
     DistributedDataParallelArgs,
     NetworkArgs,
@@ -40,19 +44,14 @@ from utils import (
     train,
 )
 
-import commons.utils.initialize as init
-from configs import RankingConfig
-from model import get_ranking_model
-from commons.utils.logging import print_rank_0
-
 
 @gin.configurable
 @dataclass
 class RankingArgs:
-    prediction_head_arch: List[List[int]] = None
+    prediction_head_arch: List[List[int]] = cast(List[List[int]], None)
     prediction_head_act_type: Union[str, List[str]] = "relu"
     prediction_head_bias: Union[bool, List[bool]] = True
-    eval_metrics: Tuple[str] = ("AUC",)
+    eval_metrics: Tuple[str, ...] = ("AUC",)
 
     def __post_init__(self):
         assert (

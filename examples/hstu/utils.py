@@ -19,18 +19,21 @@ from functools import partial  # pylint: disable-unused-import
 from itertools import islice
 from typing import List, Optional, Tuple, Union
 
+import commons.checkpoint as checkpoint
+import configs
+import data
 import gin
 import torch  # pylint: disable-unused-import
 import torch.distributed as dist
+from commons.utils.distributed_utils import collective_assert
+from commons.utils.gpu_timer import GPUTimer
+from commons.utils.logging import print_rank_0
+from commons.utils.stringify import stringify_dict
+from commons.utils.tensor_initializer import get_initializer_from_type
+from configs import KernelBackend, PositionEncodingConfig, get_hstu_config
 from megatron.core import parallel_state
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.optimizer import OptimizerConfig
-
-from configs import (
-    KernelBackend,
-    PositionEncodingConfig,
-    get_hstu_config,
-)
 from model import RankingGR, RetrievalGR
 from modules.embedding import (
     DynamicShardedEmbeddingConfig,
@@ -38,15 +41,7 @@ from modules.embedding import (
     ShardedEmbeddingConfig,
     get_nonfused_embedding_optimizer,
 )
-from commons.utils.distributed_utils import collective_assert
-from commons.utils.gpu_timer import GPUTimer
-from commons.utils.logging import print_rank_0
-from commons.utils.stringify import stringify_dict
-from commons.utils.tensor_initializer import get_initializer_from_type
 
-import configs
-import data
-import commons.checkpoint as checkpoint
 
 @gin.configurable
 @dataclass
@@ -132,7 +127,7 @@ class DynamicEmbeddingArgs(BaseEmbeddingArgs):
         assert self.evict_strategy.lower() in ["lru", "lfu"]
         assert self.safe_check_mode.lower() in ["ignore", "warning", "error"]
 
-    def calculate_and_reset_global_hbm_for_values(self, hidden_size) -> int:
+    def calculate_and_reset_global_hbm_for_values(self, hidden_size):
         if self.global_hbm_for_values is not None:
             return
         assert (
@@ -166,7 +161,7 @@ class FeatureArgs:
 @gin.configurable
 @dataclass
 class BenchmarkDatasetArgs:
-    feature_args: FeatureArgs
+    feature_args: List[FeatureArgs]
     embedding_args: List[Union[EmbeddingArgs, DynamicEmbeddingArgs]]
     item_feature_name: str
     contextual_feature_names: List[str]
@@ -373,9 +368,7 @@ def get_data_loader(
             random_seed=trainer_args.seed,
             eval_batch_size=trainer_args.eval_batch_size,
         )
-    return data.get_data_loader(
-        train_dataset
-    ), data.get_data_loader(test_dataset)
+    return data.get_data_loader(train_dataset), data.get_data_loader(test_dataset)  # type: ignore[attr-defined]
 
 
 def create_optimizer_config(network_args: NetworkArgs, optimizer_args: OptimizerArgs):
@@ -493,9 +486,7 @@ def maybe_load_ckpts(
     ), f"ckpt_load_dir {ckpt_load_dir} does not exist"
 
     print_rank_0(f"Loading checkpoints from {ckpt_load_dir}")
-    checkpoint.load(
-        ckpt_load_dir, model, dense_optimizer=dense_optimizer
-    )
+    checkpoint.load(ckpt_load_dir, model, dense_optimizer=dense_optimizer)
     print_rank_0(f"Checkpoints loaded!!")
 
 
@@ -515,9 +506,7 @@ def save_ckpts(
         except Exception as e:
             raise Exception("can't build path:", ckpt_save_dir) from e
     dist.barrier(device_ids=[torch.cuda.current_device()])
-    checkpoint.save(
-        ckpt_save_dir, model, dense_optimizer=dense_optimizer
-    )
+    checkpoint.save(ckpt_save_dir, model, dense_optimizer=dense_optimizer)
     print_rank_0(f"Checkpoints saved!!")
 
 
@@ -623,11 +612,10 @@ def get_dataset_and_embedding_args() -> (
     ]
 ):
     try:
-        dataset_args = DatasetArgs()
+        dataset_args = DatasetArgs()  # type: ignore[call-arg]
     except:
-        dataset_args = BenchmarkDatasetArgs()
-    if isinstance(dataset_args, BenchmarkDatasetArgs):
-        return dataset_args, dataset_args.embedding_args
+        benchmark_dataset_args = BenchmarkDatasetArgs()  # type: ignore[call-arg]
+        return benchmark_dataset_args, benchmark_dataset_args.embedding_args
     assert isinstance(dataset_args, DatasetArgs)
     if dataset_args.dataset_name == "kuairand-pure":
         return dataset_args, [

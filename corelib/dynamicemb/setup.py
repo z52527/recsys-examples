@@ -14,20 +14,17 @@
 # limitations under the License.
 
 import os
-import torch
 import re
-from setuptools import find_packages, setup
-
-from torch.utils.cpp_extension import (
-    CppExtension,
-    CUDAExtension,
-    BuildExtension,
-    CUDA_HOME,
-)
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
-subprocess.run(["git", "submodule", "update", "--init", "../../third_party/HierarchicalKV"])
+from setuptools import find_packages, setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+subprocess.run(
+    ["git", "submodule", "update", "--init", "../../third_party/HierarchicalKV"]
+)
+
 
 def check_torchrec_version():
     try:
@@ -64,6 +61,7 @@ def find_source_files(directory, extension_pattern, exclude_dirs=[]):
                 full_path = os.path.join(root, file)
                 source_files.append(full_path)
     return source_files
+
 
 if not check_torchrec_version():
     install_torchrec()
@@ -121,15 +119,13 @@ def get_extensions():
     return ext_modules
 
 
-package = find_packages(
-    exclude=(
-        "*test",
-    )
-)
+package = find_packages(exclude=("*test",))
 
 with open(os.path.join(os.path.dirname(__file__), "README.md"), encoding="utf8") as f:
     readme = f.read()
 import time
+
+
 class TimedBuildExtension(BuildExtension):
     def run(self):
         start_time = time.time()
@@ -137,6 +133,7 @@ class TimedBuildExtension(BuildExtension):
         end_time = time.time()
         compilation_time = end_time - start_time
         print(f"compilation_time: {compilation_time}")
+
 
 setup(
     name=library_name,

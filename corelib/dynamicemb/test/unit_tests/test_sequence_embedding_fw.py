@@ -13,69 +13,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import argparse
+import os
+import random
+import sys
 from typing import List
+
 import torch
-import torchrec
 import torch.distributed as dist
-from torchrec.distributed.comm import get_local_size
-from torchrec.distributed.fbgemm_qcomm_codec import (
-    get_qcomm_codecs_registry,
-    QCommsConfig,
-    CommType,
+import torchrec
+from debug import Debugger
+from dynamicemb import (
+    DynamicEmbCheckMode,
+    DynamicEmbInitializerArgs,
+    DynamicEmbInitializerMode,
+    DynamicEmbTableOptions,
 )
-from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
-
-from torchrec.distributed.planner import (
-    EmbeddingShardingPlanner,
-    Topology,
-    ParameterConstraints,
+from dynamicemb.planner import (
+    DynamicEmbeddingEnumerator,
+    DynamicEmbeddingShardingPlanner,
+    DynamicEmbParameterConstraints,
 )
-from torchrec.distributed.embedding import EmbeddingCollectionSharder
-from torchrec.distributed.types import (
-    ModuleSharder,
-    ShardingType,
-)
-from torchrec.distributed.planner.storage_reservations import (
-    HeuristicalStorageReservation,
-)
-
-from torchrec.distributed.types import (
-    BoundsCheckMode,
-)
+from dynamicemb.shard import DynamicEmbeddingCollectionSharder
+from fbgemm_gpu.split_embedding_configs import EmbOptimType, SparseType
 from torch.distributed.elastic.multiprocessing.errors import record
-
 from torch.distributed.optim import (
     _apply_optimizer_in_backward as apply_optimizer_in_backward,
 )
-
+from torchrec.distributed.comm import get_local_size
+from torchrec.distributed.fbgemm_qcomm_codec import (
+    CommType,
+    QCommsConfig,
+    get_qcomm_codecs_registry,
+)
 from torchrec.distributed.model_parallel import (
     DefaultDataParallelWrapper,
     DistributedModelParallel,
 )
-
-from fbgemm_gpu.split_embedding_configs import EmbOptimType
-
-import random
-
-from dynamicemb.planner import (
-    DynamicEmbParameterConstraints,
-    DynamicEmbParameterSharding,
-    DynamicEmbeddingShardingPlanner,
+from torchrec.distributed.planner import ParameterConstraints, Topology
+from torchrec.distributed.planner.storage_reservations import (
+    HeuristicalStorageReservation,
 )
-from dynamicemb.planner import DynamicEmbeddingEnumerator
-from dynamicemb.shard import DynamicEmbeddingCollectionSharder
-from dynamicemb import (
-    DynamicEmbInitializerMode,
-    DynamicEmbInitializerArgs,
-    DynamicEmbTableOptions,
-    DynamicEmbCheckMode,
-)
-from fbgemm_gpu.split_embedding_configs import SparseType
-
-from debug import Debuger
+from torchrec.distributed.types import BoundsCheckMode, ShardingType
 
 
 def str2bool(v):
@@ -314,7 +293,7 @@ def run(args):
             for table_name, plan in plans.items():
                 print(table_name, "\n", plan, "\n")
 
-    debuger = Debuger()
+    debugger = Debugger()
 
     for i in range(args.num_iterations):
         sparse_feature = generate_sparse_feature(
@@ -337,8 +316,8 @@ def run(args):
 
         dyn_emb_features = [feature_idx_to_name(i) for i in range(args.dynamicemb_num)]
 
-        debuger.feature_before_all2all(sparse_feature)
-        debuger.sequence_embds_after_all2all(
+        debugger.feature_before_all2all(sparse_feature)
+        debugger.sequence_embds_after_all2all(
             jagged_tensors, feature_names, dyn_emb_features, dims[0]
         )
         print(f"DynamicEmb iteration {i+1} Passed")
@@ -449,8 +428,8 @@ def main(argv: List[str]) -> None:
         "--optimizer_type",
         type=str,
         default="adam",
-        choices=["sgd", "adam", "exact_adagrad" , "row_wise_adagrad"],
-        help="optimzier type.",
+        choices=["sgd", "adam", "exact_adagrad", "row_wise_adagrad"],
+        help="optimizer type.",
     )
 
     parser.add_argument(
@@ -501,7 +480,7 @@ def main(argv: List[str]) -> None:
         "--data_parallel_embeddings",
         type=str,
         default=None,
-        help="Comma separated data parallell embedding table ids.",
+        help="Comma separated data parallel embedding table ids.",
     )
     parser.add_argument(
         "--platform",

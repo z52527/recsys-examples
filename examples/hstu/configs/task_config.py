@@ -15,9 +15,8 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Union, cast
 
-from dynamicemb import DynamicEmbCheckMode, DynamicEmbEvictStrategy
-
 from commons.utils.tensor_initializer import BaseInitializer
+from dynamicemb import DynamicEmbCheckMode, DynamicEmbEvictStrategy
 
 
 @dataclass
@@ -142,7 +141,7 @@ class RankingConfig(BaseTaskConfig):
     # one head per event
     # [binary cross entropy or multicross]
     # number of tasks/events
-    eval_metrics: Tuple[str] = ("AUC",)
+    eval_metrics: Tuple[str, ...] = ("AUC",)
 
     def __post_init__(self):
         assert (
@@ -174,7 +173,7 @@ class RetrievalConfig(BaseTaskConfig):
         temperature (float, optional): Temperature for softmax in loss computation. Defaults to 0.05.
         l2_norm_eps (float, optional): Epsilon for L2 normalization. Defaults to 1e-6.
         num_negatives (int, optional): Number of negative samples for loss computation. Defaults to -1.
-        eval_metrics (Tuple[str], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~modules.metrics.metric_modules.MetricType`
+        eval_metrics (Tuple[str, ...], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~modules.metrics.metric_modules.MetricType`
           for available metrics. Defaults to ``'NDCG@10'``. Note that for retrieval tasks, a eval metric type str is composed of <MetricTypeStr>+'@'+<k> where k is designated as the top-k retrieval.
     """
 
@@ -182,4 +181,4 @@ class RetrievalConfig(BaseTaskConfig):
     l2_norm_eps: float = 1e-6  # sampled item embedding l2norm eps
 
     num_negatives: int = -1  # number of negative samples used for loss computation
-    eval_metrics: Tuple[str] = ("NDCG@10",)
+    eval_metrics: Tuple[str, ...] = ("NDCG@10",)

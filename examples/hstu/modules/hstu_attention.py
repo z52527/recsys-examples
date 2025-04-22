@@ -16,9 +16,8 @@ import abc
 from typing import Optional, Union
 
 import torch
-
-from configs import KernelBackend
 from commons.utils.nvtx_op import output_nvtx_hook
+from configs import KernelBackend
 
 
 class HSTUAttention(torch.nn.Module):
@@ -106,9 +105,7 @@ class TorchHSTUAttention(HSTUAttention):
         Returns:
             torch.Tensor: Output tensor of shape (T, d).
         """
-        from ops.pt_ops.pt_hstu_attention import (
-            pytorch_hstu_mha,
-        )
+        from ops.pt_ops.pt_hstu_attention import pytorch_hstu_mha
 
         if isinstance(num_contextuals, torch.Tensor):
             num_contextuals = num_contextuals.to(torch.int32)

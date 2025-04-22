@@ -27,12 +27,13 @@ from dynamicemb_extensions import (
 from torchrec.types import DataType
 
 DEFAULT_INDEX_TYPE = torch.int64
-DYNAMICEMB_CSTM_SCORE_CHECK="DYNAMICEMB_CSTM_SCORE_CHECK"
-BATCH_SIZE_PER_DUMP=65536
+DYNAMICEMB_CSTM_SCORE_CHECK = "DYNAMICEMB_CSTM_SCORE_CHECK"
+BATCH_SIZE_PER_DUMP = 65536
+
 
 def warning_for_cstm_score() -> None:
     env = os.getenv(DYNAMICEMB_CSTM_SCORE_CHECK)
-    if env is not None and env == '0':
+    if env is not None and env == "0":
         return False
     return True
 
@@ -163,6 +164,7 @@ class DynamicEmbEvictStrategy(enum.Enum):
     EPOCH_LFU = EvictStrategy.KEpochLfu
     CUSTOMIZED = EvictStrategy.KCustomized
 
+
 class DynamicEmbScoreStrategy(enum.IntEnum):
     """
     Enumeration for different modes to set index-embedding's score. The index-embedding pair with smaller scores will be more likely to be evicted from the embedding table when the table is full.
@@ -170,13 +172,15 @@ class DynamicEmbScoreStrategy(enum.IntEnum):
     dynamicemb allows configuring scores by table. For a table, the scores in the subsequent forward passes are larger than those in the previous ones for modes TIMESTAMP and STEP. Users can also provide customized score(mode CUSTOMIZED) for each table's forward pass.
     Attributes
     ----------
-    TIMESTAMP: In a forward pass, embedding table's scores will be set to global nanosecond timer of device, and due to the timing of GPU scheduling, different scores may have slight differences. Users must not set scores under TIMESTAMP mode. 
+    TIMESTAMP: In a forward pass, embedding table's scores will be set to global nanosecond timer of device, and due to the timing of GPU scheduling, different scores may have slight differences. Users must not set scores under TIMESTAMP mode.
     STEP: Each embedding table has a member `step` which will increment for every forward pass. All scores in each forward pass are the same which is step's value. Users must not set scores under STEP mode.
     CUSTOMIZED: Each embedding table's score are managed by users. Users have to set the score before every forward pass using `set_score` interface.
     """
+
     TIMESTAMP = 0
     STEP = 1
     CUSTOMIZED = 2
+
 
 # Configs used as keys to group HKV variables(considering kernel behaviors, result type).
 @dataclass
@@ -187,10 +191,10 @@ class GroupedHKVConfig:
     device_id: Optional[int] = None
 
 
-# HKV configs can't be infered by context.
+# HKV configs can't be inferred by context.
 @dataclass
 class HKVConfig(GroupedHKVConfig):
-    # Infered from the context.
+    # Inferred from the context.
     dim: Optional[int] = None
     max_capacity: Optional[int] = None
     # Configured by the user.
@@ -200,9 +204,9 @@ class HKVConfig(GroupedHKVConfig):
     safe_check_mode: DynamicEmbCheckMode = DynamicEmbCheckMode.IGNORE
     # Used internally
     local_hbm_for_values: int = 0  # in bytes
-    init_capacity: Optional[int] = (
-        None  # if not set then set to max_capcacity after sharded
-    )
+    init_capacity: Optional[
+        int
+    ] = None  # if not set then set to max_capcacity after sharded
     max_load_factor: float = 0.5  # max load factor before rehash
     block_size: int = 128
     io_block_size: int = 1024
@@ -271,7 +275,7 @@ class DynamicEmbTableOptions(HKVConfig):
         Number of buckets allocated per memory allocation request. Default is 1.
     initializer_args : DynamicEmbInitializerArgs
         Arguments for initializing dynamic embedding vector values. Default is uniform distribution.
-    score_strategy(DynamicEmbScoreStrategy): For the multi-GPUs scenario of model parallelism, every rank's score_strategy should keep the same for one table, as they are the same table, but stored on different ranks. 
+    score_strategy(DynamicEmbScoreStrategy): For the multi-GPUs scenario of model parallelism, every rank's score_strategy should keep the same for one table, as they are the same table, but stored on different ranks.
     safe_check_mode : DynamicEmbCheckMode
         Should dynamic embedding table insert safe check be enabled? By default, it is disabled.
         Please refer to the API documentation for DynamicEmbCheckMode for more information.
@@ -281,7 +285,10 @@ class DynamicEmbTableOptions(HKVConfig):
     For detailed descriptions and additional context on each parameter, please refer to the documentation at
     https://github.com/NVIDIA-Merlin/HierarchicalKV.
     """
-    initializer_args: DynamicEmbInitializerArgs = field(default_factory=DynamicEmbInitializerArgs)
+
+    initializer_args: DynamicEmbInitializerArgs = field(
+        default_factory=DynamicEmbInitializerArgs
+    )
     score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.TIMESTAMP
 
     def __eq__(self, other):
@@ -295,7 +302,7 @@ class DynamicEmbTableOptions(HKVConfig):
         if not isinstance(other, DynamicEmbTableOptions):
             return NotImplementedError
         return not (self == other)
- 
+
     def get_grouped_key(self):
         grouped_key = {f.name: getattr(self, f.name) for f in fields(GroupedHKVConfig)}
         return grouped_key

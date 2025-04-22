@@ -13,37 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import abc
-import copy
-import itertools
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
-from dataclasses import dataclass, fields
-from typing import (
-    Any,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
-from fbgemm_gpu.split_table_batched_embeddings_ops_inference import (
-    IntNBitTableBatchedEmbeddingBagsCodegen,
-)
-from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
-    ComputeDevice,
-    DenseTableBatchedEmbeddingBagsCodegen,
-    EmbeddingLocation,
-    PoolingMode,
-    SparseType,
-    SplitTableBatchedEmbeddingBagsCodegen,
-)
+from fbgemm_gpu.split_table_batched_embeddings_ops_training import PoolingMode
 from torch import nn
-
 from torchrec.distributed.batched_embedding_kernel import (
     BaseBatchedEmbedding,
     BaseBatchedEmbeddingBag,
@@ -51,45 +28,18 @@ from torchrec.distributed.batched_embedding_kernel import (
 from torchrec.distributed.composable.table_batched_embedding_slice import (
     TableBatchedEmbeddingSlice,
 )
-from torchrec.distributed.embedding_kernel import BaseEmbedding, get_state_dict
-
-from torchrec.distributed.embedding_types import (
-    compute_kernel_to_embedding_location,
+from torchrec.distributed.embedding_kernel import get_state_dict
+from torchrec.distributed.embedding_types import (  # EmbeddingComputeKernel,; GroupedEmbeddingConfig,
     GroupedEmbeddingConfig,
-    # EmbeddingComputeKernel,
-    # GroupedEmbeddingConfig,
     ShardedEmbeddingTable,
+    compute_kernel_to_embedding_location,
 )
-from torchrec.distributed.types import (
-    ParameterSharding,
-    Shard,
-    ShardedTensor,
-    ShardedTensorMetadata,
-    ShardMetadata,
-    TensorProperties,
-)
-from torchrec.distributed.utils import append_prefix
-from torchrec.modules.embedding_configs import (
-    data_type_to_dtype,
-    data_type_to_sparse_type,
-    pooling_type_to_pooling_mode,
-)
-from torchrec.optim.fused import (
-    EmptyFusedOptimizer,
-    FusedOptimizer,
-    FusedOptimizerModule,
-)
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
+from torchrec.distributed.types import Shard, ShardedTensor, ShardedTensorMetadata
+from torchrec.modules.embedding_configs import data_type_to_dtype
+from torchrec.optim.fused import EmptyFusedOptimizer, FusedOptimizer
 
 from . import BatchedDynamicEmbeddingTables
-
-from .dynamicemb_config import (
-    data_type_to_dyn_emb,
-    DEFAULT_INDEX_TYPE,
-    DynamicEmbEvictStrategy,
-    DynamicEmbPoolingMode,
-    torch_to_dyn_emb,
-)
+from .dynamicemb_config import DEFAULT_INDEX_TYPE, DynamicEmbPoolingMode
 from .optimizer import string_to_opt_type
 
 

@@ -16,6 +16,9 @@ from collections import OrderedDict
 from typing import Optional, Tuple
 
 import torch
+from commons.utils.nvtx_op import output_nvtx_hook
+from configs import HSTUConfig, RankingConfig
+from data.utils import RankingBatch
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import (
@@ -23,9 +26,6 @@ from megatron.core.distributed import (
     finalize_model_grads,
 )
 from megatron.core.transformer.module import Float16Module
-
-from configs import HSTUConfig, RankingConfig
-from data.utils import RankingBatch
 from model.base_model import BaseModel
 from modules.embedding import ShardedEmbedding
 from modules.hstu_block import HSTUBlock
@@ -33,7 +33,6 @@ from modules.metrics import get_multi_event_metric_module
 from modules.mlp import MLP
 from modules.multi_task_loss_module import MultiTaskLossModule
 from modules.multi_task_over_arch import MultiTaskOverArch
-from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class RankingGR(BaseModel):

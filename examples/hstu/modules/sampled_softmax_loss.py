@@ -30,7 +30,6 @@ import abc
 
 import torch
 import torch.nn.functional as F
-
 from modules.negatives_sampler import NegativesSampler
 from modules.similarity.dot_product import DotProductSimilarity
 

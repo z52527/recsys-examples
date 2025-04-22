@@ -15,7 +15,6 @@
 from typing import List
 
 import torch
-
 from commons.utils.nvtx_op import output_nvtx_hook
 
 

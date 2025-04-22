@@ -13,70 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import argparse
-from typing import List
-import torch
-import torchrec
-import torch.distributed as dist
-from torchrec.distributed.comm import get_local_size
-from torchrec.distributed.fbgemm_qcomm_codec import (
-    get_qcomm_codecs_registry,
-    QCommsConfig,
-    CommType,
-)
-from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
-
-from torchrec.distributed.planner import (
-    EmbeddingShardingPlanner,
-    Topology,
-    ParameterConstraints,
-)
-from torchrec.distributed.embedding import EmbeddingCollectionSharder
-from torchrec.distributed.types import (
-    ModuleSharder,
-    ShardingType,
-)
-from torchrec.distributed.planner.storage_reservations import (
-    HeuristicalStorageReservation,
-)
-
-from torchrec.distributed.types import (
-    BoundsCheckMode,
-)
-from torch.distributed.elastic.multiprocessing.errors import record
-
-from torch.distributed.optim import (
-    _apply_optimizer_in_backward as apply_optimizer_in_backward,
-)
-
-from torchrec.distributed.model_parallel import (
-    DefaultDataParallelWrapper,
-    DistributedModelParallel,
-)
-
+import os
 import random
+import sys
+from typing import Dict, List
 
-from dynamicemb.planner import (
-    DynamicEmbParameterConstraints,
-    DynamicEmbParameterSharding,
-    DynamicEmbeddingShardingPlanner,
-)
-from dynamicemb.planner import DynamicEmbeddingEnumerator
-
-from debug import Debuger
-
+import torch
+import torch.distributed as dist
+import torchrec
 from dynamicemb import (
     BatchedDynamicEmbeddingTables,
-    DynamicEmbPoolingMode,
-    DynamicEmbInitializerMode,
     DynamicEmbInitializerArgs,
-    EmbOptimType,
+    DynamicEmbInitializerMode,
+    DynamicEmbPoolingMode,
     DynamicEmbTableOptions,
+    EmbOptimType,
 )
-
-from typing import Dict
+from torch.distributed.elastic.multiprocessing.errors import record
 
 
 def str2bool(v):
@@ -232,6 +186,7 @@ def test(args):
     dist.barrier()
     dist.destroy_process_group()
 
+
 @record
 def main(argv: List[str]) -> None:
     parser = argparse.ArgumentParser(
@@ -279,7 +234,7 @@ def main(argv: List[str]) -> None:
         type=str,
         default="adagrad",
         choices=["sgd", "adagrad", "rowwise_adagrad"],
-        help="optimzier type.",
+        help="optimizer type.",
     )
     parser.add_argument(
         "--learning_rate",

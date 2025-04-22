@@ -18,7 +18,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import distributed as dist
 from torchrec.distributed.dist_data import KJTAllToAll
-
 from torchrec.distributed.embedding_sharding import BaseSparseFeaturesDist
 from torchrec.distributed.types import Awaitable
 from torchrec.fx.utils import assert_fx_safe

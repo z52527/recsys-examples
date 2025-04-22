@@ -1,0 +1,29 @@
+repos:
+-   repo: https://github.com/pycqa/isort
+    rev: 5.12.0
+    hooks:
+    -   id: isort
+        args: ["--profile", "black"]
+-   repo: https://github.com/PyCQA/autoflake
+    rev: v1.6.1
+    hooks:
+    -   id: autoflake
+        args: ['--in-place', '--remove-all-unused-imports', '--remove-unused-variables']
+-   repo: https://github.com/codespell-project/codespell
+    rev: v2.3.0
+    hooks:
+    -   id: codespell
+        args:
+        - --skip=".git,corelib/hstu/*,third_party/*"
+        - --ignore-words-list=TE,TBE,tbe,dout,retrival
+-   repo: https://github.com/psf/black
+    rev: 23.9.1
+    hooks:
+    -   id: black
+-   repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.1
+    hooks:
+    -   id: mypy
+        entry: mypy examples
+        args: ["--ignore-missing-imports", "--explicit-package-bases"]
+        pass_filenames: false

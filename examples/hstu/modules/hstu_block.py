@@ -3,8 +3,7 @@
 from typing import Dict, Optional
 
 import torch
-from torchrec.sparse.jagged_tensor import JaggedTensor
-
+from commons.utils.nvtx_op import output_nvtx_hook
 from configs.hstu_config import HSTUConfig, HSTULayerType
 from data.utils import RankingBatch
 from modules.fused_hstu_layer import FusedHSTULayer
@@ -17,7 +16,7 @@ from ops.triton_ops.triton_jagged import (  # type: ignore[attr-defined]
     triton_concat_2D_jagged,
     triton_split_2D_jagged,
 )
-from commons.utils.nvtx_op import output_nvtx_hook
+from torchrec.sparse.jagged_tensor import JaggedTensor
 
 
 class HSTUBlock(JaggedModule):

@@ -18,6 +18,12 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union, cast
 import numpy as np
 import torch
 import torch.distributed as dist
+from commons.utils.tensor_initializer import BaseInitializer
+from configs.task_config import (
+    DynamicShardedEmbeddingConfig,
+    EmbeddingOptimizerParam,
+    ShardedEmbeddingConfig,
+)
 from dynamicemb import (
     DynamicEmbInitializerArgs,
     DynamicEmbInitializerMode,
@@ -47,13 +53,6 @@ from torchrec.modules.embedding_configs import EmbeddingConfig, dtype_to_data_ty
 from torchrec.modules.embedding_modules import EmbeddingCollection
 from torchrec.optim.optimizers import in_backward_optimizer_filter
 from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
-
-from configs.task_config import (
-    DynamicShardedEmbeddingConfig,
-    EmbeddingOptimizerParam,
-    ShardedEmbeddingConfig,
-)
-from commons.utils.tensor_initializer import BaseInitializer
 
 _optimizer_str_to_optim_type = {
     "adam": EmbOptimType.ADAM,

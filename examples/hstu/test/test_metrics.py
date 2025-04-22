@@ -16,23 +16,20 @@
 
 import random
 
+import commons.utils.initialize as init
 import pytest
 import torch
+from commons.utils.tensor_initializer import NormalInitializer
 from megatron.core import parallel_state, tensor_parallel
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
-
-import commons.utils.initialize as init
 from modules.embedding import (
     DynamicShardedEmbeddingConfig,
     EmbeddingOptimizerParam,
     ShardedEmbedding,
     ShardedEmbeddingConfig,
 )
-from modules.metrics.metric_modules import (
-    RetrievalTaskMetricWithSampling,
-)
+from modules.metrics.metric_modules import RetrievalTaskMetricWithSampling
 from ops.collective_ops import grouped_allgatherv_tensor_list
-from commons.utils.tensor_initializer import NormalInitializer
+from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 
 @pytest.mark.parametrize("num_embeddings", [10000])

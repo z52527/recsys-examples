@@ -15,10 +15,9 @@
 from typing import List
 
 import torch
-from megatron.core.transformer.module import MegatronModule
-
-from modules.jagged_module import JaggedData, JaggedModule
 from commons.utils.nvtx_op import output_nvtx_hook
+from megatron.core.transformer.module import MegatronModule
+from modules.jagged_module import JaggedData, JaggedModule
 
 
 class MultiTaskOverArch(JaggedModule):

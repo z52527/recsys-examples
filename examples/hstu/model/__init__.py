@@ -1,8 +1,7 @@
 from typing import Optional
 
-from megatron.core.distributed import DistributedDataParallelConfig
-
 from configs import HSTUConfig, RankingConfig, RetrievalConfig
+from megatron.core.distributed import DistributedDataParallelConfig
 from model.ranking_gr import RankingGR
 from model.retrieval_gr import RetrievalGR
 

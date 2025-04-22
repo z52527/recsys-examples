@@ -14,18 +14,17 @@
 # limitations under the License.
 
 import math
-
 import warnings
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torchrec
-from torch import distributed as dist, nn
+from torch import distributed as dist
+from torch import nn
 from torchrec.distributed.comm import get_local_size
 from torchrec.distributed.embedding_types import EmbeddingComputeKernel
 from torchrec.distributed.planner import EmbeddingShardingPlanner, ParameterConstraints
-
 from torchrec.distributed.planner.types import (
     Enumerator,
     Partitioner,
@@ -36,7 +35,6 @@ from torchrec.distributed.planner.types import (
     Topology,
 )
 from torchrec.distributed.sharding_plan import placement
-
 from torchrec.distributed.types import (
     EnumerableShardingSpec,
     ModuleSharder,
@@ -45,7 +43,7 @@ from torchrec.distributed.types import (
     ShardingType,
     ShardMetadata,
 )
-from torchrec.modules.embedding_configs import BaseEmbeddingConfig, DATA_TYPE_NUM_BITS
+from torchrec.modules.embedding_configs import DATA_TYPE_NUM_BITS, BaseEmbeddingConfig
 
 from ..batched_dynamicemb_compute_kernel import (
     BatchedDynamicEmbedding,

@@ -12,12 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import commons.utils.initialize as init
 import fbgemm_gpu  # for jagged_to_padded_dense
 import pytest
 import torch
 from megatron.core import parallel_state, tensor_parallel
-
-import commons.utils.initialize as init
 from ops.collective_ops import (
     gather_along_first_dim,
     gatherv_along_first_dim,

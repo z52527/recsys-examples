@@ -20,12 +20,11 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torchmetrics.classification as classification_metrics
+from commons.utils.nvtx_op import output_nvtx_hook
 from megatron.core import parallel_state
-from tqdm import tqdm
-
 from modules.embedding import ShardedEmbedding
 from ops.collective_ops import grouped_allgatherv_tensor_list
-from commons.utils.nvtx_op import output_nvtx_hook
+from tqdm import tqdm
 
 
 class MetricType(Enum):

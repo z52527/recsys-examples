@@ -22,18 +22,13 @@ from typing import Callable, Union
 
 import click
 import nvtx
-
 import utils.initialize as init
-from configs.hstu_config import (
-    HSTULayerType,
-    KernelBackend,
-    get_hstu_config,
-)
+from commons.utils.gpu_timer import IGPUTimer
+from configs.hstu_config import HSTULayerType, KernelBackend, get_hstu_config
 from modules.fused_hstu_layer import FusedHSTULayer
 from modules.jagged_module import JaggedData
 from modules.native_hstu_layer import HSTULayer
 from ops.length_to_offsets import length_to_complete_offsets
-from commons.utils.gpu_timer import IGPUTimer
 
 _backend_str_to_type = {
     "cutlass": KernelBackend.CUTLASS,

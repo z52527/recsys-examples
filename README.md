@@ -10,7 +10,7 @@ The project includes:
 
 # Get Started
 
-Before running examples, build and install libs under corelib following instruction in documentaion:
+Before running examples, build and install libs under corelib following instruction in documentation:
 - [HSTU attention documentation](./corelib/hstu/README.md)
 - [Dynamic Embeddings documentation](./corelib/dynamicemb/README.md)
 

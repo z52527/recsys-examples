@@ -12,15 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import commons.utils.initialize as init
 import pytest
 import torch
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
-
-import commons.utils.initialize as init
+from commons.utils.tensor_initializer import UniformInitializer
 from configs import get_hstu_config
 from data.utils import Batch, FeatureConfig
 from modules.hstu_block import HSTUBlock
-from commons.utils.tensor_initializer import UniformInitializer
+from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 
 @pytest.mark.parametrize(

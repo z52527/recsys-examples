@@ -75,7 +75,7 @@ __global__ void one_to_one_atomic_vec4_kernel(CopyDesc copy_desc) {
 }
 
 template <typename io_t,    // element type of input/output.
-          typename accum_t, // element type of accumlator.
+          typename accum_t, // element type of accumulator.
           typename id_t,
           int kWarpSize = 32>
 __global__ void multi_to_one_reduce_kernel1_no_vec(
@@ -196,7 +196,7 @@ __global__ void multi_to_one_reduce_kernel2_no_vec(
 }
 
 template <typename io_t,    // element type of input/output.
-          typename accum_t, // element type of accumlator.
+          typename accum_t, // element type of accumulator.
           typename id_t, int kMaxElemPerThread,
           int kWarpSize = 32>
 __global__ void multi_to_one_reduce_kernel1_vec4(

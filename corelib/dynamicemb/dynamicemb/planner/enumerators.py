@@ -14,9 +14,7 @@
 # limitations under the License.
 
 import logging
-
 import math
-import warnings
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -24,31 +22,30 @@ from torch import nn
 from torchrec.distributed.embedding_types import EmbeddingComputeKernel
 from torchrec.distributed.planner.constants import POOLING_FACTOR
 from torchrec.distributed.planner.enumerators import (
+    GUARDED_COMPUTE_KERNELS,
     EmbeddingEnumerator,
     get_partition_by_type,
-    GUARDED_COMPUTE_KERNELS,
 )
 from torchrec.distributed.planner.types import (
-    Enumerator,
-    ParameterConstraints,
-    PartitionByType,
     Shard,
     ShardEstimator,
     ShardingOption,
     Topology,
 )
 from torchrec.distributed.planner.utils import sharder_name
-from torchrec.distributed.sharding_plan import _calculate_cw_shard_sizes_and_offsets
+from torchrec.distributed.sharding_plan import (
+    _calculate_cw_shard_sizes_and_offsets,
+    _calculate_uneven_rw_shard_sizes_and_offsets,
+)
 from torchrec.distributed.types import (
     BoundsCheckMode,
     CacheParams,
+    KeyValueParams,
     ModuleSharder,
     ShardingType,
-    KeyValueParams,
 )
-from torchrec.modules.embedding_tower import EmbeddingTower, EmbeddingTowerCollection
-from torchrec.distributed.sharding_plan import _calculate_cw_shard_sizes_and_offsets, _calculate_uneven_rw_shard_sizes_and_offsets
 from torchrec.modules.embedding_configs import DataType
+from torchrec.modules.embedding_tower import EmbeddingTower, EmbeddingTowerCollection
 
 from .planner import DynamicEmbParameterConstraints
 
@@ -148,6 +145,7 @@ def _calculate_rw_shard_sizes_and_offsets(
 
     return shard_sizes, shard_offsets
 
+
 def calculate_shard_sizes_and_offsets(
     tensor: torch.Tensor,
     world_size: int,
@@ -233,7 +231,9 @@ class DynamicEmbeddingEnumerator(EmbeddingEnumerator):
             The creation and usage are consistent with the same types in TorchREC.
         use_exact_enumerate_order (bool): whether to enumerate shardable parameters in the exact name_children enumeration order
         """
-        super().__init__(topology, batch_size, constraints, estimator, use_exact_enumerate_order)
+        super().__init__(
+            topology, batch_size, constraints, estimator, use_exact_enumerate_order
+        )
         self._constraints = constraints
 
     def enumerate(

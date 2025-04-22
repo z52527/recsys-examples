@@ -13,18 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import shutil
 import time
-import numpy as np
-from typing import List
 from itertools import accumulate
-import copy
+from typing import List
 
 import torch  # usort:skip
 import torch.distributed as dist
-from torch import nn, Tensor  # usort:skip
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor, JaggedTensor
+from torch import Tensor, nn  # usort:skip
+from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
 
 
 class Printer:
@@ -56,7 +55,7 @@ def monitor_debug_folder(folder_path, printer=None):
         time.sleep(1)
 
 
-class Debuger:
+class Debugger:
     def __init__(self, is_sequence: bool = False) -> None:
         self._debug_iter = int(os.getenv("PYHKV_DEBUG_ITER", 0))
 

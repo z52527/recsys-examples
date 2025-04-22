@@ -15,20 +15,19 @@
 from collections import OrderedDict
 from typing import Optional
 
+import commons.utils.initialize as init
 import fbgemm_gpu  # pylint: disable-unused-import
 import pytest
 import torch
-from megatron.core.transformer.module import Float16Module
-
-import commons.utils.initialize as init
+from commons.utils.hstu_assert_close import assert_hstu_close
 from configs import get_hstu_config
 from configs.hstu_config import HSTULayerType, KernelBackend
+from megatron.core.transformer.module import Float16Module
 from modules.hstu_attention import create_hstu_attention
 from modules.jagged_module import JaggedData
 from modules.native_hstu_layer import HSTULayer
 from ops.fused_hstu_op import fused_hstu_op
 from ops.length_to_offsets import length_to_complete_offsets
-from commons.utils.hstu_assert_close import assert_hstu_close
 
 
 def generate_or_copy_parameters(

@@ -16,22 +16,18 @@
 
 from typing import Callable
 
+import commons.checkpoint as checkpoint
+import commons.utils.initialize as init
 import pytest
 import torch
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
-
-import commons.utils.initialize as init
-import commons.checkpoint as checkpoint
+from commons.utils.tensor_initializer import NormalInitializer, UniformInitializer
 from modules.embedding import (
     DynamicShardedEmbeddingConfig,
     EmbeddingOptimizerParam,
     ShardedEmbedding,
     ShardedEmbeddingConfig,
 )
-from commons.utils.tensor_initializer import (
-    NormalInitializer,
-    UniformInitializer,
-)
+from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 
 @pytest.mark.parametrize("num_embeddings", [10000])

@@ -13,27 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import enum
-from typing import List, Optional, Tuple
+import warnings
 from dataclasses import dataclass, field
 from itertools import accumulate
-import warnings
+from typing import List, Optional, Tuple
 
 import torch  # usort:skip
 import torch.distributed as dist
-from torch import nn, Tensor  # usort:skip
-
-from dynamicemb_extensions import DynamicEmbTable
-from dynamicemb_extensions import dyn_emb_rows, dyn_emb_cols, dyn_emb_capacity
-from dynamicemb_extensions import insert_or_assign,insert_and_evict,accum_or_assign,find_or_insert
-from dynamicemb_extensions import assign,find,erase
-from dynamicemb_extensions import DynamicEmbDataType,EvictStrategy
-from dynamicemb_extensions import count_matched, export_batch_matched, device_timestamp
+from dynamicemb_extensions import (
+    DynamicEmbTable,
+    count_matched,
+    device_timestamp,
+    dyn_emb_capacity,
+    dyn_emb_cols,
+    export_batch_matched,
+)
+from torch import Tensor, nn  # usort:skip
 
 from .batched_dynamicemb_function import *
-from .optimizer import *
 from .dynamicemb_config import *
+from .optimizer import *
 from .unique_op import UniqueOp
 
 
@@ -120,48 +120,57 @@ def _export_matched_and_gather(
     # Get the rank of the current process
     rank = dist.get_rank(group=pg)
     world_size = dist.get_world_size(group=pg)
-    device = torch.device(f'cuda:{torch.cuda.current_device()}')
-    
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
     d_num_matched = torch.zeros(1, dtype=torch.uint64, device=device)
     count_matched(dynamic_table, threshold, d_num_matched)
-   
-    gathered_num_matched = [torch.tensor(0, dtype=torch.int64, device=device) for _ in range(world_size)]
+
+    gathered_num_matched = [
+        torch.tensor(0, dtype=torch.int64, device=device) for _ in range(world_size)
+    ]
     dist.all_gather(gathered_num_matched, d_num_matched.to(dtype=torch.int64), group=pg)
 
-    total_matched = sum([t.item() for t in gathered_num_matched]) # t is on device.
+    total_matched = sum([t.item() for t in gathered_num_matched])  # t is on device.
     key_dtype = dyn_emb_to_torch(dynamic_table.key_type())
     value_dtype = dyn_emb_to_torch(dynamic_table.value_type())
     dim: int = dyn_emb_cols(dynamic_table)
 
     ret_keys = torch.empty(total_matched, dtype=key_dtype, device="cpu")
-    ret_vals = torch.empty(total_matched*dim, dtype=value_dtype, device="cpu")
+    ret_vals = torch.empty(total_matched * dim, dtype=value_dtype, device="cpu")
     ret_offset = 0
 
     search_offset = 0
     search_capacity = dyn_emb_capacity(dynamic_table)
     batch_size = batch_size if batch_size < search_capacity else search_capacity
-    
+
     d_keys = torch.empty(batch_size, dtype=key_dtype, device=device)
-    d_vals = torch.empty(batch_size*dim, dtype=value_dtype, device=device)
+    d_vals = torch.empty(batch_size * dim, dtype=value_dtype, device=device)
     d_count = torch.zeros(1, dtype=torch.uint64, device=device)
 
     # Gather keys and values for all ranks
     gathered_keys = [torch.empty_like(d_keys) for _ in range(world_size)]
     gathered_vals = [torch.empty_like(d_vals) for _ in range(world_size)]
-    gathered_counts = [torch.empty_like(d_count, dtype=torch.int64) for _ in range(world_size)]
+    gathered_counts = [
+        torch.empty_like(d_count, dtype=torch.int64) for _ in range(world_size)
+    ]
 
     while search_offset < search_capacity:
-
-        export_batch_matched(dynamic_table, threshold, batch_size, search_offset, d_count, d_keys, d_vals)
+        export_batch_matched(
+            dynamic_table, threshold, batch_size, search_offset, d_count, d_keys, d_vals
+        )
 
         dist.all_gather(gathered_keys, d_keys, group=pg)
         dist.all_gather(gathered_vals, d_vals, group=pg)
         dist.all_gather(gathered_counts, d_count.to(dtype=torch.int64), group=pg)
 
-        for d_keys_, d_vals_, d_count_ in zip(gathered_keys, gathered_vals, gathered_counts):
+        for d_keys_, d_vals_, d_count_ in zip(
+            gathered_keys, gathered_vals, gathered_counts
+        ):
             h_count = d_count_.cpu().item()
             ret_keys[ret_offset : ret_offset + h_count] = d_keys_[0:h_count].cpu()
-            ret_vals[ret_offset * dim : (ret_offset + h_count) * dim] = d_vals_[0:h_count*dim].cpu()
+            ret_vals[ret_offset * dim : (ret_offset + h_count) * dim] = d_vals_[
+                0 : h_count * dim
+            ].cpu()
             ret_offset += h_count
 
         search_offset += batch_size
@@ -169,12 +178,13 @@ def _export_matched_and_gather(
 
     return ret_keys, ret_vals
 
+
 def _export_matched(
     dynamic_table: DynamicEmbTable,
     threshold: int,
     batch_size: int = BATCH_SIZE_PER_DUMP,
 ) -> Tuple[Tensor, Tensor]:
-    device = torch.device(f'cuda:{torch.cuda.current_device()}')
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
     d_num_matched = torch.zeros(1, dtype=torch.uint64, device=device)
     count_matched(dynamic_table, threshold, d_num_matched)
 
@@ -184,31 +194,35 @@ def _export_matched(
     dim: int = dyn_emb_cols(dynamic_table)
 
     ret_keys = torch.empty(total_matched, dtype=key_dtype, device="cpu")
-    ret_vals = torch.empty(total_matched*dim, dtype=value_dtype, device="cpu")
+    ret_vals = torch.empty(total_matched * dim, dtype=value_dtype, device="cpu")
     ret_offset = 0
 
     search_offset = 0
     search_capacity = dyn_emb_capacity(dynamic_table)
     batch_size = batch_size if batch_size < search_capacity else search_capacity
-    
+
     d_keys = torch.empty(batch_size, dtype=key_dtype, device=device)
-    d_vals = torch.empty(batch_size*dim, dtype=value_dtype, device=device)
+    d_vals = torch.empty(batch_size * dim, dtype=value_dtype, device=device)
     d_count = torch.zeros(1, dtype=torch.uint64, device=device)
 
     while search_offset < search_capacity:
-
-        export_batch_matched(dynamic_table, threshold, batch_size, search_offset, d_count, d_keys, d_vals)
+        export_batch_matched(
+            dynamic_table, threshold, batch_size, search_offset, d_count, d_keys, d_vals
+        )
 
         h_count = d_count.cpu().item()
         ret_keys[ret_offset : ret_offset + h_count] = d_keys[0:h_count].cpu()
-        ret_vals[ret_offset * dim : (ret_offset + h_count) * dim] = d_vals[0:h_count*dim].cpu()
+        ret_vals[ret_offset * dim : (ret_offset + h_count) * dim] = d_vals[
+            0 : h_count * dim
+        ].cpu()
         ret_offset += h_count
 
         search_offset += batch_size
         d_count.fill_(0)
 
     return ret_keys, ret_vals
-    
+
+
 class BatchedDynamicEmbeddingTables(nn.Module):
     """
     Dynamic Embedding is based on [HKV](https://github.com/NVIDIA-Merlin/HierarchicalKV/tree/master).
@@ -457,20 +471,30 @@ class BatchedDynamicEmbeddingTables(nn.Module):
     ) -> None:
         if optimizer_type == EmbOptimType.SGD:
             self._optimizer = SGDDynamicEmbeddingOptimizer(
-                optimizer_args, self._dynamicemb_options, self._tables,
+                optimizer_args,
+                self._dynamicemb_options,
+                self._tables,
             )
         elif optimizer_type == EmbOptimType.EXACT_SGD:
             self._optimizer = SGDDynamicEmbeddingOptimizer(
-                optimizer_args, self._dynamicemb_options, self._tables,
+                optimizer_args,
+                self._dynamicemb_options,
+                self._tables,
             )
         elif optimizer_type == EmbOptimType.ADAM:
             self._optimizer = AdamDynamicEmbeddingOptimizer(
-                optimizer_args, self._dynamicemb_options, self._tables,
+                optimizer_args,
+                self._dynamicemb_options,
+                self._tables,
             )
         elif optimizer_type == EmbOptimType.EXACT_ADAGRAD:
-            self._optimizer = AdaGradDynamicEmbeddingOptimizer(optimizer_args,self._dynamicemb_options,self._tables)
+            self._optimizer = AdaGradDynamicEmbeddingOptimizer(
+                optimizer_args, self._dynamicemb_options, self._tables
+            )
         elif optimizer_type == EmbOptimType.EXACT_ROWWISE_ADAGRAD:
-            self._optimizer = RowWiseAdaGradDynamicEmbeddingOptimizer(optimizer_args,self._dynamicemb_options,self._tables)
+            self._optimizer = RowWiseAdaGradDynamicEmbeddingOptimizer(
+                optimizer_args, self._dynamicemb_options, self._tables
+            )
         else:
             raise ValueError(
                 f"Not supported optimizer type ,optimizer type = {optimizer_type} {type(optimizer_type)} {optimizer_type.value}."
@@ -529,45 +553,86 @@ class BatchedDynamicEmbeddingTables(nn.Module):
         # Jost forward it to DynamicEmbeddingFunction
         # return DynamicEmbeddingFunction.apply(indices, offsets, self.table_offsets_in_feature, self.tables, self.total_D,
         #                                       self.dims,self.feature_table_map, self.embedding_dtype, self.pooling_mode, torch.device(self.device_id), 1, self._empty_tensor)
-        
+
         scores = []
         for table_name in self._table_names:
             if table_name not in self._scores.keys():
-                raise RuntimeError(f"Must set score for table '{table_name}' whose score_strategy is customized.")
+                raise RuntimeError(
+                    f"Must set score for table '{table_name}' whose score_strategy is customized."
+                )
             scores.append(self._scores[table_name])
 
         if self.pooling_mode == DynamicEmbPoolingMode.NONE:
-            res = DynamicEmbeddingFunction.apply(indices, offsets, self.use_index_dedup, self.table_offsets_in_feature, self._tables, scores, self.total_D,
-                                            self.dims[0],self.feature_table_map, self.embedding_dtype, self.output_dtype, self.pooling_mode, 
-                                            self._device_num_sms, self._unique_op,torch.device(self.device_id),self._optimizer, self._empty_tensor)
+            res = DynamicEmbeddingFunction.apply(
+                indices,
+                offsets,
+                self.use_index_dedup,
+                self.table_offsets_in_feature,
+                self._tables,
+                scores,
+                self.total_D,
+                self.dims[0],
+                self.feature_table_map,
+                self.embedding_dtype,
+                self.output_dtype,
+                self.pooling_mode,
+                self._device_num_sms,
+                self._unique_op,
+                torch.device(self.device_id),
+                self._optimizer,
+                self._empty_tensor,
+            )
         else:
-            res = DynamicEmbeddingBagFunction.apply(indices, offsets, self.use_index_dedup, self.table_offsets_in_feature, self._tables, scores, self.total_D,
-                                            self.dims,self.feature_table_map, self.embedding_dtype, self.output_dtype, self.pooling_mode,
-                                            self._device_num_sms,self._unique_op, torch.device(self.device_id), self._optimizer, self._empty_tensor)
+            res = DynamicEmbeddingBagFunction.apply(
+                indices,
+                offsets,
+                self.use_index_dedup,
+                self.table_offsets_in_feature,
+                self._tables,
+                scores,
+                self.total_D,
+                self.dims,
+                self.feature_table_map,
+                self.embedding_dtype,
+                self.output_dtype,
+                self.pooling_mode,
+                self._device_num_sms,
+                self._unique_op,
+                torch.device(self.device_id),
+                self._optimizer,
+                self._empty_tensor,
+            )
 
         self._update_score()
         return res
-    
+
     def set_score(
         self,
         named_score: Dict[str, int],
     ) -> None:
         table_names: List[str] = named_score.keys()
         table_scores: List[int] = named_score.values()
-        for table_name, table_score in zip (table_names, table_scores):
+        for table_name, table_score in zip(table_names, table_scores):
             if not isinstance(table_score, int):
-                raise ValueError(f"Table's score is expect to int but got {type(table_score)}")
+                raise ValueError(
+                    f"Table's score is expect to int but got {type(table_score)}"
+                )
             if table_score == 0:
                 raise ValueError(f"Can't set table's score to 0.")
             index = self._table_names.index(table_name)
-            assert self._dynamicemb_options[index].score_strategy == DynamicEmbScoreStrategy.CUSTOMIZED, \
-                   "Can only set score for table whose score_strategy is DynamicEmbScoreStrategy.CUSTOMIZED."
-            
+            assert (
+                self._dynamicemb_options[index].score_strategy
+                == DynamicEmbScoreStrategy.CUSTOMIZED
+            ), "Can only set score for table whose score_strategy is DynamicEmbScoreStrategy.CUSTOMIZED."
+
             if table_name in self._scores and self._scores[table_name] > table_score:
                 if warning_for_cstm_score():
-                    warnings.warn(f"New set score is less than the old one for table '{table_name}': {table_score} < {self._scores[table_name]}", UserWarning)
+                    warnings.warn(
+                        f"New set score is less than the old one for table '{table_name}': {table_score} < {self._scores[table_name]}",
+                        UserWarning,
+                    )
             self._scores[table_name] = table_score
-    
+
     def get_score(self) -> Dict[str, int]:
         return self._scores.copy()
 
@@ -589,19 +654,25 @@ class BatchedDynamicEmbeddingTables(nn.Module):
             if option.score_strategy == DynamicEmbScoreStrategy.TIMESTAMP:
                 new_score = device_timestamp()
                 if new_score < old_score:
-                    warnings.warn(f"Table '{table_name}' 's score({new_score}) is less than old one({old_score}).", UserWarning)
+                    warnings.warn(
+                        f"Table '{table_name}' 's score({new_score}) is less than old one({old_score}).",
+                        UserWarning,
+                    )
                 self._scores[table_name] = new_score
             elif option.score_strategy == DynamicEmbScoreStrategy.STEP:
                 max_uint64 = (2**64) - 1
-                new_score = old_score + 1 
+                new_score = old_score + 1
                 if new_score > max_uint64:
-                    warnings.warn(f"Table '{table_name}' 's score({new_score}) is out of range, reset to 0.", UserWarning)
+                    warnings.warn(
+                        f"Table '{table_name}' 's score({new_score}) is out of range, reset to 0.",
+                        UserWarning,
+                    )
                     self._scores[table_name] = 0
                 else:
                     self._scores[table_name] = new_score
 
     def incremental_dump(
-        self, 
+        self,
         named_thresholds: Dict[str, int] = None,
         pg: Optional[dist.ProcessGroup] = None,
     ) -> Tuple[Dict[str, Tuple[Tensor, Tensor]], Dict[str, int]]:
@@ -614,7 +685,9 @@ class BatchedDynamicEmbeddingTables(nn.Module):
             if not dist.is_initialized() or dist.get_world_size(group=pg) == 1:
                 key, value = _export_matched(self._tables[index], threshold)
             else:
-                key, value = _export_matched_and_gather(self._tables[index], threshold, pg)
+                key, value = _export_matched_and_gather(
+                    self._tables[index], threshold, pg
+                )
             ret_tensors[table_name] = (key, value)
             ret_scores[table_name] = self._scores[table_name]
         return ret_tensors, ret_scores

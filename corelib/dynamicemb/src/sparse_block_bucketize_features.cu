@@ -184,7 +184,7 @@ DLL_PUBLIC Tensor asynchronous_inclusive_cumsum_gpu(const Tensor &t_in) {
   return t_out;
 }
 
-// Kernel for calulating lengthh idx to feature id mapping. Used for block
+// Kernel for calculating length idx to feature id mapping. Used for block
 // bucketize sparse features with variable batch size for row-wise partition
 template <typename offset_t>
 __global__

@@ -17,10 +17,10 @@ import torch
 from dynamicemb import (
     BatchedDynamicEmbeddingTables,
     DynamicEmbEvictStrategy,
-    DynamicEmbStorageConfig,
-    DynamicEmbPoolingMode,
-    DynamicEmbInitializerMode,
     DynamicEmbInitializerArgs,
+    DynamicEmbInitializerMode,
+    DynamicEmbPoolingMode,
+    DynamicEmbStorageConfig,
     EmbOptimType,
 )
 

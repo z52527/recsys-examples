@@ -16,6 +16,9 @@ from collections import OrderedDict
 from typing import Optional, Tuple
 
 import torch
+from commons.utils.nvtx_op import output_nvtx_hook
+from configs import HSTUConfig, RetrievalConfig
+from data.utils import RetrievalBatch
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import (
@@ -23,25 +26,17 @@ from megatron.core.distributed import (
     finalize_model_grads,
 )
 from megatron.core.transformer.module import Float16Module
-
-from configs import HSTUConfig, RetrievalConfig
-from data.utils import RetrievalBatch
 from model.base_model import BaseModel
 from modules.embedding import ShardedEmbedding
 from modules.hstu_block import HSTUBlock
-from modules.metrics.metric_modules import (
-    RetrievalTaskMetricWithSampling,
-)
+from modules.metrics.metric_modules import RetrievalTaskMetricWithSampling
 from modules.negatives_sampler import InBatchNegativesSampler
-from modules.output_postprocessors import (
-    L2NormEmbeddingPostprocessor,
-)
+from modules.output_postprocessors import L2NormEmbeddingPostprocessor
 from modules.sampled_softmax_loss import SampledSoftmaxLoss
 from modules.similarity.dot_product import DotProductSimilarity
 from ops.triton_ops.triton_jagged import (  # type: ignore[attr-defined]
     triton_split_2D_jagged,
 )
-from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class RetrievalGR(BaseModel):

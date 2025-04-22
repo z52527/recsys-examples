@@ -14,11 +14,9 @@
 # limitations under the License.
 
 from itertools import accumulate
-
 from typing import Dict, List, Optional
 
 import torch
-from dynamicemb.batched_dynamicemb_compute_kernel import BatchedDynamicEmbedding
 from dynamicemb_extensions import dedup_input_indices
 from torch.autograd.profiler import record_function
 from torchrec.distributed.embedding import (
@@ -48,7 +46,6 @@ from torchrec.modules.embedding_modules import EmbeddingCollection
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 from ..dynamicemb_config import DynamicEmbKernel
-
 from ..planner.rw_sharding import RwDynamicEmbeddingSharding
 from ..unique_op import UniqueOp
 
@@ -153,67 +150,103 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
             features_by_shards = []
             for i, input_feature in enumerate(input_feature_splits):
                 hash_size_offset = self.get_buffer(f"_hash_size_offset_tensor_{i}")
-                h_table_offset = self.get_buffer(f"_nonfuse_table_feature_offsets_host_{i}")
-                d_table_offset = self.get_buffer(f"_nonfuse_table_feature_offsets_device_{i}")
+                h_table_offset = self.get_buffer(
+                    f"_nonfuse_table_feature_offsets_host_{i}"
+                )
+                d_table_offset = self.get_buffer(
+                    f"_nonfuse_table_feature_offsets_device_{i}"
+                )
 
-                #for debug
-                #hash_size_cumsum = self.get_buffer(
+                # for debug
+                # hash_size_cumsum = self.get_buffer(
                 #    f"_hash_size_cumsum_tensor_{i}"
-                #)
+                # )
 
-                #(
+                # (
                 #    debug_lengths,
                 #    debug_offsets,
                 #    debug_unique_indices,
                 #    debug_reverse_indices,
-                #) = torch.ops.fbgemm.jagged_unique_indices(
+                # ) = torch.ops.fbgemm.jagged_unique_indices(
                 #    hash_size_cumsum,
                 #    hash_size_offset,
                 #    input_feature.offsets().to(torch.int64),
                 #    input_feature.values().to(torch.int64),
-                #)
-                
-                table_num = h_table_offset.shape[0] -1
-                total_B = input_feature.offsets().shape[0] - 1;
-                features = hash_size_offset.shape[0] - 1;
-                local_batchsize = (total_B//features)
+                # )
+
+                table_num = h_table_offset.shape[0] - 1
+                total_B = input_feature.offsets().shape[0] - 1
+                features = hash_size_offset.shape[0] - 1
+                local_batchsize = total_B // features
 
                 indices = input_feature.values()
                 offsets = input_feature.offsets()
                 lengths = input_feature.lengths()
                 dtype_convert = False
-                old_dtype = torch.int64
+                torch.int64
                 if indices.dtype != torch.int64:
-                    old_dtype = indices.dtype
+                    indices.dtype
                     indices_input = indices.to(torch.int64)
                     dtype_convert = True
                 else:
                     indices_input = indices
-                reverse_idx = torch.empty_like(indices, dtype=torch.uint64, device=self._device)
-                unique_idx_list = [torch.empty_like(indices, dtype=torch.int64, device=self._device) for i in range(table_num)] 
-                h_unique_nums = torch.empty(table_num, dtype=torch.uint64, device='cpu')
-                d_unique_nums = torch.empty(table_num, dtype=torch.uint64, device=self._device)
+                reverse_idx = torch.empty_like(
+                    indices, dtype=torch.uint64, device=self._device
+                )
+                unique_idx_list = [
+                    torch.empty_like(indices, dtype=torch.int64, device=self._device)
+                    for i in range(table_num)
+                ]
+                h_unique_nums = torch.empty(table_num, dtype=torch.uint64, device="cpu")
+                d_unique_nums = torch.empty(
+                    table_num, dtype=torch.uint64, device=self._device
+                )
 
-                h_unique_offsets = torch.empty(table_num+1, dtype=torch.uint64, device='cpu')
-                d_unique_offsets = torch.zeros(table_num+1, dtype=torch.uint64, device=self._device)
-                
-                new_offsets = torch.empty_like(offsets,  device=self._device)
-                new_lengths = torch.empty_like(lengths,  device=self._device)
-                dedup_input_indices(indices_input,offsets,h_table_offset,d_table_offset,table_num,
-                                    local_batchsize,reverse_idx,h_unique_nums,d_unique_nums,
-                                    h_unique_offsets,d_unique_offsets,unique_idx_list,new_offsets,new_lengths,self._device_num_sms, self._unique_op)
+                h_unique_offsets = torch.empty(
+                    table_num + 1, dtype=torch.uint64, device="cpu"
+                )
+                d_unique_offsets = torch.zeros(
+                    table_num + 1, dtype=torch.uint64, device=self._device
+                )
+
+                new_offsets = torch.empty_like(offsets, device=self._device)
+                new_lengths = torch.empty_like(lengths, device=self._device)
+                dedup_input_indices(
+                    indices_input,
+                    offsets,
+                    h_table_offset,
+                    d_table_offset,
+                    table_num,
+                    local_batchsize,
+                    reverse_idx,
+                    h_unique_nums,
+                    d_unique_nums,
+                    h_unique_offsets,
+                    d_unique_offsets,
+                    unique_idx_list,
+                    new_offsets,
+                    new_lengths,
+                    self._device_num_sms,
+                    self._unique_op,
+                )
                 unique_num = h_unique_offsets[-1].item()
-                unique_idx = torch.empty(unique_num, dtype=torch.int64, device=indices.device)
-                
-                #TODO: check non_blocking=True is valid for device tensor to device tensor
+                unique_idx = torch.empty(
+                    unique_num, dtype=torch.int64, device=indices.device
+                )
+
+                # TODO: check non_blocking=True is valid for device tensor to device tensor
                 for i in range(table_num):
                     start_pos = h_unique_offsets[i].item()
-                    end_pos = h_unique_offsets[i+1].item()
+                    end_pos = h_unique_offsets[i + 1].item()
                     length = end_pos - start_pos
-                    unique_idx[start_pos:end_pos].copy_(unique_idx_list[i][:length], non_blocking=True)
+                    unique_idx[start_pos:end_pos].copy_(
+                        unique_idx_list[i][:length], non_blocking=True
+                    )
 
                 if dtype_convert:
-                    unique_idx_out = torch.empty(unique_num, dtype=indices.dtype, device=indices.device)               
+                    unique_idx_out = torch.empty(
+                        unique_num, dtype=indices.dtype, device=indices.device
+                    )
                     unique_idx_out.copy_(unique_idx, non_blocking=True)
                 else:
                     unique_idx_out = unique_idx
@@ -229,7 +262,6 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                 ctx.reverse_indices.append(reverse_idx)
                 features_by_shards.append(dedup_features)
         return features_by_shards
-
 
     def input_dist(
         self,

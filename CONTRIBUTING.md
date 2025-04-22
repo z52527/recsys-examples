@@ -29,7 +29,7 @@ into three categories:
 2. Find an issue to work on. The best way is to look for the [good first issue](https://github.com/NVIDIA/recsys-examples/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
     or [help wanted](https://github.com/NVIDIA/recsys-examples/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22) labels
 3. Comment on the issue saying you are going to work on it.
-4. Get familar with the [Coding Guidelines](#coding-guidelines).
+4. Get familiar with the [Coding Guidelines](#coding-guidelines).
 5. Code! Make sure to update unit tests!
 6. When done, [create your pull request](https://github.com/NVIDIA/recsys-examples/compare).
 7. Verify that CI passes all [status checks](https://help.github.com/articles/about-status-checks/), or fix if needed.

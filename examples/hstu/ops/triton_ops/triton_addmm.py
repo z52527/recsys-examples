@@ -24,7 +24,6 @@ import triton
 
 # @manual=//triton:triton
 import triton.language as tl
-
 from ops.triton_ops.common import triton_autotune
 from ops.triton_ops.triton_silu import triton_silu_bwd
 

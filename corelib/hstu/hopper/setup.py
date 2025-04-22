@@ -15,25 +15,19 @@
 # Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # Copyright (c) 2024, NVIDIA Corporation & AFFILIATES.
 
+import copy
+import itertools
+import os
+import platform
+import shutil
+import subprocess
 import sys
 import warnings
-import os
-import copy
-import re
-import shutil
-import ast
 from pathlib import Path
-from packaging.version import parse, Version
-import platform
-import itertools
 
-from setuptools import setup, find_packages, Extension
+from packaging.version import Version, parse
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
-import subprocess
-
-import urllib.request
-import urllib.error
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 with open("../README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -69,66 +63,69 @@ DISABLE_SM8x = os.getenv("HSTU_DISABLE_SM8x", "FALSE") == "TRUE"
 ONLY_COMPILE_SO = os.getenv("HSTU_ONLY_COMPILE_SO", "FALSE") == "TRUE"
 
 if ONLY_COMPILE_SO:
-    CUDA_HOME = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    CUDA_HOME = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if CUDA_HOME is None:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
         CUDA_HOME = os.path.dirname(os.path.dirname(nvcc_path))
 
     COMMON_NVCC_FLAGS = [
-        '-D__CUDA_NO_HALF_OPERATORS__',
-        '-D__CUDA_NO_HALF_CONVERSIONS__',
-        '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
-        '-D__CUDA_NO_HALF2_OPERATORS__',
-        '--expt-relaxed-constexpr',
-        '--compiler-options', "'-fPIC'"
+        "-D__CUDA_NO_HALF_OPERATORS__",
+        "-D__CUDA_NO_HALF_CONVERSIONS__",
+        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-D__CUDA_NO_HALF2_OPERATORS__",
+        "--expt-relaxed-constexpr",
+        "--compiler-options",
+        "'-fPIC'",
     ]
 
     # a navie/minial way to build a cuda so, should only work under unix and may have differences compared to torch's BuildExtension
     def CUDAExtension(name, sources, *args, **kwargs):
-        library_dirs = kwargs.get('library_dirs', [])
-        library_dirs.append(os.path.join(CUDA_HOME, 'lib64'))
-        kwargs['library_dirs'] = library_dirs
-        libraries = kwargs.get('libraries', [])
-        kwargs['libraries'] = libraries
+        library_dirs = kwargs.get("library_dirs", [])
+        library_dirs.append(os.path.join(CUDA_HOME, "lib64"))
+        kwargs["library_dirs"] = library_dirs
+        libraries = kwargs.get("libraries", [])
+        kwargs["libraries"] = libraries
 
-        include_dirs = kwargs.get('include_dirs', [])
-        include_dirs.append(os.path.join(CUDA_HOME, 'include'))
-        kwargs['include_dirs'] = include_dirs
+        include_dirs = kwargs.get("include_dirs", [])
+        include_dirs.append(os.path.join(CUDA_HOME, "include"))
+        kwargs["include_dirs"] = include_dirs
 
-        kwargs['language'] = 'c++'
+        kwargs["language"] = "c++"
         return Extension(name, sources, *args, **kwargs)
 
     class BuildExtension(build_ext):
         def build_extensions(self):
-            self.compiler.src_extensions += ['.cu', '.cuh']
+            self.compiler.src_extensions += [".cu", ".cuh"]
             original_compile = self.compiler._compile
 
-            def unix_wrap_single_compile(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
+            def unix_wrap_single_compile(
+                obj, src, ext, cc_args, extra_postargs, pp_opts
+            ) -> None:
                 # Copy before we make any modifications.
                 cflags = copy.deepcopy(extra_postargs)
                 try:
                     original_compiler = self.compiler.compiler_so
                     if src.endswith(".cu"):
-                        nvcc = [os.path.join(CUDA_HOME, 'bin', 'nvcc')]
-                        self.compiler.set_executable('compiler_so', nvcc)
+                        nvcc = [os.path.join(CUDA_HOME, "bin", "nvcc")]
+                        self.compiler.set_executable("compiler_so", nvcc)
                         if isinstance(cflags, dict):
-                            cflags = COMMON_NVCC_FLAGS + cflags['nvcc']
+                            cflags = COMMON_NVCC_FLAGS + cflags["nvcc"]
                     elif isinstance(cflags, dict):
-                        cflags = cflags['cxx']
+                        cflags = cflags["cxx"]
                     cflags += ["-std=c++17"]
 
                     original_compile(obj, src, ext, cc_args, cflags, pp_opts)
                 finally:
                     # Put the original compiler back in place.
-                    self.compiler.set_executable(
-                        'compiler_so', original_compiler)
+                    self.compiler.set_executable("compiler_so", original_compiler)
 
             self.compiler._compile = unix_wrap_single_compile
             super().build_extensions()
+
 else:
     import torch
-    from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
+    from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
 
 def get_platform():
@@ -147,7 +144,9 @@ def get_platform():
 
 
 def get_cuda_bare_metal_version(cuda_dir):
-    raw_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True)
+    raw_output = subprocess.check_output(
+        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+    )
     output = raw_output.split()
     release_idx = output.index("release") + 1
     bare_metal_version = parse(output[release_idx].split(",")[0])
@@ -225,9 +224,13 @@ if not SKIP_CUDA_BUILD:
     )
 
     if DISABLE_BF16 and DISABLE_FP16 and DISABLE_FP8:
-        raise ValueError("At least one of DISABLE_BF16, DISABLE_FP16, or DISABLE_FP8 must be False")
+        raise ValueError(
+            "At least one of DISABLE_BF16, DISABLE_FP16, or DISABLE_FP8 must be False"
+        )
     if DISABLE_HDIM32 and DISABLE_HDIM64 and DISABLE_HDIM128 and DISABLE_HDIM256:
-        raise ValueError("At least one of DISABLE_HDIM32, DISABLE_HDIM64, DISABLE_HDIM128, or DISABLE_HDIM256 must be False")
+        raise ValueError(
+            "At least one of DISABLE_HDIM32, DISABLE_HDIM64, DISABLE_HDIM128, or DISABLE_HDIM256 must be False"
+        )
     if DISABLE_BACKWARD and not DISABLE_DRAB:
         raise ValueError("Cannot support drab without backward")
     if DISABLE_RAB and not DISABLE_DRAB:
@@ -235,10 +238,20 @@ if not SKIP_CUDA_BUILD:
     if DISABLE_CAUSAL and not DISABLE_TARGET:
         raise ValueError("Cannot support target without causal")
 
-    DTYPE_FWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (["fp16"] if not DISABLE_FP16 else [])
-    DTYPE_FWD_SM90 = (["bf16"] if not DISABLE_BF16 else []) + (["fp16"] if not DISABLE_FP16 else []) + (["e4m3"] if not DISABLE_FP8 else [])
-    DTYPE_BWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (["fp16"] if not DISABLE_FP16 else [])
-    DTYPE_BWD_SM90 = (["bf16"] if not DISABLE_BF16 else []) + (["fp16"] if not DISABLE_FP16 else [])
+    DTYPE_FWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (
+        ["fp16"] if not DISABLE_FP16 else []
+    )
+    DTYPE_FWD_SM90 = (
+        (["bf16"] if not DISABLE_BF16 else [])
+        + (["fp16"] if not DISABLE_FP16 else [])
+        + (["e4m3"] if not DISABLE_FP8 else [])
+    )
+    DTYPE_BWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (
+        ["fp16"] if not DISABLE_FP16 else []
+    )
+    DTYPE_BWD_SM90 = (["bf16"] if not DISABLE_BF16 else []) + (
+        ["fp16"] if not DISABLE_FP16 else []
+    )
     HEAD_DIMENSIONS = (
         []
         + ([32] if not DISABLE_HDIM32 else [])
@@ -247,14 +260,22 @@ if not SKIP_CUDA_BUILD:
         + ([256] if not DISABLE_HDIM256 else [])
     )
 
-    sources_fwd_sm80 = [f"instantiations/flash_fwd_hdim{hdim}_{dtype}_sm80.cu"
-                        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_FWD_SM80)]
-    sources_fwd_sm90 = [f"instantiations/flash_fwd_hdim{hdim}_{dtype}_sm90.cu"
-                        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_FWD_SM90)]
-    sources_bwd_sm80 = [f"instantiations/flash_bwd_hdim{hdim}_{dtype}_sm80.cu"
-                        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_BWD_SM80)]
-    sources_bwd_sm90 = [f"instantiations/flash_bwd_hdim{hdim}_{dtype}_sm90.cu"
-                        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_BWD_SM90)]
+    sources_fwd_sm80 = [
+        f"instantiations/flash_fwd_hdim{hdim}_{dtype}_sm80.cu"
+        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_FWD_SM80)
+    ]
+    sources_fwd_sm90 = [
+        f"instantiations/flash_fwd_hdim{hdim}_{dtype}_sm90.cu"
+        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_FWD_SM90)
+    ]
+    sources_bwd_sm80 = [
+        f"instantiations/flash_bwd_hdim{hdim}_{dtype}_sm80.cu"
+        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_BWD_SM80)
+    ]
+    sources_bwd_sm90 = [
+        f"instantiations/flash_bwd_hdim{hdim}_{dtype}_sm90.cu"
+        for hdim, dtype in itertools.product(HEAD_DIMENSIONS, DTYPE_BWD_SM90)
+    ]
 
     if DISABLE_BACKWARD:
         sources_bwd_sm90 = []
@@ -262,8 +283,10 @@ if not SKIP_CUDA_BUILD:
     torch_cpp_sources = ["flash_api.cpp"]
     cuda_sources = (
         []
-        + (sources_fwd_sm80 if not DISABLE_SM8x else []) + sources_fwd_sm90
-        + (sources_bwd_sm80 if not DISABLE_SM8x else []) + sources_bwd_sm90
+        + (sources_fwd_sm80 if not DISABLE_SM8x else [])
+        + sources_fwd_sm90
+        + (sources_bwd_sm80 if not DISABLE_SM8x else [])
+        + sources_bwd_sm90
     )
     nvcc_flags = [
         "-O3",
@@ -311,14 +334,14 @@ if not SKIP_CUDA_BUILD:
             },
             include_dirs=include_dirs,
             # Without this we get and error about cuTensorMapEncodeTiled not defined
-            libraries=["cuda"]
+            libraries=["cuda"],
         )
     )
 
 
 setup(
     name=PACKAGE_NAME,
-    version="0.1.0" + '+cu' + str(bare_metal_version),
+    version="0.1.0" + "+cu" + str(bare_metal_version),
     packages=find_packages(
         exclude=(
             "build",

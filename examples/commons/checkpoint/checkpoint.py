@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from commons.utils.logging import print_rank_0
 from dynamicemb.dump_load import DynamicEmbDump as dynamic_emb_save
 from dynamicemb.dump_load import DynamicEmbLoad as dynamic_emb_load
 from dynamicemb.dump_load import find_sharded_modules
@@ -26,8 +27,6 @@ from megatron.core.distributed import DistributedDataParallel
 from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.transformer.module import Float16Module, MegatronModule
 from torch import nn
-
-from commons.utils.logging import print_rank_0
 
 
 def get_unwrapped_megatron_module(module):

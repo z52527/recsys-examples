@@ -16,7 +16,6 @@ import abc
 from typing import Tuple
 
 import torch
-
 from data.utils import Batch
 
 

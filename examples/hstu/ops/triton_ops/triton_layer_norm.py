@@ -24,11 +24,7 @@ import triton
 
 # @manual=//triton:triton
 import triton.language as tl
-
-from ops.triton_ops.common import (
-    switch_to_contiguous_if_needed,
-    triton_autotune,
-)
+from ops.triton_ops.common import switch_to_contiguous_if_needed, triton_autotune
 
 
 @triton.jit

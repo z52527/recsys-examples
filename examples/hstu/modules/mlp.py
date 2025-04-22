@@ -16,7 +16,6 @@ from typing import Callable, List, Optional, Union
 
 import torch
 from megatron.core.transformer.module import MegatronModule
-
 from modules.jagged_module import JaggedData, JaggedModule
 
 

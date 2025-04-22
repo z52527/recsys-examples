@@ -20,12 +20,8 @@ import hstu_attn_2_cuda as flash_attn_cuda_ampere
 import hstu_hopper_cuda as flash_attn_cuda_hopper
 import nvtx
 import torch
-
 from configs import KernelBackend
-from ops.triton_ops.triton_addmm import (
-    triton_addmm_bwd,
-    triton_addmm_fwd,
-)
+from ops.triton_ops.triton_addmm import triton_addmm_bwd, triton_addmm_fwd
 from ops.triton_ops.triton_hstu_attention import (
     triton_hstu_attention_bwd,
     triton_hstu_attention_fwd,

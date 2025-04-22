@@ -16,21 +16,19 @@
 import abc
 import copy
 import enum
-import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch  # usort:skip
-
-from dynamicemb_extensions import DynamicEmbTable
+from dynamicemb_extensions import (
+    DynamicEmbTable,
+    dynamic_emb_adagrad_with_table,
+    dynamic_emb_adam_with_table,
+    dynamic_emb_rowwise_adagrad_with_table,
+    dynamic_emb_sgd_with_table,
+)
 
 from .dynamicemb_config import *
-from dynamicemb_extensions import (
-    dynamic_emb_sgd_with_table,
-    dynamic_emb_adam_with_table,
-    dynamic_emb_adagrad_with_table,
-    dynamic_emb_rowwise_adagrad_with_table,
-)
 
 
 @dataclass
@@ -152,14 +150,22 @@ class BaseDynamicEmbeddingOptimizer(abc.ABC):
             states.append(create_dynamicemb_table(table_option))
 
     @abc.abstractmethod
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None: ...
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
+        ...
 
     @abc.abstractmethod
     def get_opt_args(self) -> Dict[str, Any]:
         ...
 
     @abc.abstractmethod
-    def set_opt_args(self, args: Dict[str, Any]) -> None: ...
+    def set_opt_args(self, args: Dict[str, Any]) -> None:
+        ...
 
 
 class SGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
@@ -171,8 +177,13 @@ class SGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
     ) -> None:
         super().__init__(opt_args, table_options, hashtables)
 
-
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None:
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
         for ht in hashtables:
             if ht not in self._hashtables:
                 raise ValueError(
@@ -189,8 +200,9 @@ class SGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
             num_indice = indice.shape[0]
             weight_dtype = torch_to_dyn_emb(table_option.embedding_dtype)
             score = scores[i] if scores is not None else None
-            dynamic_emb_sgd_with_table(ht, num_indice, indice, grad, lr, weight_dtype, score)
-            
+            dynamic_emb_sgd_with_table(
+                ht, num_indice, indice, grad, lr, weight_dtype, score
+            )
 
     def get_opt_args(self):
         ret_args = {"lr": self._opt_args.learning_rate}
@@ -199,6 +211,7 @@ class SGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
     def set_opt_args(self, args: Dict[str, Any]):
         self._opt_args.learning_rate = get_required_arg(args, "lr")
         return
+
 
 class AdamDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
     def __init__(
@@ -222,7 +235,13 @@ class AdamDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._create_tables(self._state_dict["m"])
         self._create_tables(self._state_dict["v"])
 
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None:
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
         for ht in hashtables:
             if ht not in self._table_state_map.keys():
                 raise ValueError(
@@ -284,9 +303,15 @@ class AdamDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._opt_args.weight_decay = get_required_arg(args, "weight_decay")
         return
 
+
 class AdaGradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
-    def __init__(self, opt_args: OptimizerArgs, table_options: List[DynamicEmbTableOptions],hashtables: List[DynamicEmbTable]) -> None:
-        super().__init__(opt_args, table_options,hashtables)
+    def __init__(
+        self,
+        opt_args: OptimizerArgs,
+        table_options: List[DynamicEmbTableOptions],
+        hashtables: List[DynamicEmbTable],
+    ) -> None:
+        super().__init__(opt_args, table_options, hashtables)
 
         for table_option in self._table_options:
             table_option.initializer_args = DynamicEmbInitializerArgs(
@@ -297,10 +322,18 @@ class AdaGradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._state_dict["Gt"] = []
         self._create_tables(self._state_dict["Gt"])
 
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None:
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
         for ht in hashtables:
             if ht not in self._table_state_map.keys():
-                raise ValueError(f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}.")
+                raise ValueError(
+                    f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}."
+                )
         lr = self._opt_args.learning_rate
         eps = self._opt_args.eps
 
@@ -316,34 +349,41 @@ class AdaGradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
             weight_dtype = torch_to_dyn_emb(table_option.embedding_dtype)
             score = scores[i] if scores is not None else None
 
-            dynamic_emb_adagrad_with_table(ht,gt_ht,num_indice,indice,grad, lr, eps, weight_dtype, score)
+            dynamic_emb_adagrad_with_table(
+                ht, gt_ht, num_indice, indice, grad, lr, eps, weight_dtype, score
+            )
 
     def get_opt_args(self):
         ret_args = {
-                    "lr": self._opt_args.learning_rate,
-                    "eps": self._opt_args.eps,
-                   } 
+            "lr": self._opt_args.learning_rate,
+            "eps": self._opt_args.eps,
+        }
         return ret_args
 
-    def set_opt_args(self,args:Dict[str, Any]):
-
-        self._opt_args.learning_rate = get_required_arg(args, 'lr')
-        self._opt_args.eps = get_required_arg(args, 'eps')
+    def set_opt_args(self, args: Dict[str, Any]):
+        self._opt_args.learning_rate = get_required_arg(args, "lr")
+        self._opt_args.eps = get_required_arg(args, "eps")
 
         return
 
+
 class RowWiseAdaGradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
-    def __init__(self, opt_args: OptimizerArgs, table_options: List[DynamicEmbTableOptions],hashtables: List[DynamicEmbTable]) -> None:
-        super().__init__(opt_args, table_options,hashtables)
+    def __init__(
+        self,
+        opt_args: OptimizerArgs,
+        table_options: List[DynamicEmbTableOptions],
+        hashtables: List[DynamicEmbTable],
+    ) -> None:
+        super().__init__(opt_args, table_options, hashtables)
 
         for table_option in self._table_options:
             old_dim = table_option.dim
             old_global_hbm_for_values = table_option.global_hbm_for_values
             old_local_hbm_for_values = table_option.local_hbm_for_values
-            
+
             new_global_hbm_for_values = old_global_hbm_for_values // old_dim
             new_local_hbm_for_values = old_local_hbm_for_values // old_dim
-            
+
             table_option.initializer_args = DynamicEmbInitializerArgs(
                 mode=DynamicEmbInitializerMode.CONSTANT,
                 value=0.0,
@@ -355,11 +395,18 @@ class RowWiseAdaGradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._state_dict["Gt"] = []
         self._create_tables(self._state_dict["Gt"])
 
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None:
-
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
         for ht in hashtables:
             if ht not in self._table_state_map.keys():
-                raise ValueError(f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}.")
+                raise ValueError(
+                    f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}."
+                )
         lr = self._opt_args.learning_rate
         eps = self._opt_args.eps
 
@@ -375,19 +422,19 @@ class RowWiseAdaGradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
             weight_dtype = torch_to_dyn_emb(table_option.embedding_dtype)
             score = scores[i] if scores is not None else None
 
-            dynamic_emb_rowwise_adagrad_with_table(ht,gt_ht,num_indice,indice,grad, lr, eps, weight_dtype,score)
+            dynamic_emb_rowwise_adagrad_with_table(
+                ht, gt_ht, num_indice, indice, grad, lr, eps, weight_dtype, score
+            )
 
     def get_opt_args(self):
         ret_args = {
-                    "lr": self._opt_args.learning_rate,
-                    "eps": self._opt_args.eps,
-                   } 
+            "lr": self._opt_args.learning_rate,
+            "eps": self._opt_args.eps,
+        }
         return ret_args
 
-    def set_opt_args(self,args:Dict[str, Any]):
-
-        self._opt_args.learning_rate = get_required_arg(args, 'lr')
-        self._opt_args.eps = get_required_arg(args, 'eps')
+    def set_opt_args(self, args: Dict[str, Any]):
+        self._opt_args.learning_rate = get_required_arg(args, "lr")
+        self._opt_args.eps = get_required_arg(args, "eps")
 
         return
-

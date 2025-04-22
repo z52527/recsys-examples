@@ -13,75 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import argparse
+import json
+import os
+import random
+import sys
 import time
 from typing import List
+
 import torch
-import torchrec
 import torch.distributed as dist
-from torchrec.distributed.comm import get_local_size
-from torchrec.distributed.fbgemm_qcomm_codec import (
-    get_qcomm_codecs_registry,
-    QCommsConfig,
-    CommType,
-)
-from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
-
-from torchrec.distributed.planner import (
-    EmbeddingShardingPlanner,
-    Topology,
-    ParameterConstraints,
-)
-from torchrec.distributed.embedding import EmbeddingCollectionSharder
-from torchrec.distributed.types import (
-    ModuleSharder,
-    ShardingType,
-)
-from torchrec.distributed.planner.storage_reservations import (
-    HeuristicalStorageReservation,
-)
-
-from torchrec.distributed.types import (
-    BoundsCheckMode,
+import torchrec
+from dynamicemb import (
+    BatchedDynamicEmbeddingTables,
+    DynamicEmbInitializerArgs,
+    DynamicEmbInitializerMode,
+    DynamicEmbPoolingMode,
+    DynamicEmbTableOptions,
+    EmbOptimType,
 )
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torch.distributed.optim import (
-    _apply_optimizer_in_backward as apply_optimizer_in_backward,
-)
-
-from torchrec.distributed.model_parallel import (
-    DefaultDataParallelWrapper,
-    DistributedModelParallel,
-)
-
-import random
-
-from dynamicemb.planner import (
-    DynamicEmbParameterConstraints,
-    DynamicEmbParameterSharding,
-    DynamicEmbeddingShardingPlanner,
-)
-from dynamicemb.planner import DynamicEmbeddingEnumerator
-
-from dynamicemb import (
-    BatchedDynamicEmbeddingTables,
-    DynamicEmbPoolingMode,
-    DynamicEmbInitializerMode,
-    DynamicEmbInitializerArgs,
-    EmbOptimType,
-    DynamicEmbTableOptions,
-)
-
-from typing import Dict
-
-import json
 
 def append_to_json(file_path, data):
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             exist_data = json.load(f)
             if isinstance(exist_data, list):
                 exist_data.append(data)
@@ -92,7 +48,7 @@ def append_to_json(file_path, data):
     except FileNotFoundError:
         exist_data = [data] if isinstance(data, dict) else data
 
-    with open(file_path, 'w') as f:
+    with open(file_path, "w") as f:
         json.dump(exist_data, f, indent=4)
 
 
@@ -114,21 +70,20 @@ def table_idx_to_name(i):
 def feature_idx_to_name(i):
     return f"cate_{i}"
 
-       
-def get_optimizer(optimizer_type): 
-  if optimizer_type == "sgd":
-    return EmbOptimType.EXACT_SGD
-  elif optimizer_type == "exact_sgd":
-     return EmbOptimType.EXACT_SGD
-  elif optimizer_type == "adam":
-    return EmbOptimType.ADAM
-  elif optimizer_type == "exact_adagrad":
-    return EmbOptimType.EXACT_ADAGRAD
-  elif optimizer_type == "exact_row_wise_adagrad":
-    return EmbOptimType.EXACT_ROWWISE_ADAGRAD
-  else:
-    raise ValueError("unknown optimizer type")
 
+def get_optimizer(optimizer_type):
+    if optimizer_type == "sgd":
+        return EmbOptimType.EXACT_SGD
+    elif optimizer_type == "exact_sgd":
+        return EmbOptimType.EXACT_SGD
+    elif optimizer_type == "adam":
+        return EmbOptimType.ADAM
+    elif optimizer_type == "exact_adagrad":
+        return EmbOptimType.EXACT_ADAGRAD
+    elif optimizer_type == "exact_row_wise_adagrad":
+        return EmbOptimType.EXACT_ROWWISE_ADAGRAD
+    else:
+        raise ValueError("unknown optimizer type")
 
 
 def generate_dynamic_sequence_sparse_feature(
@@ -139,15 +94,13 @@ def generate_dynamic_sequence_sparse_feature(
 
     indices_set = set({})
     while len(indices_set) < batch_size:
-        indices_set.add(random.randint(0, (2 ** 63) - 1))
+        indices_set.add(random.randint(0, (2**63) - 1))
     indices.extend(list(indices_set))
     lengths.extend([1] * batch_size)
 
     return torchrec.KeyedJaggedTensor(
         keys=[feature_idx_to_name(0)],
-        values=torch.tensor(
-            indices, dtype=torch.int64
-        ).cuda(),
+        values=torch.tensor(indices, dtype=torch.int64).cuda(),
         lengths=torch.tensor(lengths, dtype=torch.int64).cuda(),
     )
 
@@ -172,7 +125,7 @@ def test(args):
     device = torch.device(f"cuda:{local_rank}")
 
     table_num = args.num_embedding_table
-    total_hbm_in_byte = args.hbm_for_embeddings * (1024 ** 3)
+    total_hbm_in_byte = args.hbm_for_embeddings * (1024**3)
     dim = args.embedding_dim
     table_options = [
         DynamicEmbTableOptions(
@@ -247,8 +200,10 @@ def test(args):
     end_time = time.perf_counter()
     average_iteration_time = (end_time - start_time) / args.num_iterations * 1000
     print(f"Total time taken: {end_time - start_time:.4f} seconds")
-    print(f"Average time per iteration(forward + backward): {average_iteration_time:.4f} ms")
-    
+    print(
+        f"Average time per iteration(forward + backward): {average_iteration_time:.4f} ms"
+    )
+
     test_result = {
         "use_index_dedup": args.use_index_dedup,
         "batch_size": args.batch_size,
@@ -264,11 +219,10 @@ def test(args):
     dist.barrier()
     dist.destroy_process_group()
 
+
 @record
 def main(argv: List[str]) -> None:
-    parser = argparse.ArgumentParser(
-        description="Benchmark"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark")
     parser.add_argument(
         "--batch_size",
         type=int,
@@ -316,8 +270,8 @@ def main(argv: List[str]) -> None:
         "--optimizer_type",
         type=str,
         default="adam",
-        choices=["sgd", "adam", "exact_adagrad" , "row_wise_adagrad"],
-        help="optimzier type.",
+        choices=["sgd", "adam", "exact_adagrad", "row_wise_adagrad"],
+        help="optimizer type.",
     )
     parser.add_argument(
         "--learning_rate",

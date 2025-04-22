@@ -22,9 +22,12 @@ from dataclasses import dataclass
 from functools import partial  # pylint: disable-unused-import
 from typing import Tuple
 
+import commons.utils.initialize as init
 import gin
 import torch  # pylint: disable-unused-import
+from configs import RetrievalConfig
 from megatron.core.optimizer import get_megatron_optimizer
+from model import get_retrieval_model
 from utils import (
     DistributedDataParallelArgs,
     NetworkArgs,
@@ -40,10 +43,6 @@ from utils import (
     train,
 )
 
-import commons.utils.initialize as init
-from configs import RetrievalConfig
-from model import get_retrieval_model
-
 
 @gin.configurable
 @dataclass
@@ -52,7 +51,7 @@ class RetrievalArgs:
     num_negatives: int = -1
     temperature = 0.05
     l2_norm_eps = 1e-6
-    eval_metrics: Tuple[str] = ("HR@10", "NDCG@10")
+    eval_metrics: Tuple[str, ...] = ("HR@10", "NDCG@10")
 
 
 parser = argparse.ArgumentParser(

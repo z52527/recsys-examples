@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
-
+from commons.utils.nvtx_op import output_nvtx_hook
 from configs import HSTUConfig
 from configs.hstu_config import HSTULayerType
 from modules.jagged_module import JaggedData, JaggedModule
 from ops.fused_hstu_op import fused_hstu_op
-from commons.utils.nvtx_op import output_nvtx_hook
 
 
 class FusedHSTULayer(JaggedModule):

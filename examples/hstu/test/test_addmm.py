@@ -14,7 +14,6 @@
 # limitations under the License.
 import pytest
 import torch
-
 from ops.triton_ops.triton_addmm import triton_addmm
 
 

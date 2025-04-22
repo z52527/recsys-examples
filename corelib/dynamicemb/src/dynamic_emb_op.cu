@@ -95,7 +95,7 @@ void check_sub_tensor(const at::Tensor &original_tensor,
 }
 
 // Dyn_emb API
-// TODO all the API need check datatype and dimension continous
+// TODO all the API need check datatype and dimension continuous
 int64_t dyn_emb_rows(std::shared_ptr<dyn_emb::DynamicVariableBase> table) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   return table->rows(stream);

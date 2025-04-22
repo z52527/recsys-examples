@@ -16,25 +16,22 @@
 import os
 import shutil
 
+import commons.checkpoint as checkpoint
+import commons.utils as init
+import commons.utils as utils
+import configs
+import data
+import model
+import modules
 import pytest
 import torch
 import torch.distributed as dist
+from commons.utils.distributed_utils import collective_assert
+from commons.utils.tensor_initializer import NormalInitializer
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+from modules.embedding import EmbeddingOptimizerParam, ShardedEmbedding
 from torch.distributed._shard.sharded_tensor import ShardedTensor
 
-import commons.utils as init
-from commons.utils.tensor_initializer import NormalInitializer
-from modules.embedding import (
-    EmbeddingOptimizerParam,
-    ShardedEmbedding,
-)
-from commons.utils.distributed_utils import collective_assert
-import configs
-import commons.checkpoint as checkpoint
-import data
-import modules
-import commons.utils as utils
-import model
 
 def flatten_state_dict(state_dict):
     search_list = [("", state_dict)]
@@ -147,17 +144,11 @@ def create_model(
             embedding_configs=emb_configs,
             prediction_head_arch=[[128, 10, 1] for _ in range(num_tasks)],
         )
-        model_train = model.RankingGR(
-            hstu_config=hstu_config, task_config=task_config
-        )
-        batch = data.utils.RankingBatch.random(
-            num_tasks=num_tasks, **batch_kwargs
-        )
+        model_train = model.RankingGR(hstu_config=hstu_config, task_config=task_config)
+        batch = data.utils.RankingBatch.random(num_tasks=num_tasks, **batch_kwargs)
     else:
         assert task_type == "retrieval"
-        task_config = configs.RetrievalConfig(
-            embedding_configs=emb_configs
-        )
+        task_config = configs.RetrievalConfig(embedding_configs=emb_configs)
         model_train = model.RetrievalGR(
             hstu_config=hstu_config, task_config=task_config
         )
@@ -170,20 +161,13 @@ def create_model(
         fp16=(dtype == torch.float16),
         use_distributed_optimizer=False,
     )
-    megatron_module = [
-        m
-        for n, m in checkpoint.filter_megatron_module(
-            model_train
-        )
-    ]
+    megatron_module = [m for n, m in checkpoint.filter_megatron_module(model_train)]
     dense_optimizer = get_megatron_optimizer(
         dense_optimizer_config,
         megatron_module,
     )
     nonfused_embedding_optimizers = list(
-        modules.embedding.get_nonfused_embedding_optimizer(
-            model_train
-        )
+        modules.embedding.get_nonfused_embedding_optimizer(model_train)
     )
 
     model_train.train()
@@ -247,13 +231,9 @@ def test_checkpoint_model(
 
     os.makedirs(save_path, exist_ok=True)
 
-    checkpoint.save(
-        save_path, model, dense_optimizer=dense_optimizer
-    )
+    checkpoint.save(save_path, model, dense_optimizer=dense_optimizer)
 
-    checkpoint.load(
-        save_path, new_model, dense_optimizer=new_dense_optimizer
-    )
+    checkpoint.load(save_path, new_model, dense_optimizer=new_dense_optimizer)
 
     model.eval()
     new_model.eval()
@@ -284,14 +264,10 @@ def test_checkpoint_model(
         )
 
     nonfused_embedding_optimizers = list(
-        modules.embedding.get_nonfused_embedding_optimizer(
-            model
-        )
+        modules.embedding.get_nonfused_embedding_optimizer(model)
     )
     new_nonfused_embedding_optimizers = list(
-        modules.embedding.get_nonfused_embedding_optimizer(
-            new_model
-        )
+        modules.embedding.get_nonfused_embedding_optimizer(new_model)
     )
     for optim, new_optim in zip(
         nonfused_embedding_optimizers, new_nonfused_embedding_optimizers
@@ -311,9 +287,7 @@ def test_checkpoint_embedding(
     init.set_random_seed(1234)
 
     embdim = 128
-    embedding_initializer = (
-        utils.tensor_initializer.NormalInitializer()
-    )
+    embedding_initializer = utils.tensor_initializer.NormalInitializer()
     embedding_optimizer_param = EmbeddingOptimizerParam(
         optimizer_str=optimizer_type_str,
         learning_rate=1e-3,

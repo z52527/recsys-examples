@@ -34,12 +34,11 @@ from math import sqrt
 from typing import Optional
 
 import torch
-from torch.fx._symbolic_trace import is_fx_tracing
-
 from ops.triton_ops.triton_position import (  # type: ignore[attr-defined]
     triton_add_position_embeddings,
     triton_add_timestamp_positional_embeddings,
 )
+from torch.fx._symbolic_trace import is_fx_tracing
 
 
 @torch.fx.wrap

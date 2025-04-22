@@ -12,11 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import commons.utils.initialize as init
 import pytest
 import torch
-from megatron.core import tensor_parallel
-
-import commons.utils.initialize as init
+from commons.utils.tensor_initializer import UniformInitializer
 from configs import (
     DynamicShardedEmbeddingConfig,
     RankingConfig,
@@ -25,10 +24,10 @@ from configs import (
     get_hstu_config,
 )
 from data.utils import RankingBatch, RetrievalBatch
+from megatron.core import tensor_parallel
 from model.ranking_gr import RankingGR
 from model.retrieval_gr import RetrievalGR
 from modules.embedding import EmbeddingOptimizerParam
-from commons.utils.tensor_initializer import UniformInitializer
 
 
 @pytest.mark.parametrize("model_type", ["ranking", "retrieval"])

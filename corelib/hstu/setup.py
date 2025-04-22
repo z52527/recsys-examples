@@ -15,30 +15,18 @@
 # # Copyright (c) 2023, Tri Dao.
 # Copyright (c) 2024, NVIDIA Corporation & AFFILIATES.
 
+import itertools
+import os
+import platform
+import subprocess
 import sys
 import warnings
-import os
-import re
-import ast
 from pathlib import Path
-from packaging.version import parse, Version
-import platform
-import itertools
-
-from setuptools import setup, find_packages
-import subprocess
-
-import urllib.request
-import urllib.error
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CppExtension,
-    CUDAExtension,
-    CUDA_HOME,
-)
+from packaging.version import Version, parse
+from setuptools import find_packages, setup
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -70,6 +58,7 @@ DISABLE_TARGET = os.getenv("HSTU_DISABLE_TARGET", "FALSE") == "TRUE"
 DISABLE_DELTA_Q = os.getenv("HSTU_DISABLE_DELTA_Q", "FALSE") == "TRUE"
 DISABLE_RAB = os.getenv("HSTU_DISABLE_RAB", "FALSE") == "TRUE"
 DISABLE_DRAB = os.getenv("HSTU_DISABLE_DRAB", "FALSE") == "TRUE"
+
 
 def get_platform():
     """
@@ -108,13 +97,19 @@ def check_if_cuda_home_none(global_option: str) -> None:
         "only images whose names contain 'devel' will provide nvcc."
     )
 
+
 def nvcc_threads_args():
     nvcc_threads = os.getenv("NVCC_THREADS") or "4"
     return ["--threads", nvcc_threads]
 
+
 def generate_cuda_sources():
-    DTYPE_FWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (["fp16"] if not DISABLE_FP16 else [])
-    DTYPE_BWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (["fp16"] if not DISABLE_FP16 else [])
+    DTYPE_FWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (
+        ["fp16"] if not DISABLE_FP16 else []
+    )
+    DTYPE_BWD_SM80 = (["bf16"] if not DISABLE_BF16 else []) + (
+        ["fp16"] if not DISABLE_FP16 else []
+    )
     HEAD_DIMENSIONS = (
         []
         + ([32] if not DISABLE_HDIM32 else [])
@@ -123,7 +118,13 @@ def generate_cuda_sources():
         + ([256] if not DISABLE_HDIM256 else [])
     )
     RAB = [""] + (["_rab"] if not DISABLE_RAB else [])
-    RAB_DRAB = [""] + ((["_rab_drab", "_rab"]) if not DISABLE_DRAB else ["_rab"] if not DISABLE_RAB else [])
+    RAB_DRAB = [""] + (
+        (["_rab_drab", "_rab"])
+        if not DISABLE_DRAB
+        else ["_rab"]
+        if not DISABLE_RAB
+        else []
+    )
     MASK = [""]
     if not DISABLE_LOCAL:
         MASK += ["_local"]
@@ -132,7 +133,10 @@ def generate_cuda_sources():
         CAUSAL_MASK = ["_causal"]
         CONTEXT_MASK = [""] + (["_context"] if not DISABLE_CONTEXT else [])
         TARGET_MASK = [""] + (["_target"] if not DISABLE_TARGET else [])
-        MASK += [f"{c}{x}{t}" for c, x, t in itertools.product(CAUSAL_MASK, CONTEXT_MASK, TARGET_MASK)]
+        MASK += [
+            f"{c}{x}{t}"
+            for c, x, t in itertools.product(CAUSAL_MASK, CONTEXT_MASK, TARGET_MASK)
+        ]
         MASK += ["_causal_deltaq"] if not DISABLE_DELTA_Q else []
 
     dtype_to_str = {
@@ -142,8 +146,7 @@ def generate_cuda_sources():
 
     subprocess.run(["rm", "-rf", "csrc/hstu_attn/src/generated/*"])
     sources_fwd_sm80 = []
-    fwd_file_head =\
-    """
+    fwd_file_head = """
 // Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES.
 // Splitting different head dimensions, data types and masks to different files to speed up
 // compilation. This file is auto-generated. See generate_cuda_sources() in setup.py
@@ -154,22 +157,27 @@ template void run_hstu_fwd_<{}, {}, {}, {}, {}, {}, {}, {}>
                            (Hstu_fwd_params& params, cudaStream_t stream);
 
     """
-    for hdim, dtype, rab, mask in itertools.product(HEAD_DIMENSIONS, DTYPE_FWD_SM80, RAB, MASK):
+    for hdim, dtype, rab, mask in itertools.product(
+        HEAD_DIMENSIONS, DTYPE_FWD_SM80, RAB, MASK
+    ):
         file_name = f"csrc/hstu_attn/src/generated/flash_fwd_hdim{hdim}_{dtype}{rab}{mask}_sm80.cu"
         with open(file_name, "w") as f:
-            f.write(fwd_file_head.format(dtype_to_str[dtype],
-                                         hdim,
-                                         "true" if "_rab" in rab else "false",
-                                         "true" if "local" in mask else "false",
-                                         "true" if "causal" in mask else "false",
-                                         "true" if "context" in mask else "false",
-                                         "true" if "target" in mask else "false",
-                                         "true" if "deltaq" in mask else "false"))
+            f.write(
+                fwd_file_head.format(
+                    dtype_to_str[dtype],
+                    hdim,
+                    "true" if "_rab" in rab else "false",
+                    "true" if "local" in mask else "false",
+                    "true" if "causal" in mask else "false",
+                    "true" if "context" in mask else "false",
+                    "true" if "target" in mask else "false",
+                    "true" if "deltaq" in mask else "false",
+                )
+            )
         sources_fwd_sm80.append(file_name)
 
     sources_bwd_sm80 = []
-    bwd_file_head =\
-    """
+    bwd_file_head = """
 // Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES.
 // Splitting different head dimensions, data types and masks to different files to speed up
 // compilation. This file is auto-generated. See generate_cuda_sources() in setup.py
@@ -181,21 +189,28 @@ template void run_hstu_bwd_<{}, {}, {}, {}, {}, {}, {}, {}, {}>
 
     """
     if not DISABLE_BACKWARD:
-        for hdim, dtype, rab_drab, mask in itertools.product(HEAD_DIMENSIONS, DTYPE_BWD_SM80, RAB_DRAB, MASK):
+        for hdim, dtype, rab_drab, mask in itertools.product(
+            HEAD_DIMENSIONS, DTYPE_BWD_SM80, RAB_DRAB, MASK
+        ):
             file_name = f"csrc/hstu_attn/src/generated/flash_bwd_hdim{hdim}_{dtype}{rab_drab}{mask}_sm80.cu"
             with open(file_name, "w") as f:
-                f.write(bwd_file_head.format(dtype_to_str[dtype],
-                                             hdim,
-                                             "true" if "_rab" in rab_drab else "false",
-                                             "true" if "drab" in rab_drab else "false",
-                                             "true" if "local" in mask else "false",
-                                             "true" if "causal" in mask else "false",
-                                             "true" if "context" in mask else "false",
-                                             "true" if "target" in mask else "false",
-                                             "true" if "deltaq" in mask else "false"))
+                f.write(
+                    bwd_file_head.format(
+                        dtype_to_str[dtype],
+                        hdim,
+                        "true" if "_rab" in rab_drab else "false",
+                        "true" if "drab" in rab_drab else "false",
+                        "true" if "local" in mask else "false",
+                        "true" if "causal" in mask else "false",
+                        "true" if "context" in mask else "false",
+                        "true" if "target" in mask else "false",
+                        "true" if "deltaq" in mask else "false",
+                    )
+                )
             sources_bwd_sm80.append(file_name)
 
     return sources_fwd_sm80 + sources_bwd_sm80
+
 
 cmdclass = {}
 ext_modules = []
@@ -247,7 +262,9 @@ if not SKIP_CUDA_BUILD:
     if DISABLE_BF16 and DISABLE_FP16:
         raise ValueError("At least one of DISABLE_BF16 or DISABLE_FP16 must be False")
     if DISABLE_HDIM32 and DISABLE_HDIM64 and DISABLE_HDIM128 and DISABLE_HDIM256:
-        raise ValueError("At least one of DISABLE_HDIM32, DISABLE_HDIM64, DISABLE_HDIM128, or DISABLE_HDIM256 must be False")
+        raise ValueError(
+            "At least one of DISABLE_HDIM32, DISABLE_HDIM64, DISABLE_HDIM128, or DISABLE_HDIM256 must be False"
+        )
     if DISABLE_RAB and not DISABLE_DRAB:
         raise ValueError("Cannot support drab without rab")
     if DISABLE_CAUSAL and not DISABLE_TARGET:
@@ -289,6 +306,7 @@ if not SKIP_CUDA_BUILD:
             include_dirs=include_dirs,
         )
     )
+
 
 class NinjaBuildExtension(BuildExtension):
     def __init__(self, *args, **kwargs) -> None:

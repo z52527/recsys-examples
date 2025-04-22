@@ -13,29 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-import torch
 import random
 from typing import Any, Dict, List, Tuple
-from dynamicemb_extensions import DynamicEmbTable
-from dynamicemb_extensions import dyn_emb_rows, dyn_emb_cols
-from dynamicemb_extensions import (
-    insert_or_assign,
-    insert_and_evict,
-    accum_or_assign,
-    find_or_insert,
+
+import pytest
+import torch
+from dynamicemb import (
+    AdaGradDynamicEmbeddingOptimizer,
+    AdamDynamicEmbeddingOptimizer,
+    DynamicEmbTableOptions,
+    OptimizerArgs,
+    RowWiseAdaGradDynamicEmbeddingOptimizer,
+    SGDDynamicEmbeddingOptimizer,
 )
-from dynamicemb_extensions import assign, find, erase
-from dynamicemb_extensions import DynamicEmbDataType, EvictStrategy
-
-from dynamicemb import DynamicEmbTableOptions
-
-
-from dynamicemb import SGDDynamicEmbeddingOptimizer, AdamDynamicEmbeddingOptimizer
-from dynamicemb import AdaGradDynamicEmbeddingOptimizer,RowWiseAdaGradDynamicEmbeddingOptimizer, OptimizerArgs
-from dynamicemb.optimizer import BaseDynamicEmbeddingOptimizer
-from dynamicemb.optimizer import OptimizerArgs, EmbOptimType
 from dynamicemb.dynamicemb_config import *
+from dynamicemb.optimizer import BaseDynamicEmbeddingOptimizer, OptimizerArgs
+from dynamicemb_extensions import (
+    DynamicEmbTable,
+    find,
+    find_or_insert,
+    insert_or_assign,
+)
 
 
 class TorchSGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
@@ -47,8 +45,13 @@ class TorchSGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
     ) -> None:
         super().__init__(opt_args, table_options, hashtables)
 
-
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None:
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
         for ht in hashtables:
             if ht not in self._hashtables:
                 raise ValueError(
@@ -80,6 +83,7 @@ class TorchSGDDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._opt_args.learning_rate = get_required_arg(args, "lr")
         return
 
+
 class TorchAdamDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
     def __init__(
         self,
@@ -101,7 +105,13 @@ class TorchAdamDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._create_tables(self._state_dict["m"])
         self._create_tables(self._state_dict["v"])
 
-    def update(self, hashtables: List[DynamicEmbTable], indices: List[torch.Tensor], grads: List[torch.Tensor], scores: Optional[List[int]]=None) -> None:
+    def update(
+        self,
+        hashtables: List[DynamicEmbTable],
+        indices: List[torch.Tensor],
+        grads: List[torch.Tensor],
+        scores: Optional[List[int]] = None,
+    ) -> None:
         for ht in hashtables:
             if ht not in self._table_state_map.keys():
                 raise ValueError(
@@ -173,50 +183,55 @@ class TorchAdamDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
         self._opt_args.weight_decay = get_required_arg(args, "weight_decay")
         return
 
+
 class TorchAdagradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
     def __init__(
         self,
         opt_args: OptimizerArgs,
         table_options: List[DynamicEmbTableOptions],
-        hashtables: List[DynamicEmbTable]
+        hashtables: List[DynamicEmbTable],
     ) -> None:
         super().__init__(opt_args, table_options, hashtables)
-        
-        
+
         for table_option in self._table_options:
             table_option.initializer_args = DynamicEmbInitializerArgs(
-                mode=DynamicEmbInitializerMode.CONSTANT,
-                value=0.0 
+                mode=DynamicEmbInitializerMode.CONSTANT, value=0.0
             )
-        self._state_dict["Gt"] = []  
-        self._create_tables(self._state_dict["Gt"]) 
+        self._state_dict["Gt"] = []
+        self._create_tables(self._state_dict["Gt"])
 
     def update(
         self,
         hashtables: List[DynamicEmbTable],
         indices: List[torch.Tensor],
         grads: List[torch.Tensor],
-        scores: Optional[List[int]]=None
+        scores: Optional[List[int]] = None,
     ) -> None:
         for ht in hashtables:
             if ht not in self._table_state_map.keys():
-                raise ValueError(f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}.")
-        
+                raise ValueError(
+                    f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}."
+                )
+
         lr = self._opt_args.learning_rate
-        eps = self._opt_args.eps  
+        eps = self._opt_args.eps
 
         for i, ht in enumerate(hashtables):
             state_idx = self._table_state_map[ht]
             table_option = self._table_options[state_idx]
             gt_ht = self._state_dict["Gt"][state_idx]
-            
+
             indice = indices[i]
             grad = grads[i]
             num_indice = indice.shape[0]
             grad_shape = grad.shape
 
-            gt_tensor = torch.zeros(grad_shape, dtype=table_option.embedding_dtype, device=grad.device)
-            weight_tensor = torch.zeros(grad_shape, dtype=table_option.embedding_dtype, device=grad.device)
+            gt_tensor = torch.zeros(
+                grad_shape, dtype=table_option.embedding_dtype, device=grad.device
+            )
+            weight_tensor = torch.zeros(
+                grad_shape, dtype=table_option.embedding_dtype, device=grad.device
+            )
 
             find_or_insert(gt_ht, num_indice, indice, gt_tensor)
             find_or_insert(ht, num_indice, indice, weight_tensor)
@@ -230,18 +245,16 @@ class TorchAdagradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer):
             insert_or_assign(ht, num_indice, indice, weight_tensor)
             insert_or_assign(gt_ht, num_indice, indice, gt_tensor)
 
-
     def get_opt_args(self):
         ret_args = {
-                    "lr": self._opt_args.learning_rate,
-                    "eps": self._opt_args.eps,
-                   }
+            "lr": self._opt_args.learning_rate,
+            "eps": self._opt_args.eps,
+        }
         return ret_args
 
-    def set_opt_args(self,args:Dict[str, Any]):
-
-        self._opt_args.learning_rate = get_required_arg(args, 'lr')
-        self._opt_args.eps = get_required_arg(args, 'eps')
+    def set_opt_args(self, args: Dict[str, Any]):
+        self._opt_args.learning_rate = get_required_arg(args, "lr")
+        self._opt_args.eps = get_required_arg(args, "eps")
 
         return
 
@@ -251,10 +264,10 @@ class TorchRowWiseAdagradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer
         self,
         opt_args: OptimizerArgs,
         table_options: List[DynamicEmbTableOptions],
-        hashtables: List[DynamicEmbTable]
+        hashtables: List[DynamicEmbTable],
     ) -> None:
         super().__init__(opt_args, table_options, hashtables)
-        
+
         for table_option in self._table_options:
             old_dim = table_option.dim
             old_global_hbm_for_values = table_option.global_hbm_for_values
@@ -273,33 +286,40 @@ class TorchRowWiseAdagradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer
 
         self._state_dict["Gt"] = []
         self._create_tables(self._state_dict["Gt"])
+
     def update(
         self,
         hashtables: List[DynamicEmbTable],
         indices: List[torch.Tensor],
         grads: List[torch.Tensor],
-        scores: Optional[List[int]]=None
+        scores: Optional[List[int]] = None,
     ) -> None:
         for ht in hashtables:
             if ht not in self._table_state_map.keys():
-                raise ValueError(f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}.")
-        
+                raise ValueError(
+                    f"DynamicEmb ERROR: Hashtable {ht} not found in _table_state_map in class {self.__class__.__name__}."
+                )
+
         lr = self._opt_args.learning_rate
-        eps = self._opt_args.eps  
+        eps = self._opt_args.eps
 
         for i, ht in enumerate(hashtables):
             state_idx = self._table_state_map[ht]
             table_option = self._table_options[state_idx]
             gt_ht = self._state_dict["Gt"][state_idx]
-            
+
             indice = indices[i]
             grad = grads[i]
             num_indice = indice.shape[0]
             grad_shape = grad.shape
             D = grad_shape[-1]
 
-            gt_tensor = torch.zeros((num_indice,1), dtype=table_option.embedding_dtype, device=grad.device)
-            weight_tensor = torch.zeros(grad_shape, dtype=table_option.embedding_dtype, device=grad.device)
+            gt_tensor = torch.zeros(
+                (num_indice, 1), dtype=table_option.embedding_dtype, device=grad.device
+            )
+            weight_tensor = torch.zeros(
+                grad_shape, dtype=table_option.embedding_dtype, device=grad.device
+            )
 
             find_or_insert(gt_ht, num_indice, indice, gt_tensor)
             find_or_insert(ht, num_indice, indice, weight_tensor)
@@ -307,7 +327,7 @@ class TorchRowWiseAdagradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer
             grad_sq_sum = grad.pow(2).sum(dim=1, keepdim=True)
             grad_sq_avg = grad_sq_sum / D
             gt_tensor.add_(grad_sq_avg)
-   
+
             lr_scaled = lr / (gt_tensor.sqrt() + eps)
             update = lr_scaled * grad
 
@@ -316,20 +336,19 @@ class TorchRowWiseAdagradDynamicEmbeddingOptimizer(BaseDynamicEmbeddingOptimizer
             insert_or_assign(ht, num_indice, indice, weight_tensor)
             insert_or_assign(gt_ht, num_indice, indice, gt_tensor)
 
-
     def get_opt_args(self):
         ret_args = {
-                    "lr": self._opt_args.learning_rate,
-                    "eps": self._opt_args.eps,
-                   }
+            "lr": self._opt_args.learning_rate,
+            "eps": self._opt_args.eps,
+        }
         return ret_args
 
-    def set_opt_args(self,args:Dict[str, Any]):
-
-        self._opt_args.learning_rate = get_required_arg(args, 'lr')
-        self._opt_args.eps = get_required_arg(args, 'eps')
+    def set_opt_args(self, args: Dict[str, Any]):
+        self._opt_args.learning_rate = get_required_arg(args, "lr")
+        self._opt_args.eps = get_required_arg(args, "eps")
 
         return
+
 
 def generate_random_data(
     num_tables: int, length: int, embedding_dim: List[int], index_range: Tuple[int, int]
@@ -373,8 +392,11 @@ def compare_tensors(t1: torch.Tensor, t2: torch.Tensor, rtol=1e-05, atol=1e-06):
     [
         (SGDDynamicEmbeddingOptimizer, TorchSGDDynamicEmbeddingOptimizer),
         (AdamDynamicEmbeddingOptimizer, TorchAdamDynamicEmbeddingOptimizer),
-        (AdaGradDynamicEmbeddingOptimizer,TorchAdagradDynamicEmbeddingOptimizer),
-        (RowWiseAdaGradDynamicEmbeddingOptimizer,TorchRowWiseAdagradDynamicEmbeddingOptimizer),
+        (AdaGradDynamicEmbeddingOptimizer, TorchAdagradDynamicEmbeddingOptimizer),
+        (
+            RowWiseAdaGradDynamicEmbeddingOptimizer,
+            TorchRowWiseAdagradDynamicEmbeddingOptimizer,
+        ),
     ],
 )
 @pytest.mark.parametrize("num_tables", [4])

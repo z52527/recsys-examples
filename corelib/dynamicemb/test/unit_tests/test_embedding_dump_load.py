@@ -13,76 +13,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import argparse
+import os
+import random
 import shutil
+import sys
 from typing import List
+
 import torch
-import torchrec
 import torch.distributed as dist
-from torchrec.distributed.comm import get_local_size
-from torchrec.distributed.fbgemm_qcomm_codec import (
-    get_qcomm_codecs_registry,
-    QCommsConfig,
-    CommType,
+import torchrec
+from debug import Debugger
+from dynamicemb import (
+    DynamicEmbCheckMode,
+    DynamicEmbDump,
+    DynamicEmbInitializerArgs,
+    DynamicEmbInitializerMode,
+    DynamicEmbLoad,
+    DynamicEmbScoreStrategy,
+    DynamicEmbTableOptions,
 )
-from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
-
-from torchrec.distributed.planner import (
-    EmbeddingShardingPlanner,
-    Topology,
-    ParameterConstraints,
+from dynamicemb.incremental_dump import get_score, set_score
+from dynamicemb.planner import (
+    DynamicEmbeddingEnumerator,
+    DynamicEmbeddingShardingPlanner,
+    DynamicEmbParameterConstraints,
 )
-from torchrec.distributed.embedding import EmbeddingCollectionSharder
-from torchrec.distributed.types import (
-    ModuleSharder,
-    ShardingType,
-)
-from torchrec.distributed.planner.storage_reservations import (
-    HeuristicalStorageReservation,
-)
-
-from torchrec.distributed.types import (
-    BoundsCheckMode,
-)
+from dynamicemb.shard import DynamicEmbeddingCollectionSharder
+from fbgemm_gpu.split_embedding_configs import EmbOptimType
 from torch.distributed.elastic.multiprocessing.errors import record
-
 from torch.distributed.optim import (
     _apply_optimizer_in_backward as apply_optimizer_in_backward,
 )
-
+from torchrec.distributed.comm import get_local_size
+from torchrec.distributed.fbgemm_qcomm_codec import (
+    CommType,
+    QCommsConfig,
+    get_qcomm_codecs_registry,
+)
 from torchrec.distributed.model_parallel import (
     DefaultDataParallelWrapper,
     DistributedModelParallel,
 )
-
-from fbgemm_gpu.split_embedding_configs import EmbOptimType
-
-import random
-
-from dynamicemb.planner import  DynamicEmbParameterConstraints,DynamicEmbParameterSharding,DynamicEmbeddingShardingPlanner
-from dynamicemb.planner import  DynamicEmbeddingEnumerator
-from dynamicemb.shard import  DynamicEmbeddingCollectionSharder
-from dynamicemb import DynamicEmbDump,DynamicEmbLoad
-
-from dynamicemb import (
-  DynamicEmbCheckMode,
-  DynamicEmbInitializerArgs,
-  DynamicEmbScoreStrategy,
-  DynamicEmbPoolingMode,
-  DynamicEmbTableOptions,
-  BatchedDynamicEmbeddingTables,
-  dyn_emb_to_torch,
-  BATCH_SIZE_PER_DUMP,
-  DynamicEmbInitializerMode,
+from torchrec.distributed.planner import ParameterConstraints, Topology
+from torchrec.distributed.planner.storage_reservations import (
+    HeuristicalStorageReservation,
 )
-from debug import Debuger
+from torchrec.distributed.types import BoundsCheckMode, ShardingType
 
-from dynamicemb.incremental_dump import (
-  set_score,
-  get_score
-)
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -117,15 +95,16 @@ def get_comm_precission(precision_str):
 
 
 class CustomizedScore:
-  def __init__(self, table_names: List[int]):
-    self.table_names_ = table_names
-    self.steps_ : Dict[str, int] = {table_name:1 for table_name in table_names}
+    def __init__(self, table_names: List[int]):
+        self.table_names_ = table_names
+        self.steps_: Dict[str, int] = {table_name: 1 for table_name in table_names}
 
-  def get(self, table_name: str):
-    assert table_name in self.table_names_
-    ret = self.steps_[table_name]
-    self.steps_[table_name] += 1
-    return ret
+    def get(self, table_name: str):
+        assert table_name in self.table_names_
+        ret = self.steps_[table_name]
+        self.steps_[table_name] += 1
+        return ret
+
 
 def get_planner(args, device, eb_configs):
     dict_const = {}
@@ -164,7 +143,7 @@ def get_planner(args, device, eb_configs):
                         mode=DynamicEmbInitializerMode.DEBUG,
                     ),
                     safe_check_mode=DynamicEmbCheckMode.WARNING,
-                    score_strategy=args.score_strategies
+                    score_strategy=args.score_strategies,
                 ),
             )
         dict_const[table_idx_to_name(i)] = const
@@ -241,8 +220,11 @@ def run(args):
     world_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
-     
-    all_table_names = [table_idx_to_name(feature_idx) for feature_idx in range(args.num_embedding_table)]
+
+    all_table_names = [
+        table_idx_to_name(feature_idx)
+        for feature_idx in range(args.num_embedding_table)
+    ]
 
     eb_configs = [
         torchrec.EmbeddingConfig(
@@ -343,19 +325,19 @@ def run(args):
     customized_scores = CustomizedScore(all_table_names)
     ret: Dict[str, Dict[str, int]] = get_score(model)
     prefix_path = "model"
-    
-    if ret is None:
-      return
-    else:
-      assert len(ret) == 1 and prefix_path in ret
 
+    if ret is None:
+        return
+    else:
+        assert len(ret) == 1 and prefix_path in ret
 
     scores_to_set: Dict[str, int] = {}
     for i in range(args.num_embedding_table):
-      if args.score_strategies == DynamicEmbScoreStrategy.CUSTOMIZED:
-        scores_to_set[all_table_names[i]] = customized_scores.get(all_table_names[i])
-    set_score(model, {prefix_path:scores_to_set})
-
+        if args.score_strategies == DynamicEmbScoreStrategy.CUSTOMIZED:
+            scores_to_set[all_table_names[i]] = customized_scores.get(
+                all_table_names[i]
+            )
+    set_score(model, {prefix_path: scores_to_set})
 
     if local_rank == 0 and args.print_sharding_plan:
         for collectionkey, plans in model._plan.plan.items():
@@ -377,7 +359,7 @@ def run(args):
         else:
             raise ValueError("unknown optimizer type")
 
-    Debuger()
+    Debugger()
 
     for i in range(args.num_iterations):
         sparse_feature = generate_sparse_feature(
@@ -396,14 +378,16 @@ def run(args):
 
         concatenated_tensor = torch.cat(jagged_tensors, dim=0)
         reduced_tensor = concatenated_tensor.sum()
-        reduced_tensor.backward() 
+        reduced_tensor.backward()
 
         scores_to_set: Dict[str, int] = {}
         for i in range(args.num_embedding_table):
             if args.score_strategies == DynamicEmbScoreStrategy.CUSTOMIZED:
-                scores_to_set[all_table_names[i]] = customized_scores.get(all_table_names[i])
+                scores_to_set[all_table_names[i]] = customized_scores.get(
+                    all_table_names[i]
+                )
 
-        set_score(model, {prefix_path:scores_to_set})
+        set_score(model, {prefix_path: scores_to_set})
 
     DynamicEmbDump("debug_weight", model, optim=True)
     DynamicEmbLoad("debug_weight", model, optim=True)
@@ -519,8 +503,8 @@ def main(argv: List[str]) -> None:
         "--optimizer_type",
         type=str,
         default="adam",
-        choices=["sgd", "adam", "exact_adagrad" , "row_wise_adagrad"],
-        help="optimzier type.",
+        choices=["sgd", "adam", "exact_adagrad", "row_wise_adagrad"],
+        help="optimizer type.",
     )
 
     parser.add_argument(
@@ -571,7 +555,7 @@ def main(argv: List[str]) -> None:
         "--data_parallel_embeddings",
         type=str,
         default=None,
-        help="Comma separated data parallell embedding table ids.",
+        help="Comma separated data parallel embedding table ids.",
     )
     parser.add_argument(
         "--platform",
@@ -663,11 +647,11 @@ def main(argv: List[str]) -> None:
         args.hbm_cap = 140 * 1024 * 1024 * 1024
 
     if args.score_type == "timestamp":
-        args.score_strategies = DynamicEmbScoreStrategy.TIMESTAMP    
+        args.score_strategies = DynamicEmbScoreStrategy.TIMESTAMP
     elif args.score_type == "step":
         args.score_strategies = DynamicEmbScoreStrategy.STEP
     elif args.score_type == "custimized":
-        args.score_strategies = DynamicEmbScoreStrategy.CUSTOMIZED    
+        args.score_strategies = DynamicEmbScoreStrategy.CUSTOMIZED
 
     # Print all arguments
     print("Arguments:")

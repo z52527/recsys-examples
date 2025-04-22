@@ -16,7 +16,6 @@ from typing import List, Optional
 
 import torch
 import torch.distributed as dist
-
 from ops.length_to_offsets import length_to_complete_offsets
 
 

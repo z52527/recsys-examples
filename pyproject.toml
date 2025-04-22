@@ -1,5 +1,6 @@
 [tool.mypy]
 exclude = [
-  "distributed_recommender/ops/triton_ops/*",
-  "distributed_recommender/ops/fused_hstu_op.py"
+  "examples/hstu/ops/triton_ops/*",
+  "examples/hstu/ops/fused_hstu_op.py",
+  "corelib/*"
 ]

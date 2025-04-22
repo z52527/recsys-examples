@@ -4,15 +4,28 @@
 NVIDIA RecSys Examples is a collection of optimized recommender models and components. 
 
 The project includes:
-- Examples for large-scale HSTU ranking and retrieval models through TorchRec and Megatron-Core integration
+- Examples for large-scale HSTU ranking and retrieval models through [TorchRec](https://github.com/pytorch/torchrec) and [Megatron-Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core) integration
 - HSTU (Hierarchical Sequential Transduction Unit) attention operator support
 - Dynamic Embeddings with GPU acceleration
 
 # Get Started
 
-Before running examples, install libs under corelib following instruction in documentaion:
+Before running examples, build and install libs under corelib following instruction in documentaion:
 - [HSTU attention documentation](./corelib/hstu/README.md)
 - [Dynamic Embeddings documentation](./corelib/dynamicemb/README.md)
+
+On top of those two core libs, Megatron-Core along with other libs are required. You can install them via pypi package:
+
+```bash
+pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath megatron-core==0.9.0
+```
+
+If you fail to install the megatron-core package, usually due to the python version incompatibility, please try to clone and then install the source code. 
+
+```bash
+git clone -b core_r0.9.0 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
+pip install -e ./megatron-lm
+```
 
 The examples we supported:
 - [HSTU recommender examples](./examples/hstu/README.md)

@@ -25,7 +25,9 @@ from torch.utils.cpp_extension import (
     CUDA_HOME,
 )
 from pathlib import Path
+import subprocess
 
+subprocess.run(["git", "submodule", "update", "--init", "../../third_party/HierarchicalKV"])
 
 def check_torchrec_version():
     try:
@@ -99,7 +101,7 @@ def get_extensions():
     )
 
     include_dirs = [
-        root_path / "HierarchicalKV" / "include",
+        root_path / "../../third_party/HierarchicalKV" / "include",
         root_path / "src",
     ]
     cuda_sources = [str(path) for path in cuda_sources]
@@ -122,7 +124,6 @@ def get_extensions():
 package = find_packages(
     exclude=(
         "*test",
-        "HierarchicalKV",
     )
 )
 

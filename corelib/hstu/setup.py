@@ -202,7 +202,7 @@ ext_modules = []
 
 # We want this even if SKIP_CUDA_BUILD because when we run python setup.py sdist we want the .hpp
 # files included in the source distribution, in case the user compiles from source.
-subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
+subprocess.run(["git", "submodule", "update", "--init", "../../third_party/cutlass"])
 
 if not SKIP_CUDA_BUILD:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
@@ -224,7 +224,7 @@ if not SKIP_CUDA_BUILD:
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
     repo_dir = Path(this_dir)
-    cutlass_dir = repo_dir / "csrc" / "cutlass"
+    cutlass_dir = repo_dir / "../../third_party/cutlass"
 
     feature_args = (
         []
@@ -335,7 +335,7 @@ setup(
     long_description_content_type="text/markdown",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
+        "License :: OSI Approved :: Apache Software License",
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,

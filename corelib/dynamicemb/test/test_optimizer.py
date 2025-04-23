@@ -18,16 +18,16 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 import torch
-from dynamicemb import (
+from dynamicemb import DynamicEmbTableOptions, OptimizerArgs
+from dynamicemb.dynamicemb_config import *
+from dynamicemb.optimizer import (
     AdaGradDynamicEmbeddingOptimizer,
     AdamDynamicEmbeddingOptimizer,
-    DynamicEmbTableOptions,
+    BaseDynamicEmbeddingOptimizer,
     OptimizerArgs,
     RowWiseAdaGradDynamicEmbeddingOptimizer,
     SGDDynamicEmbeddingOptimizer,
 )
-from dynamicemb.dynamicemb_config import *
-from dynamicemb.optimizer import BaseDynamicEmbeddingOptimizer, OptimizerArgs
 from dynamicemb_extensions import (
     DynamicEmbTable,
     find,

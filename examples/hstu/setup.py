@@ -24,13 +24,12 @@ cc_flag = []
 cc_flag.append("-gencode")
 cc_flag.append("arch=compute_80,code=sm_80")
 setup(
-    name='jagged_tensor_op',
-    author='Runchu Zhao',
-    description='JaggedTensor concat forward and backward',
+    name='hstu_cuda_ops',
+    description='HSTU CUDA ops',
     ext_modules=[
         CUDAExtension(
             name='jagged_tensor_op',
-            sources=['csrc/jagged_tensor_op_cuda.cpp', 'csrc/jagged_tensor_op_kernel.cu'],
+            sources=['ops/cuda_ops/csrc/jagged_tensor_op_cuda.cpp', 'ops/cuda_ops/csrc/jagged_tensor_op_kernel.cu'],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
                 # "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag,

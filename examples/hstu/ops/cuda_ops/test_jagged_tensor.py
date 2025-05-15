@@ -230,14 +230,16 @@ def test_jagged_tensor_concat_autograd(batch_size, max_len, hidden_dim):
         merged_offsets.add_(offset_tensor)
 
     dummy_grad_lengths_for_cpp = torch.zeros_like(merged_lengths, dtype=torch.int32) 
-
+# todo: delete
     grads_list = jagged_tensor_op.concat_2D_jagged_tensors_backward(
         grad_for_merged_values,          
         dummy_grad_lengths_for_cpp,      
         offsets_list,           
         merged_offsets          
     )
-
+#todo compare with pytorch backward results
+#forward:pt,triton  -> merge these two, if size == 2: triton() else pt()
+#backward:pt,triton
     # Check if the gradients accumulated in jtN.values().grad match the expected ones.
     assert jt1.values().grad is not None, "Gradient for jt1.values() should exist"
     assert torch.allclose(jt1.values().grad, grads_list[0]), \

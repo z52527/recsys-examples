@@ -28,7 +28,7 @@ setup(
     description='HSTU CUDA ops',
     ext_modules=[
         CUDAExtension(
-            name='jagged_tensor_op',
+            name='hstu_cuda_ops',
             sources=['ops/cuda_ops/csrc/jagged_tensor_op_cuda.cpp', 'ops/cuda_ops/csrc/jagged_tensor_op_kernel.cu'],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],

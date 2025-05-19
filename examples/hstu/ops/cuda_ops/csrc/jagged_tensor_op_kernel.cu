@@ -7,6 +7,7 @@
 #include <vector>
 #include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
+#include "../include/utils.h"
 constexpr int kMaxNumTensors = 32;
 template <typename T>
 struct InputJaggedTensor {
@@ -73,14 +74,11 @@ void concat_2D_jagged_tensors_cuda_forward (
     torch::Tensor merged_offsets){
 
     int num_tensors = values_list.size();
+    if (num_tensors == 0) {
+        return; 
+    }
     int num_rows = offsets_list[0].size(0) - 1;
     int hidden_dim = values_list[0].size(-1);
-
-	InputJaggedTensor<float> input_jagged_tensor;
-    for (int i = 0; i < num_tensors; ++i) {
-		input_jagged_tensor.value_list[i] = values_list[i].data_ptr<float>();
-		input_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
-    }
 
     int threads = 128;
     int blocks = (num_rows + threads - 1) / threads;
@@ -88,14 +86,27 @@ void concat_2D_jagged_tensors_cuda_forward (
     assert(merged_values.is_contiguous());
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+    printf("values_list[0].scalar_type() = %d\n", values_list[0].scalar_type());
+    DISPATCH_KERNEL_BY_TYPE(
+        values_list[0].scalar_type(), 
+        "concat_2D_jagged_tensors_forward_kernel",
+        ([&] {
+            InputJaggedTensor<scalar_t> input_jagged_tensor_typed;
+            for (int i = 0; i < num_tensors; ++i) {
+                TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
+                input_jagged_tensor_typed.value_list[i] = values_list[i].data_ptr<scalar_t>();
+                input_jagged_tensor_typed.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
+            }
 
-    concat_2D_jagged_tensors_forward_kernel<float><<<blocks, threads, 0, stream>>>(
-		input_jagged_tensor,
-        num_tensors,
-        num_rows,
-        hidden_dim,
-        merged_values.data_ptr<float>(),
-        merged_offsets.data_ptr<int>()
+            concat_2D_jagged_tensors_forward_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+                input_jagged_tensor_typed,
+                num_tensors,
+                num_rows,
+                hidden_dim,
+                merged_values.data_ptr<scalar_t>(),
+                merged_offsets.data_ptr<int>()
+            );
+        })
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
@@ -141,7 +152,7 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
 
     std::vector<torch::Tensor> grad_inputs(num_tensors);
     for (int i = 0; i < num_tensors; ++i) {
-        int tensor_size = offsets_list[i][-1].item<int>();
+        int tensor_size = offsets_list[i].index({offsets_list[i].size(0) - 1}).item<int>();
         grad_inputs[i] = torch::empty(
             {tensor_size, hidden_dim},
             grad_output.options()

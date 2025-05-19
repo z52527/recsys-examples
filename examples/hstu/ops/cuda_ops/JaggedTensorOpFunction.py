@@ -4,7 +4,7 @@ from typing import List, Tuple
 import fbgemm_gpu
 from torchrec.sparse.jagged_tensor import JaggedTensor
 
-import jagged_tensor_op
+import hstu_cuda_ops
 
 class _JaggedTensorOpFunction(torch.autograd.Function):
     @staticmethod
@@ -44,10 +44,13 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                     device=values_list[0].device,
                 )
                 .requires_grad_(True)
-            )
-
+            ) 
+        print(f"values_list = {values_list}")
+        print(f"values_list[0].dtype = {values_list[0].dtype}")
+        print(f"merged_values.dtype = {merged_values.dtype}")
+        # import pdb; pdb.set_trace()
         with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
-            jagged_tensor_op.concat_2D_jagged_tensors_forward(
+            hstu_cuda_ops.concat_2D_jagged_tensors_forward(
                 values_list, 
                 offsets_list, 
                 merged_values,
@@ -60,10 +63,12 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output, grad_lengths):
         merged_offsets, *offsets_list = ctx.saved_tensors
-        grad_input = jagged_tensor_op.concat_2D_jagged_tensors_backward(grad_output, grad_lengths, offsets_list, merged_offsets)
+        grad_input = hstu_cuda_ops.concat_2D_jagged_tensors_backward(grad_output, grad_lengths, offsets_list, merged_offsets)
         return None, None, *grad_input
 
 def jagged_2D_tensor_concat(values_list: List[torch.Tensor], offsets_list: List[torch.Tensor], max_seqlens: List[int]):
     assert len(values_list) == len(offsets_list)
+    
+    # print(f"values_list[0].dtype = {values_list[0].dtype}")
     return _JaggedTensorOpFunction.apply(offsets_list, max_seqlens, *values_list)
 

@@ -3,7 +3,7 @@ import pytest
 from typing import List, Tuple
 from torchrec.sparse.jagged_tensor import JaggedTensor
 
-import jagged_tensor_op # Ensure this is imported for the C++ kernel
+import hstu_cuda_ops # Ensure this is imported for the C++ kernel
 from JaggedTensorOpFunction import _JaggedTensorOpFunction # Ensure the autograd function is imported
 
 def concat_2D_jagged_tensors_pytorch(
@@ -41,7 +41,7 @@ def concat_2D_jagged_tensors_pytorch(
     )
 
 
-def create_test_jagged_tensor(batch_size, max_len, hidden_dim):
+def create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=torch.float32):
 
     lengths = torch.randint(
         1, max_len + 1, size=(batch_size,), device=torch.device("cuda")
@@ -53,13 +53,24 @@ def create_test_jagged_tensor(batch_size, max_len, hidden_dim):
     values = (
         torch.empty(
             (total_len, hidden_dim),
-            dtype=torch.float32,
+            dtype=dtype,
             device=torch.device("cuda"),
         )
         .uniform_(-1.0, 1.0)
         .requires_grad_(True)
     )
-
+    # if dtype.is_floating_point:
+    #     values.uniform_(-1.0, 1.0)
+    #     values.requires_grad_(True)
+    # elif dtype == torch.int32 or \
+    #      dtype == torch.int64 or \
+    #      dtype == torch.int16 or \
+    #      dtype == torch.int8: 
+    #     low_int = 0
+    #     high_int = 10 
+    #     values = torch.randint(low_int, high_int, (total_len, hidden_dim), dtype=dtype, device=torch.device("cuda"))
+    # else:
+    #     print(f"警告: 不支持的 dtype {dtype} 用于特定初始化。张量可能未初始化。")
     return JaggedTensor(
         values=values,
         lengths=lengths,
@@ -231,7 +242,7 @@ def test_jagged_tensor_concat_autograd(batch_size, max_len, hidden_dim):
 
     dummy_grad_lengths_for_cpp = torch.zeros_like(merged_lengths, dtype=torch.int32) 
 # todo: delete
-    grads_list = jagged_tensor_op.concat_2D_jagged_tensors_backward(
+    grads_list = hstu_cuda_ops.concat_2D_jagged_tensors_backward(
         grad_for_merged_values,          
         dummy_grad_lengths_for_cpp,      
         offsets_list,           
@@ -251,25 +262,21 @@ def test_jagged_tensor_concat_autograd(batch_size, max_len, hidden_dim):
     
     print(f"Autograd test passed for bs={batch_size}, ml={max_len}, hd={hidden_dim}")
 
-def test_jagged_tensor2():
-    jt1 = create_test_jagged_tensor(batch_size=2, max_len=3, hidden_dim=3)
-    jt2 = create_test_jagged_tensor(batch_size=2, max_len=4, hidden_dim=3)
+@pytest.mark.parametrize("batch_size,max_len,hidden_dim, dtype", [
+    (2, 3, 4, torch.float64),
+    (4, 5, 8, torch.float32),
+    (2, 3, 4, torch.bfloat16),
+    (2, 3, 4, torch.half)
+])
+def test_different_type(batch_size, max_len, hidden_dim, dtype):
+    jt1 = create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=dtype)
+    jt2 = create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=dtype)
     from JaggedTensorOpFunction import jagged_2D_tensor_concat
-    print("jt1.values()")
-    print(jt1.values())
-    print("jt2.values()")
-    print(jt2.values())
-    print("jt1.offsets()")
-    print(jt1.offsets())
-    print("jt2.offsets()")
-    print(jt2.offsets())
     result = jagged_2D_tensor_concat([jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [3, 4])
-    print("result[0]")
-    print(result[0])
-    print("result[1]")
-    print(result[1])
+    print(result)
     
     
 if __name__ == "__main__":
-    test_jagged_tensor_concat_kernel()
+    # test_jagged_tensor_concat_kernel()
     # test_jagged_tensor_concat_autograd(batch_size=2, max_len=3, hidden_dim=4)
+    test_different_type(batch_size=2, max_len=3, hidden_dim=4, dtype=torch.float64)

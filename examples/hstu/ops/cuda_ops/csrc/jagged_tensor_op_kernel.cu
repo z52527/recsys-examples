@@ -86,7 +86,7 @@ void concat_2D_jagged_tensors_cuda_forward (
     assert(merged_values.is_contiguous());
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
-    printf("values_list[0].scalar_type() = %d\n", values_list[0].scalar_type());
+    // printf("values_list[0].scalar_type() = %d\n", values_list[0].scalar_type());
     DISPATCH_KERNEL_BY_TYPE(
         values_list[0].scalar_type(), 
         "concat_2D_jagged_tensors_forward_kernel",
@@ -106,9 +106,9 @@ void concat_2D_jagged_tensors_cuda_forward (
                 merged_values.data_ptr<scalar_t>(),
                 merged_offsets.data_ptr<int>()
             );
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
         })
     );
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return; 
 }
@@ -159,25 +159,32 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
         );
     }
 
-    InputJaggedTensor<float> grad_jagged_tensor;
-    for (int i = 0; i < num_tensors; ++i) {
-        grad_jagged_tensor.value_list[i] = grad_inputs[i].data_ptr<float>();
-        grad_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
-    }
-
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     int threads = 128;
     int blocks = (num_rows + threads - 1) / threads;
 
-    concat_2D_jagged_tensors_backward_kernel<float><<<blocks, threads, 0, stream>>>(
-        grad_jagged_tensor,
-        num_tensors,
-        num_rows,
-        hidden_dim,
-        grad_output.data_ptr<float>(),
-        merged_offsets.data_ptr<int>()
-    );
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
+    DISPATCH_KERNEL_BY_TYPE(
+        grad_output.scalar_type(), 
+        "concat_2D_jagged_tensors_backward_kernel",
+        ([&] {
+            InputJaggedTensor<scalar_t> grad_jagged_tensor;
+            for (int i = 0; i < num_tensors; ++i) {
+                TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
+                grad_jagged_tensor.value_list[i] = grad_inputs[i].data_ptr<scalar_t>();
+                grad_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
+            }
+
+            concat_2D_jagged_tensors_backward_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+                grad_jagged_tensor,
+                num_tensors,
+                num_rows,
+                hidden_dim,
+                grad_output.data_ptr<scalar_t>(),
+                merged_offsets.data_ptr<int>()
+            );
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
+        })
+    );
     return grad_inputs;
 }

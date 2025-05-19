@@ -66,9 +66,20 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         grad_input = hstu_cuda_ops.concat_2D_jagged_tensors_backward(grad_output, grad_lengths, offsets_list, merged_offsets)
         return None, None, *grad_input
 
+def switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
+    if not torch.jit.is_scripting() and torch.compiler.is_compiling():
+        # Tell Dynamo this data-dependent value is in the range (0, 10**9)
+        torch._check(x.size(0) > 0)
+        torch._check(x.size(0) < 10**9)
+    if x.stride(-1) == 1:
+        return x
+    return x.contiguous()
+
 def jagged_2D_tensor_concat(values_list: List[torch.Tensor], offsets_list: List[torch.Tensor], max_seqlens: List[int]):
     assert len(values_list) == len(offsets_list)
-    
-    # print(f"values_list[0].dtype = {values_list[0].dtype}")
+    assert all(values_list[0].dtype == v.dtype for v in values_list)
+    assert all(values_list[0].device == v.device for v in values_list)
+    # assert all(v.is_contiguous() for v in values_list)
+    values_list = [switch_to_contiguous_if_needed(v) for v in values_list]
     return _JaggedTensorOpFunction.apply(offsets_list, max_seqlens, *values_list)
 

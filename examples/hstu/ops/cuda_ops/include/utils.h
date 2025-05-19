@@ -1,15 +1,12 @@
-// 假设您已经包含了必要的 PyTorch/ATen 头文件，例如：
 #include <ATen/ATen.h> 
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>  
 #include <c10/util/BFloat16.h> 
 #include <c10/util/Exception.h> 
-// #include <c10/util/ToString.h>   // For c10::toString
 
-// For std::cout and typeid
 #include <iostream>
 #include <typeinfo>
-#include <cstdio> // For printf, if chosen
+#include <cstdio> 
 
 #include <cstdint>
 #include <cuda_bf16.h>
@@ -31,15 +28,11 @@
   _KERNEL_DISPATCH_CASE(at::ScalarType::BFloat16, at::BFloat16, LAMBDA_FN_TO_CALL)                 \
   _KERNEL_DISPATCH_CASE(at::ScalarType::Double, double, LAMBDA_FN_TO_CALL)
 
-#define _KERNEL_INTEGER_CASES(LAMBDA_FN_TO_CALL) \
-  _KERNEL_DISPATCH_CASE(at::ScalarType::Int, int, LAMBDA_FN_TO_CALL) \
-  _KERNEL_DISPATCH_CASE(at::ScalarType::Long, long, LAMBDA_FN_TO_CALL)
 
 #define DISPATCH_KERNEL_BY_TYPE(SCALAR_TYPE_ENUM_INPUT, KERNEL_NAME_STR, LAMBDA_FN) \
   do { \
     switch (SCALAR_TYPE_ENUM_INPUT) { \
       _KERNEL_FLOATING_CASES(LAMBDA_FN) \
-      _KERNEL_INTEGER_CASES(LAMBDA_FN) \
       default: \
         AT_ERROR( \
             KERNEL_NAME_STR, \

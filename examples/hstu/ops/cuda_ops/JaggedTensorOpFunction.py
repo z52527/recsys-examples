@@ -45,9 +45,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 )
                 .requires_grad_(True)
             ) 
-        print(f"values_list = {values_list}")
-        print(f"values_list[0].dtype = {values_list[0].dtype}")
-        print(f"merged_values.dtype = {merged_values.dtype}")
+        # print(f"values_list = {values_list}")
+        # print(f"values_list[0].dtype = {values_list[0].dtype}")
+        # print(f"merged_values.dtype = {merged_values.dtype}")
         # import pdb; pdb.set_trace()
         with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
             hstu_cuda_ops.concat_2D_jagged_tensors_forward(

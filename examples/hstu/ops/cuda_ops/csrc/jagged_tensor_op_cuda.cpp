@@ -24,7 +24,7 @@ void concat_2D_jagged_tensors_forward (
     assert(merged_values.dtype() == values_list[0].dtype());
 
     // // printf("merged_values.dtype() in cpp = %d\n", merged_values.dtype());
-    std::cout << "merged_values.dtype() in cpp = " << merged_values.dtype() << std::endl;
+    // std::cout << "merged_values.dtype() in cpp = " << merged_values.dtype() << std::endl;
     concat_2D_jagged_tensors_cuda_forward(
         values_list, 
         offsets_list, 

@@ -25,7 +25,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 merged_offsets.add_(offset_tensor)
         
         ctx.save_for_backward(merged_offsets, *offsets_list)
-        total_length = merged_offsets[-1].item()
+        # total_length = merged_offsets[-1].item()
+        total_length = sum(v.size(0) for v in values_list)
+
         hidden_dim = values_list[0].size(-1)
         merged_lengths = []
         for offsets_tensor in offsets_list:

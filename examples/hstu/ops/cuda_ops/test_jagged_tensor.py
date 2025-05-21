@@ -111,25 +111,35 @@ def test_n_jagged_tensor_concat_kernel(num, batch_size, max_len, hidden_dim):
     with torch.cuda.nvtx.range("Result Verification", color="yellow"):
         assert torch.equal(result[0], result2[0])
         assert torch.equal(result[1], result2[1])
-
+@pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
+    (2, 3, 4)
+])
 def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
-        jt1 = create_test_jagged_tensor(batch_size=batch_size, max_len=max_len, hidden_dim=hidden_dim)
-        jt2 = create_test_jagged_tensor(batch_size=batch_size, max_len=max_len+1, hidden_dim=hidden_dim)
+        jt1 = create_test_jagged_tensor(batch_size, max_len, hidden_dim)
+        jt2 = create_test_jagged_tensor(batch_size, max_len+1, hidden_dim)
         max_len_jt1 = torch.max(jt1.lengths()).item()
         max_len_jt2 = torch.max(jt2.lengths()).item()
         calculated_max_seq_len = max_len_jt1 + max_len_jt2
     # from triton_jagged import _Concat2DJaggedFunction
+    from ops.triton_ops.triton_jagged import triton_concat_2D_jagged
     # for _ in range(20):
     with torch.cuda.nvtx.range("triton concat", color="purple"):
-        result = _Concat2DJaggedFunction.apply(
+        # result = _Concat2DJaggedFunction.apply(
+        #     calculated_max_seq_len,
+        #     jt1.values(),
+        #     jt2.values(),
+        #     jt1.offsets(),
+        #     jt2.offsets(),
+        #     False,
+        #     0
+        # )
+        result = triton_concat_2D_jagged(
             calculated_max_seq_len,
             jt1.values(),
             jt2.values(),
             jt1.offsets(),
             jt2.offsets(),
-            False,
-            0
         )
     with torch.cuda.nvtx.range("cudaop concat", color="purple"):
         result2 = jagged_2D_tensor_concat([jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [max_len_jt1, max_len_jt2])
@@ -287,5 +297,5 @@ def test_all_jagged_tensor_concat_function(num, batch_size, max_len, hidden_dim)
 if __name__ == "__main__":
     # test_jagged_tensor_concat_kernel()
     # test_jagged_tensor_concat_autograd(batch_size=2, max_len=3, hidden_dim=4)
-    # test_different_type(batch_size=2, max_len=3, hidden_dim=4, dtype=torch.float64)
+    # test_different_type(batchsize=2, max_len=3, hidden_dim=4, dtype=torch.float64)
     test_triton_jagged_tensor_concat(batch_size=2, max_len=3, hidden_dim=4)

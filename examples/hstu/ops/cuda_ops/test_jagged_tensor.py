@@ -143,6 +143,13 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
         )
     with torch.cuda.nvtx.range("cudaop concat", color="purple"):
         result2 = jagged_2D_tensor_concat([jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [max_len_jt1, max_len_jt2])
+    
+    print("input jt1", jt1.values())
+    print("jt1 lengths", jt1.lengths())
+    print("input jt2", jt2.values())
+    print("jt2 lengths", jt2.lengths())
+    print("triton result", result)
+    print("cudaop result", result2[0])
     assert torch.equal(result, result2[0])
 
     grad_for_merged_values = torch.randn_like(result)
@@ -282,10 +289,11 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
 #test all jagged tensor concat function
 @pytest.mark.parametrize("num", [1, 2, 3, 4])
 @pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
-    (2, 3, 4),
-    (4, 5, 8),
-    (1, 2, 16),
-    (4, 10, 5)
+    # (2, 3, 4),
+    # (4, 5, 8),
+    # (1, 2, 16),
+    # (4, 10, 5),
+    (32, 1024, 64)
 ])
 def test_all_jagged_tensor_concat_function(num, batch_size, max_len, hidden_dim):
     if num == 2:

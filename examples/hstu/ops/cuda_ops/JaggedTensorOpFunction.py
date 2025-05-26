@@ -81,6 +81,7 @@ def jagged_2D_tensor_concat(values_list: List[torch.Tensor], offsets_list: List[
     assert len(values_list) == len(offsets_list)
     assert all(values_list[0].dtype == v.dtype for v in values_list)
     assert all(values_list[0].device == v.device for v in values_list)
+    #Todo: need to support non contiguous case in the future.
     # assert all(v.is_contiguous() for v in values_list)
     values_list = [switch_to_contiguous_if_needed(v) for v in values_list]
     return _JaggedTensorOpFunction.apply(offsets_list, max_seqlens, *values_list)

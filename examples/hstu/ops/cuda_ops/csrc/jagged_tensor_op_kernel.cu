@@ -7,6 +7,7 @@
 #include <vector>
 #include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/Dispatch.h>
 #include "../include/utils.h"
 constexpr int kMaxNumTensors = 32;
 template <typename T>
@@ -87,10 +88,12 @@ void concat_2D_jagged_tensors_cuda_forward (
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     // printf("values_list[0].scalar_type() = %d\n", values_list[0].scalar_type());
-    DISPATCH_KERNEL_BY_TYPE(
+    // DISPATCH_KERNEL_BY_TYPE(
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::kHalf, at::kBFloat16,
         values_list[0].scalar_type(), 
         "concat_2D_jagged_tensors_forward_kernel",
-        ([&] {
+        [&] {
             InputJaggedTensor<scalar_t> input_jagged_tensor_typed;
             for (int i = 0; i < num_tensors; ++i) {
                 TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
@@ -107,7 +110,7 @@ void concat_2D_jagged_tensors_cuda_forward (
                 merged_offsets.data_ptr<int>()
             );
             C10_CUDA_KERNEL_LAUNCH_CHECK();
-        })
+        }
     );
 
     return; 
@@ -164,10 +167,12 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
     int blocks = (num_rows + threads - 1) / threads;
 
 
-    DISPATCH_KERNEL_BY_TYPE(
+    // DISPATCH_KERNEL_BY_TYPE(
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::kHalf, at::kBFloat16,
         grad_output.scalar_type(), 
         "concat_2D_jagged_tensors_backward_kernel",
-        ([&] {
+        [&] {
             InputJaggedTensor<scalar_t> grad_jagged_tensor;
             for (int i = 0; i < num_tensors; ++i) {
                 TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
@@ -184,7 +189,7 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
                 merged_offsets.data_ptr<int>()
             );
             C10_CUDA_KERNEL_LAUNCH_CHECK();
-        })
+        }
     );
     return grad_inputs;
 }

@@ -666,6 +666,9 @@ class BatchedDynamicEmbeddingTables(nn.Module):
                 self._scores[table_name] = 1
             elif option.score_strategy == DynamicEmbScoreStrategy.CUSTOMIZED:
                 option.evict_strategy = DynamicEmbEvictStrategy.CUSTOMIZED
+            elif option.score_strategy == DynamicEmbScoreStrategy.LFU:
+                option.evict_strategy = DynamicEmbEvictStrategy.LFU
+                self._scores[table_name] = 1
 
     def _update_score(self):
         for table_name, option in zip(self._table_names, self._dynamicemb_options):
@@ -689,6 +692,8 @@ class BatchedDynamicEmbeddingTables(nn.Module):
                     self._scores[table_name] = 0
                 else:
                     self._scores[table_name] = new_score
+            elif option.score_strategy == DynamicEmbScoreStrategy.LFU:
+                self._scores[table_name] = 1
 
     def incremental_dump(
         self,

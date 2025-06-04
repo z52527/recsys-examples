@@ -16,11 +16,12 @@ import torch
 from commons.utils.nvtx_op import output_nvtx_hook
 from configs import HSTUConfig
 from configs.hstu_config import HSTULayerType
-from modules.jagged_module import JaggedData, JaggedModule
+from megatron.core.transformer.module import MegatronModule
+from modules.jagged_data import JaggedData
 from ops.fused_hstu_op import fused_hstu_op
 
 
-class FusedHSTULayer(JaggedModule):
+class FusedHSTULayer(MegatronModule):
     """
     x = ln(x)
     u,v,q,k = silu(linear_bias(x))
@@ -55,13 +56,14 @@ class FusedHSTULayer(JaggedModule):
         self._eps = config.layernorm_epsilon
         self._is_causal = config.is_causal
         self._target_group_size = config.target_group_size
-        self._alpha = 1.0
+        self._alpha = 1.0 / (self._attention_dim_per_head**0.5)
         self._residual = config.residual
         self._attn_backend = config.kernel_backend
 
+        # stream and event are shared across all layers
+        self._wgrad_stream = config.async_wgrad_stream
+        self._wgrad_event = config.async_wgrad_event
         # all weights and biases are float32 unless module.to(dtype) is called
-        linear_weight_init_method = config.init_method
-
         self._linear_uvqk_weight = torch.nn.Parameter(
             torch.empty(
                 (
@@ -79,7 +81,7 @@ class FusedHSTULayer(JaggedModule):
                 )
             )
         )
-        linear_weight_init_method(self._linear_uvqk_weight)
+        torch.nn.init.xavier_uniform_(self._linear_uvqk_weight)
 
         self._residual = config.residual
         device = torch.cuda.current_device()
@@ -111,7 +113,7 @@ class FusedHSTULayer(JaggedModule):
             )
         )
 
-        linear_weight_init_method(self._linear_proj_weight)
+        torch.nn.init.xavier_uniform_(self._linear_proj_weight)
 
     @output_nvtx_hook(nvtx_tag="FusedHSTULayer", hook_tensor_attr_name="values")
     def forward(self, jd: JaggedData) -> JaggedData:
@@ -144,6 +146,8 @@ class FusedHSTULayer(JaggedModule):
             causal=self._is_causal,
             seed=self._seed,
             residual=self._residual,
+            wgrad_stream=self._wgrad_stream,
+            wgrad_event=self._wgrad_event,
         )
         return JaggedData(
             values=output,

@@ -13,14 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import List, Tuple, Union, cast
-
-from commons.utils.tensor_initializer import BaseInitializer
-from dynamicemb import DynamicEmbCheckMode, DynamicEmbEvictStrategy
+from typing import List, Tuple, cast
 
 
 @dataclass
-class EmbeddingOptimizerParam:
+class OptimizerParam:
     """
     Configuration for the embedding optimizer.
 
@@ -40,7 +37,15 @@ class EmbeddingOptimizerParam:
 
 
 @dataclass
-class BaseShardedEmbeddingConfig:
+class ShardedEmbeddingConfig:
+    """
+    Configuration for sharded embeddings with sharding type. Inherits from BaseShardedEmbeddingConfig.
+
+    Args:
+        config (EmbeddingConfig): The embedding configuration.
+        sharding_type (str): The type of sharding, ``'data_parallel'`` | ``'model_parallel'``.
+    """
+
     """
     Base configuration for sharded embeddings.
 
@@ -49,27 +54,13 @@ class BaseShardedEmbeddingConfig:
         table_name (str): The name of the table.
         vocab_size (int): The size of the vocabulary.
         dim (int): The dimension size of the embeddings.
-        initializer (BaseInitializer): The initializer for the embeddings.
-        optimizer_param (EmbeddingOptimizerParam): The optimizer parameters for the embeddings.
+        sharding_type (str): The type of sharding, ``'data_parallel'`` | ``'model_parallel'``.
     """
 
     feature_names: List[str]
     table_name: str
     vocab_size: int
     dim: int
-    initializer: BaseInitializer
-    optimizer_param: EmbeddingOptimizerParam
-
-
-@dataclass
-class ShardedEmbeddingConfig(BaseShardedEmbeddingConfig):
-    """
-    Configuration for sharded embeddings with sharding type. Inherits from BaseShardedEmbeddingConfig.
-
-    Args:
-        sharding_type (str): The type of sharding, ``'data_parallel'`` | ``'model_parallel'``.
-    """
-
     sharding_type: str
 
     def __post_init__(self):
@@ -80,37 +71,17 @@ class ShardedEmbeddingConfig(BaseShardedEmbeddingConfig):
 
 
 @dataclass
-class DynamicShardedEmbeddingConfig(BaseShardedEmbeddingConfig):
-    """
-    Configuration for dynamic sharded embeddings. Inherits from BaseShardedEmbeddingConfig.
-
-    Args:
-        global_hbm_for_values (int, optional): Global HBM capacity size in bytes for storing values. Defaults to 0.
-        evict_strategy (DynamicEmbEvictStrategy, optional): Eviction strategy. Defaults to ``DynamicEmbEvictStrategy.LRU``.
-        safe_check_mode (DynamicEmbCheckMode, optional): Safe check mode. Defaults to ``DynamicEmbCheckMode.IGNORE``.
-        bucket_capacity (int, optional): The number of entries each bucket can hold. Defaults to 128.
-    """
-
-    global_hbm_for_values: int = 0
-    evict_strategy: DynamicEmbEvictStrategy = DynamicEmbEvictStrategy.LRU
-    safe_check_mode: DynamicEmbCheckMode = DynamicEmbCheckMode.IGNORE
-    bucket_capacity: int = 128
-
-
-@dataclass
 class BaseTaskConfig:
     """
     Base configuration for tasks.
 
     Args:
-        embedding_configs (List[Union[ShardedEmbeddingConfig, DynamicShardedEmbeddingConfig]]): A list of embedding configurations. Each configuration can be either a `ShardedEmbeddingConfig` or a `DynamicShardedEmbeddingConfig`.
+        embedding_configs (List[ShardedEmbeddingConfig]): A list of embedding configurations.
         user_embedding_norm (str, optional): Normalization for user embeddings. ``'layer_norm'`` | ``'l2_norm'``. Defaults to ``'l2_norm'``.
         item_l2_norm (bool, optional): Whether to apply L2 normalization to item embeddings. Defaults to False.
     """
 
-    embedding_configs: List[
-        Union[ShardedEmbeddingConfig, DynamicShardedEmbeddingConfig]
-    ]
+    embedding_configs: List[ShardedEmbeddingConfig]
 
     user_embedding_norm: str = "l2_norm"
     item_l2_norm: bool = False
@@ -128,40 +99,33 @@ class RankingConfig(BaseTaskConfig):
     Configuration for ranking tasks.
 
     Args:
-        prediction_head_arch (List[List[int]]): Architecture of the prediction head.
-        prediction_head_act_type (Union[List[str], str]): Activation types for the prediction head. Defaults to ``'relu'``
-        prediction_head_bias (Union[List[bool], bool]): Bias flags for the prediction head. Defaults to ``True``
+        prediction_head_arch (List[int]): Architecture of the prediction head.
+        prediction_head_act_type (str): Activation function type for the prediction head layers. Must be one of: ``'relu'`` | ``'gelu'``. Defaults to ``'relu'``.
+        prediction_head_bias (bool): Whether to use bias terms in the prediction head layers. Defaults to ``True``.
+        num_tasks (int): Number of tasks. Defaults to ``1``.
         eval_metrics (Tuple[str], optional): Tuple of evaluation metric type str during training. Refer to :obj:`~modules.metrics.metric_modules.MetricType`
           for available metrics. Defaults to ``'AUC'``.
     """
 
-    prediction_head_arch: List[List[int]] = cast(List[List[int]], None)
-    prediction_head_act_type: Union[List[str], str] = "relu"
-    prediction_head_bias: Union[List[bool], bool] = True
-    # one head per event
-    # [binary cross entropy or multicross]
-    # number of tasks/events
+    prediction_head_arch: List[int] = cast(List[int], None)
+    prediction_head_act_type: str = "relu"
+    prediction_head_bias: bool = True
+    num_tasks: int = 1
     eval_metrics: Tuple[str, ...] = ("AUC",)
 
     def __post_init__(self):
         assert (
             self.prediction_head_arch is not None
         ), "Please provide prediction head arch"
-        if isinstance(self.prediction_head_act_type, str):
-            self.prediction_head_act_type = [
-                self.prediction_head_act_type
-                for _ in range(len(self.prediction_head_arch))
-            ]
-        if isinstance(self.prediction_head_bias, bool):
-            self.prediction_head_bias = [
-                self.prediction_head_bias for _ in range(len(self.prediction_head_arch))
-            ]
-        assert len(self.prediction_head_act_type) == len(
-            self.prediction_head_arch
-        ), "prediction head arch number should match with act_type"
-        assert len(self.prediction_head_bias) == len(
-            self.prediction_head_arch
-        ), "prediction head arch number should match with bias number"
+        assert isinstance(
+            self.prediction_head_arch, list
+        ), "prediction_head_arch should be a list"
+        assert isinstance(
+            self.prediction_head_act_type, str
+        ), "prediction_head_act_type should be a str"
+        assert isinstance(
+            self.prediction_head_bias, bool
+        ), "prediction_head_bias should be a bool"
 
 
 @dataclass

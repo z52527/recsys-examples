@@ -138,11 +138,11 @@ void insert_and_evict(
     bool unique_key = true,
     bool ignore_evict_strategy = false) {
 
-  if (not score and table->evict_strategy() == EvictStrategy::kCustomized) {
-    throw std::invalid_argument("Must specify the score when evict strategy is customized.");
+  if (not score and (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu)) {
+    throw std::invalid_argument("Must specify the score when evict strategy is customized or LFU.");
   }
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  if (table->evict_strategy() == EvictStrategy::kCustomized) {
+  if (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu) {
     auto&& option = at::TensorOptions().dtype(at::kUInt64).device(keys.device());
     // broadcast scores
     at::Tensor bc_scores = at::empty({static_cast<int64_t>(n)}, option);
@@ -188,8 +188,8 @@ void find_or_insert(std::shared_ptr<dyn_emb::DynamicVariableBase> table,
                   bool ignore_evict_strategy = false
                   )
 {
-  if (not score and table->evict_strategy() == EvictStrategy::kCustomized) {
-    throw std::invalid_argument("Must specify the score when evict strategy is customized.");
+  if (not score and (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu)) {
+    throw std::invalid_argument("Must specify the score when evict strategy is customized or LFU.");
   }
   if (n == 0) return;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -203,7 +203,7 @@ void find_or_insert(std::shared_ptr<dyn_emb::DynamicVariableBase> table,
 
   auto found_tensor_data_ptr = found_tensor.data_ptr<bool>();
 
-  if (table->evict_strategy() == EvictStrategy::kCustomized) {
+  if (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu) {
     auto&& option = at::TensorOptions().dtype(at::kUInt64).device(keys.device());
     // broadcast scores
     at::Tensor bc_scores = at::empty({static_cast<int64_t>(n)}, option);
@@ -226,15 +226,15 @@ void find_or_insert_pointers(
   const std::optional<uint64_t> score = std::nullopt,
   bool unique_key = true,
   bool ignore_evict_strategy = false) {
-  if (not score and table->evict_strategy() == EvictStrategy::kCustomized) {
-    throw std::invalid_argument("Must specify the score when evict strategy is customized.");
+  if (not score and (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu)) {
+    throw std::invalid_argument("Must specify the score when evict strategy is customized or LFU.");
   }
   if (n == 0) return;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   auto values_data_ptr = reinterpret_cast<void**>(values.data_ptr<int64_t>());
   auto found_tensor_data_ptr = founds.data_ptr<bool>();
 
-  if (table->evict_strategy() == EvictStrategy::kCustomized) {
+  if (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu) {
     auto&& option = at::TensorOptions().dtype(at::kUInt64).device(keys.device());
     // broadcast scores
     at::Tensor bc_scores = at::empty({static_cast<int64_t>(n)}, option);
@@ -246,6 +246,22 @@ void find_or_insert_pointers(
       nullptr, stream, unique_key, ignore_evict_strategy);
   }
   AT_CUDA_CHECK(cudaGetLastError());
+}
+
+void find_pointers(
+  std::shared_ptr<dyn_emb::DynamicVariableBase> table,
+  const size_t n,
+  const at::Tensor keys,
+  at::Tensor values,
+  at::Tensor founds) {
+
+  if (n == 0) return;
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto values_data_ptr = reinterpret_cast<void**>(values.data_ptr<int64_t>());
+  auto found_tensor_data_ptr = founds.data_ptr<bool>();
+
+  table->find_pointers(n, keys.data_ptr(), values_data_ptr, found_tensor_data_ptr, 
+      nullptr, stream);
 }
 
 void assign(std::shared_ptr<dyn_emb::DynamicVariableBase> table, const size_t n,
@@ -791,13 +807,14 @@ void bind_dyn_emb_op(py::module &m) {
 					int reserved_key_start_bit = 0,
 					size_t num_of_buckets_per_alloc = 1,
 					const dyn_emb::InitializerArgs & initializer_args = dyn_emb::InitializerArgs(),
-          const int safe_check_mode = static_cast<int>(SafeCheckMode::IGNORE)) {
+          const int safe_check_mode = static_cast<int>(SafeCheckMode::IGNORE),
+          const int optimizer_type = static_cast<int>(OptimizerType::Null)) {
 
             int64_t pow2_max_capaity = power2(max_capaity);
             int64_t pow2_init_capaity = power2(init_capaity);
             auto table = dyn_emb::VariableFactory::create(key_type,value_type,evict_type,dim,init_capaity,max_capaity,max_hbm_for_vectors,max_bucket_size,max_load_factor,
                                  block_size,io_block_size,device_id,io_by_cpu,use_constant_memory,reserved_key_start_bit,num_of_buckets_per_alloc,initializer_args, 
-                                 static_cast<SafeCheckMode>(safe_check_mode));
+                                 static_cast<SafeCheckMode>(safe_check_mode), static_cast<OptimizerType>(optimizer_type));
             return table; }))
          .def("key_type", &dyn_emb::DynamicVariableBase::key_type,
              "Get Dynamic Emb Table key type")
@@ -806,7 +823,13 @@ void bind_dyn_emb_op(py::module &m) {
           .def("evict_strategy", &dyn_emb::DynamicVariableBase::evict_strategy,
             "Get evict strategy of Dynamic Emb Table.")
           .def("capacity", &dyn_emb::DynamicVariableBase::capacity,
-            "Get capacity of Dynamic Emb Table.");
+            "Get capacity of Dynamic Emb Table.")
+          .def("optstate_dim", &dyn_emb::DynamicVariableBase::optstate_dim,
+            "Get dim of all optimizer states.")
+          .def("set_initial_optstate", &dyn_emb::DynamicVariableBase::set_initial_optstate,
+            "Set initial value of optimizer state.")
+          .def("get_initial_optstate", &dyn_emb::DynamicVariableBase::get_initial_optstate,
+            "Get initial value of optimizer state.");
 
   m.def("dyn_emb_rows", &dyn_emb_rows, "Get the number of rows in the table",
         py::arg("table"));
@@ -916,6 +939,14 @@ void bind_dyn_emb_op(py::module &m) {
       .value("KEpochLfu", dyn_emb::EvictStrategy::kEpochLfu)
       .value("KCustomized", dyn_emb::EvictStrategy::kCustomized)
       .export_values();
+
+  py::enum_<dyn_emb::OptimizerType>(m, "OptimizerType")
+    .value("Null", dyn_emb::OptimizerType::Null)
+    .value("SGD", dyn_emb::OptimizerType::SGD)
+    .value("Adam", dyn_emb::OptimizerType::Adam)
+    .value("AdaGrad", dyn_emb::OptimizerType::AdaGrad)
+    .value("RowWiseAdaGrad", dyn_emb::OptimizerType::RowWiseAdaGrad)
+    .export_values();
 
   m.def("lookup_forward", &lookup_forward, "scatter and combine",
         py::arg("src"), py::arg("dst"), py::arg("offset"),

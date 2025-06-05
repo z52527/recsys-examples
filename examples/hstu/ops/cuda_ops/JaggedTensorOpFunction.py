@@ -51,12 +51,16 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # print(f"values_list[0].dtype = {values_list[0].dtype}")
         # print(f"merged_values.dtype = {merged_values.dtype}")
         # import pdb; pdb.set_trace()
+
+        max_seqlen = max(max_seqlens)
+
         with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
             hstu_cuda_ops.concat_2D_jagged_tensors_forward(
                 values_list, 
                 offsets_list, 
                 merged_values,
-                merged_offsets
+                merged_offsets,
+                max_seqlen
             )
         
         return merged_values, merged_lengths

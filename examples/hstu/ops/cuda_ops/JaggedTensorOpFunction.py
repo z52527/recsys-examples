@@ -47,18 +47,23 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 )
                 .requires_grad_(True)
             ) 
-
+        # hidden_dim越大，seqlen_per_block越小
+        seqlen_per_block = (8 if hidden_dim <= 128 else 
+                                4 if hidden_dim <= 256 else 
+                                2 if hidden_dim <= 512 else 1)
+            
         max_seqlen = max(max_seqlens)
         batch_size = offsets_list[0].size(0) - 1
         seqlen_per_block = 4
-        print(f"max_seqlen = {max_seqlen}")
-        print(f"batch_size = {batch_size}")
-        print(f"seqlen_per_block = {seqlen_per_block}") 
+
+
+
         blocks_per_batch = (max_seqlen + seqlen_per_block - 1) // seqlen_per_block
         num_tensors = len(offsets_list)
         total_blocks = batch_size * blocks_per_batch * num_tensors
-        print(f"blocks_per_batch = {blocks_per_batch}")
-        print(f"total_blocks = {total_blocks}")
+
+
+        
         block_workloads = torch.empty(
             total_blocks,
             dtype=torch.int32,
@@ -67,15 +72,22 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         hstu_cuda_ops.compute_block_workloads(offsets_list, seqlen_per_block, max_seqlen, block_workloads)
 
         workload_offset = length_to_complete_offsets(block_workloads)
+        print(f"max_seqlen = {max_seqlen}")
+        print(f"batch_size = {batch_size}")
+        print(f"seqlen_per_block = {seqlen_per_block}") 
+        print(f"blocks_per_batch = {blocks_per_batch}")
+        print(f"total_blocks = {total_blocks}")
         print(f"block_workloads = {block_workloads}")
         print(f"workload_offset = {workload_offset}")
         with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
             hstu_cuda_ops.concat_2D_jagged_tensors_forward(
                 values_list, 
                 offsets_list, 
+                seqlen_per_block,
+                max_seqlen,
+                workload_offset,
                 merged_values,
                 merged_offsets,
-                max_seqlen
             )
         
         return merged_values, merged_lengths

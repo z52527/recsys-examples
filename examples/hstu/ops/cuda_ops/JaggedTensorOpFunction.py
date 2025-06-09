@@ -3,7 +3,7 @@ import torch
 from typing import List, Tuple
 import fbgemm_gpu
 from torchrec.sparse.jagged_tensor import JaggedTensor
-
+from ops.length_to_offsets import length_to_complete_offsets
 import hstu_cuda_ops
 
 class _JaggedTensorOpFunction(torch.autograd.Function):
@@ -47,13 +47,28 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 )
                 .requires_grad_(True)
             ) 
-        # print(f"values_list = {values_list}")
-        # print(f"values_list[0].dtype = {values_list[0].dtype}")
-        # print(f"merged_values.dtype = {merged_values.dtype}")
-        # import pdb; pdb.set_trace()
 
         max_seqlen = max(max_seqlens)
+        batch_size = offsets_list[0].size(0) - 1
+        seqlen_per_block = 4
+        print(f"max_seqlen = {max_seqlen}")
+        print(f"batch_size = {batch_size}")
+        print(f"seqlen_per_block = {seqlen_per_block}") 
+        blocks_per_batch = (max_seqlen + seqlen_per_block - 1) // seqlen_per_block
+        num_tensors = len(offsets_list)
+        total_blocks = batch_size * blocks_per_batch * num_tensors
+        print(f"blocks_per_batch = {blocks_per_batch}")
+        print(f"total_blocks = {total_blocks}")
+        block_workloads = torch.empty(
+            total_blocks,
+            dtype=torch.int32,
+            device=values_list[0].device,
+        )
+        hstu_cuda_ops.compute_block_workloads(offsets_list, seqlen_per_block, max_seqlen, block_workloads)
 
+        workload_offset = length_to_complete_offsets(block_workloads)
+        print(f"block_workloads = {block_workloads}")
+        print(f"workload_offset = {workload_offset}")
         with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
             hstu_cuda_ops.concat_2D_jagged_tensors_forward(
                 values_list, 

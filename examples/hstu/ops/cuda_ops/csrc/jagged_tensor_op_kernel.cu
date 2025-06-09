@@ -227,6 +227,7 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
     if (threadIdx.x == 0) {
         for (int i = 0; i < num_tensors; ++i) {
             shared_cum_lens[i + 1] = shared_cum_lens[i] + shared_lens[i];
+            // printf("batch_id: %d, shared_cum_lens[%d]: %d, shared_cum_lens[%d]: %d, shared_lens[%d]: %d\n", batch_id, i + 1, shared_cum_lens[i + 1], i, shared_cum_lens[i], i, shared_lens[i]);
         }
     } 
     __syncthreads();
@@ -253,21 +254,26 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
         while (tensor_id < num_tensors && global_seq_idx >= shared_cum_lens[tensor_id + 1]) {
             tensor_id++;
         }
-        
+        // if(tensor_id == 3) {
+        //     printf("tensor_id: %d, global_seq_idx: %d, shared_cum_lens[tensor_id]: %d\n", tensor_id, global_seq_idx, shared_cum_lens[tensor_id]);
+        // }
         if (tensor_id >= num_tensors) continue;
         // calculate local sequence index within tensor
         int local_seq_idx = global_seq_idx - shared_cum_lens[tensor_id];
         
         const T* values = input_jagged_tensor.value_list[tensor_id];
         const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
-        
         int tensor_start = offsets[batch_id];
         int tensor_end = offsets[batch_id + 1];
-        //printf("tensor_start: %d, tensor_end: %d, local_seq_idx: %d\n", tensor_start, tensor_end, local_seq_idx);
+        // if(tensor_id == 3) {
+        //     printf("batch_id: %d, block_id: %d, warp_id: %d,lane_id: %d, tensor_start: %d, tensor_end: %d, local_seq_idx: %d, merged_offsets[batch_id]: %d\n", batch_id, block_id, warp_id, lane_id, tensor_start, tensor_end, local_seq_idx, merged_offsets[batch_id]);
+        // }
         if (local_seq_idx < (tensor_end - tensor_start)) {
             int src_row = tensor_start + local_seq_idx;
             int dst_row = merged_offsets[batch_id] + global_seq_idx;
-            //printf("src_row: %d, dst_row: %d  merged_offsets[batch_id]: %d  global_seq_idx: %d\n ", src_row, dst_row, merged_offsets[batch_id], global_seq_idx);
+            if(tensor_id == 3) {
+                //printf("src_row: %d, dst_row: %d  merged_offsets[batch_id]: %d  global_seq_idx: %d\n ", src_row, dst_row, merged_offsets[batch_id], global_seq_idx);
+            }
             // warp-level parallelization for hidden_dim
             // each thread in warp handles multiple hidden dimensions
             int elements_per_thread = (hidden_dim + 32 - 1) / 32;
@@ -324,56 +330,7 @@ __global__ void concat_1D_jagged_tensor_kernel(
 		}
 	}
 }
-//先不管workload了
-//等跑完ncu再说
-// std::tuple<torch::Tensor, torch::Tensor, int> compute_workload_mappings(
-//     torch::Tensor merged_offsets,
-//     int num_rows, 
-//     int seqlen_per_block) {
-    
-//     std::vector<int> batch_ids;
-//     std::vector<int> seq_block_ids;
 
-
-//     // 计算每个batch的实际workload
-//     for (int batch = 0; batch < num_rows; ++batch) {
-//         // 计算该batch的总序列长度
-//         int total_seqlen_for_batch = 0;
-//         for (const auto& offsets : offsets_list) {
-//             auto offsets_ptr = offsets.data_ptr<int32_t>();
-//             int len = offsets_ptr[batch + 1] - offsets_ptr[batch];
-//             if (len > 0) {  // 只计算非空的tensor
-//                 total_seqlen_for_batch += len;
-//             }
-//         }
-        
-//         // 跳过空batch
-//         if (total_seqlen_for_batch <= 0) continue;
-        
-//         // 计算该batch需要的block数量
-//         int blocks_needed = (total_seqlen_for_batch + seqlen_per_block - 1) / seqlen_per_block;
-        
-//         // 为每个需要的block生成workload映射
-//         for (int seq_block = 0; seq_block < blocks_needed; ++seq_block) {
-//             batch_ids.push_back(batch);
-//             seq_block_ids.push_back(seq_block);
-//         }
-//     }
-    
-//     int total_workloads = batch_ids.size();
-    
-//     // 处理空workload情况
-//     if (total_workloads == 0) {
-//         return std::make_tuple(torch::empty({0}, torch::kInt32).cuda(), 
-//                               torch::empty({0}, torch::kInt32).cuda(), 0);
-//     }
-    
-//     // 安全的tensor创建方式 - 先拷贝数据，再转移到GPU
-//     torch::Tensor workload_batch_ids = torch::tensor(batch_ids, torch::kInt32).cuda();
-//     torch::Tensor workload_seq_block_ids = torch::tensor(seq_block_ids, torch::kInt32).cuda();
-    
-//     return std::make_tuple(workload_batch_ids, workload_seq_block_ids, total_workloads);
-// }
 
 void concat_2D_jagged_tensors_cuda_forward (
     const std::vector<torch::Tensor>& values_list,
@@ -585,4 +542,78 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
         }
     );
     return grad_inputs;
+}
+
+__global__ void compute_block_workloads_cuda_kernel(
+    const InputJaggedTensor<int32_t> input_jagged_tensor,
+    const int32_t num_tensors,
+    const int32_t batch_size,
+    const int32_t seqlen_per_block,
+    const int32_t max_seqlen,
+    int* block_workloads) {
+    
+    int block_id = blockIdx.x;
+    int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
+
+    int tensor_id = block_id / num_bucket_per_batch / batch_size;//tensor1 tensor2 tensor3
+    int batch_id = (block_id / num_bucket_per_batch) % batch_size;//第几个batch。 offset[0, 17, 25, 34, 44] 
+    //int bucket_id = block_id / num_bucket_per_batch;//好像没用的一个变量
+    int idx = block_id % num_bucket_per_batch;//第几个bucket
+    const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
+    int seq_start = offsets[batch_id];
+    int seq_end = offsets[batch_id + 1];
+    int len = seq_end - seq_start;
+    //printf("block_id: %d, tensor_id: %d, batch_id: %d, idx: %d, len: %d, seqlen_per_block: %d\n", block_id, tensor_id, batch_id, idx, len, seqlen_per_block);
+    if(len - idx * seqlen_per_block >= seqlen_per_block) {
+        block_workloads[block_id] = seqlen_per_block;
+    } else if(len - idx * seqlen_per_block > 0 && len - idx * seqlen_per_block < seqlen_per_block) {
+        block_workloads[block_id] = len - idx * seqlen_per_block;
+    } else {
+        block_workloads[block_id] = 0;
+    }
+
+    return;
+}
+
+/*
+target: 获得每个block应该处理merged_offsets的多少行
+e.g. [4, 1, 4, 4, 4, 0, 4, 1, ...]
+
+工作原理:
+1. 每个block负责某个batch的一个bucket(seqlen_per_block大小的序列段)
+2. 计算该batch所有tensor的总序列数
+3. 根据bucket位置计算该block的实际工作量
+4. 输出到block_workloads数组，供后续前缀和计算使用
+*/
+void compute_block_workloads_cuda(
+    const std::vector<torch::Tensor>& offsets_list,
+    int seqlen_per_block,
+    int max_seqlen,
+    torch::Tensor block_workloads) {
+
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+    int num_tensors = offsets_list.size();
+    int batch_size = offsets_list[0].size(0) - 1;
+    int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
+    int total_blocks = batch_size * blocks_per_batch * num_tensors;
+
+    InputJaggedTensor<int32_t> offsets_jagged_tensor;
+    for (int i = 0; i < num_tensors; ++i) {
+        TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
+        offsets_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
+    }
+    //和kernel保持一致，但是只需要单线程处理
+    dim3 blocks(total_blocks);
+    dim3 threads(1);
+    
+    compute_block_workloads_cuda_kernel<<<blocks, threads, 0, stream>>>(
+        offsets_jagged_tensor,
+        num_tensors,
+        batch_size,
+        seqlen_per_block,
+        max_seqlen,
+        block_workloads.data_ptr<int>()
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
 }

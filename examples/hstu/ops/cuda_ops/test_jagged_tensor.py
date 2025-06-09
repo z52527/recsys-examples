@@ -108,9 +108,13 @@ def test_n_jagged_tensor_concat_kernel(num, batch_size, max_len, hidden_dim):
     with torch.cuda.nvtx.range("Original Implementation", color="green"):
         result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
     print("jt_list", jt_list[0].values())
+    print("jt_list", jt_list[0].lengths())
     print("jt_list", jt_list[1].values())
+    print("jt_list", jt_list[1].lengths())
     print("jt_list", jt_list[2].values())
+    print("jt_list", jt_list[2].lengths())
     print("jt_list", jt_list[3].values())
+    print("jt_list", jt_list[3].lengths())
     print("result", result[0])
     print("result2", result2[0])
     with torch.cuda.nvtx.range("Result Verification", color="yellow"):
@@ -311,5 +315,5 @@ if __name__ == "__main__":
     # test_jagged_tensor_concat_kernel()
     # test_jagged_tensor_concat_autograd(batch_size=2, max_len=3, hidden_dim=4)
     # test_different_type(batchsize=2, max_len=3, hidden_dim=4, dtype=torch.float64)
-    test_n_jagged_tensor_concat_kernel(num=4, batch_size=2, max_len=3, hidden_dim=4)
-    # test_triton_jagged_tensor_concat(batch_size=2, max_len=3, hidden_dim=4)
+    # test_n_jagged_tensor_concat_kernel(num=4, batch_size=2, max_len=3, hidden_dim=4)
+    test_triton_jagged_tensor_concat(batch_size=2, max_len=3, hidden_dim=4)

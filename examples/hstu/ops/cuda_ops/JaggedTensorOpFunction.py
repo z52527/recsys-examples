@@ -25,18 +25,19 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 merged_offsets.add_(offset_tensor)
         
         ctx.save_for_backward(merged_offsets, *offsets_list)
-        # total_length = merged_offsets[-1].item()
-        total_length = sum(v.size(0) for v in values_list)
+        with torch.cuda.nvtx.range("Calculate merged lengths", color="purple"):
+            # total_length = merged_offsets[-1].item()
+            total_length = sum(v.size(0) for v in values_list)
 
-        hidden_dim = values_list[0].size(-1)
-        merged_lengths = []
-        for offsets_tensor in offsets_list:
-            lengths = offsets_tensor[1:] - offsets_tensor[:-1]
-            merged_lengths.append(lengths)
+            hidden_dim = values_list[0].size(-1)
+            merged_lengths = []
+            for offsets_tensor in offsets_list:
+                lengths = offsets_tensor[1:] - offsets_tensor[:-1]
+                merged_lengths.append(lengths)
 
-        merged_lengths = torch.sum(
-            torch.concat([lengths.view(-1, 1) for lengths in merged_lengths], dim=1), dim=1)
-        ctx.mark_non_differentiable(merged_lengths)
+            merged_lengths = torch.sum(
+                torch.concat([lengths.view(-1, 1) for lengths in merged_lengths], dim=1), dim=1)
+            ctx.mark_non_differentiable(merged_lengths)
 
         with torch.cuda.nvtx.range("merged values mem alloc", color="purple"):
             merged_values = (
@@ -47,38 +48,28 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 )
                 .requires_grad_(True)
             ) 
+        with torch.cuda.nvtx.range("calculate max_seqlen", color="purple"):
+            max_seqlen = max(max_seqlens)
+            batch_size = offsets_list[0].size(0) - 1
+
+
+        with torch.cuda.nvtx.range("calculate blocks workload", color="purple"):
         # hidden_dim越大，seqlen_per_block越小
-        seqlen_per_block = (8 if hidden_dim <= 128 else 
-                                4 if hidden_dim <= 256 else 
-                                2 if hidden_dim <= 512 else 1)
-            
-        max_seqlen = max(max_seqlens)
-        batch_size = offsets_list[0].size(0) - 1
-        seqlen_per_block = 4
+            seqlen_per_block = (8 if hidden_dim <= 128 else 
+                                    4 if hidden_dim <= 256 else 
+                                    2 if hidden_dim <= 512 else 1)
+            blocks_per_batch = (max_seqlen + seqlen_per_block - 1) // seqlen_per_block
+            num_tensors = len(offsets_list)
+            total_blocks = batch_size * blocks_per_batch * num_tensors
+            block_workloads = torch.empty(
+                total_blocks,
+                dtype=torch.int32,
+                device=values_list[0].device,
+            )
+            hstu_cuda_ops.compute_block_workloads(offsets_list, seqlen_per_block, max_seqlen, block_workloads)
+            workload_offset = length_to_complete_offsets(block_workloads)
 
 
-
-        blocks_per_batch = (max_seqlen + seqlen_per_block - 1) // seqlen_per_block
-        num_tensors = len(offsets_list)
-        total_blocks = batch_size * blocks_per_batch * num_tensors
-
-
-        
-        block_workloads = torch.empty(
-            total_blocks,
-            dtype=torch.int32,
-            device=values_list[0].device,
-        )
-        hstu_cuda_ops.compute_block_workloads(offsets_list, seqlen_per_block, max_seqlen, block_workloads)
-
-        workload_offset = length_to_complete_offsets(block_workloads)
-        print(f"max_seqlen = {max_seqlen}")
-        print(f"batch_size = {batch_size}")
-        print(f"seqlen_per_block = {seqlen_per_block}") 
-        print(f"blocks_per_batch = {blocks_per_batch}")
-        print(f"total_blocks = {total_blocks}")
-        print(f"block_workloads = {block_workloads}")
-        print(f"workload_offset = {workload_offset}")
         with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
             hstu_cuda_ops.concat_2D_jagged_tensors_forward(
                 values_list, 

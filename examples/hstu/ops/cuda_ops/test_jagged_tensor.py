@@ -60,7 +60,7 @@ def create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=torch.float
             device=torch.device("cuda"),
         )
         .uniform_(-1.0, 1.0)
-        .round(decimals=2)  # 四舍五入到两位小数
+        # .round(decimals=2)  # 四舍五入到两位小数
         .requires_grad_(True)
     )
 
@@ -110,16 +110,7 @@ def test_n_jagged_tensor_concat_kernel(num, batch_size, max_len, hidden_dim):
     
     with torch.cuda.nvtx.range("Original Implementation", color="green"):
         result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-    # print("jt_list", jt_list[0].values())
-    # print("jt_list", jt_list[0].lengths())
-    # print("jt_list", jt_list[1].values())
-    # print("jt_list", jt_list[1].lengths())
-    # print("jt_list", jt_list[2].values())
-    # print("jt_list", jt_list[2].lengths())
-    # print("jt_list", jt_list[3].values())
-    # print("jt_list", jt_list[3].lengths())
-    # print("result", result[0])
-    # print("result2", result2[0])
+
     with torch.cuda.nvtx.range("Result Verification", color="yellow"):
         assert torch.equal(result[0], result2[0])
         assert torch.equal(result[1], result2[1])
@@ -147,12 +138,12 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
     with torch.cuda.nvtx.range("cudaop concat", color="purple"):
         result2 = jagged_2D_tensor_concat([jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [max_len_jt1, max_len_jt2])
     
-    print("input jt1", jt1.values())
-    print("jt1 lengths", jt1.lengths())
-    print("input jt2", jt2.values())
-    print("jt2 lengths", jt2.lengths())
-    print("triton result", result)
-    print("cudaop result", result2[0])
+    # print("input jt1", jt1.values())
+    # print("jt1 lengths", jt1.lengths())
+    # print("input jt2", jt2.values())
+    # print("jt2 lengths", jt2.lengths())
+    # print("triton result", result)
+    # print("cudaop result", result2[0])
     assert torch.equal(result, result2[0])
 
     grad_for_merged_values = torch.randn_like(result)
@@ -186,15 +177,15 @@ def test_cudaop_vs_pytorch(num, batch_size, max_len, hidden_dim):
 
     from JaggedTensorOpFunction import jagged_2D_tensor_concat
 
-    # for _ in range(20):
-    #     if _ % 2 == 0:
-    #         result = jagged_2D_tensor_concat([jt.values() for jt in jt_list], [jt.offsets() for jt in jt_list], max_seqlens)
-    #         result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-    #     else:
-    #         result = jagged_2D_tensor_concat([jt.values() for jt in jt_list2], [jt.offsets() for jt in jt_list2], max_seqlens2)
-    #         result2 = concat_2D_jagged_tensors_pytorch(jt_list2, max_seqlens2)
-    #     assert torch.equal(result[0], result2[0])
-    #     assert torch.equal(result[1], result2[1])
+    for _ in range(20):
+        if _ % 2 == 0:
+            result = jagged_2D_tensor_concat([jt.values() for jt in jt_list], [jt.offsets() for jt in jt_list], max_seqlens)
+            result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
+        else:
+            result = jagged_2D_tensor_concat([jt.values() for jt in jt_list2], [jt.offsets() for jt in jt_list2], max_seqlens2)
+            result2 = concat_2D_jagged_tensors_pytorch(jt_list2, max_seqlens2)
+        assert torch.equal(result[0], result2[0])
+        assert torch.equal(result[1], result2[1])
     
     #cuda event start from
     start = torch.cuda.Event(enable_timing=True)
@@ -204,24 +195,23 @@ def test_cudaop_vs_pytorch(num, batch_size, max_len, hidden_dim):
 
     start.record()
     
-    # for _ in range(1000):
-    for _ in range(1):
+    for _ in range(1000):
         if _ % 2 == 0:
             with torch.cuda.nvtx.range("Custom Implementation", color="purple"):
                 result = jagged_2D_tensor_concat([jt.values() for jt in jt_list], [jt.offsets() for jt in jt_list], max_seqlens)
             with torch.cuda.nvtx.range("Original Implementation", color="green"):
                 result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
             print_jagged_tensor(jt_list)
-            print("my result", result[0])
-            print("pytorch result", result2[0])
+            # print("my result", result[0])
+            # print("pytorch result", result2[0])
         else:
             with torch.cuda.nvtx.range("Custom Implementation", color="purple"):
                 result = jagged_2D_tensor_concat([jt.values() for jt in jt_list2], [jt.offsets() for jt in jt_list2], max_seqlens2)
             with torch.cuda.nvtx.range("Original Implementation", color="green"):
                 result2 = concat_2D_jagged_tensors_pytorch(jt_list2, max_seqlens2)
             print_jagged_tensor(jt_list2)
-            print("my result", result[0])
-            print("pytorch result", result2[0])
+            # print("my result", result[0])
+            # print("pytorch result", result2[0])
         
         assert torch.equal(result[0], result2[0])
         assert torch.equal(result[1], result2[1])
@@ -300,10 +290,10 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
 #test all jagged tensor concat function
 @pytest.mark.parametrize("num", [1, 2, 3, 4])
 @pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
-    # (2, 3, 4),
-    # (4, 5, 8),
-    # (1, 2, 16),
-    # (4, 10, 5),
+    (2, 3, 4),
+    (4, 5, 8),
+    (1, 2, 16),
+    (4, 10, 5),
     (32, 1024, 64)
 ])
 def test_all_jagged_tensor_concat_function(num, batch_size, max_len, hidden_dim):

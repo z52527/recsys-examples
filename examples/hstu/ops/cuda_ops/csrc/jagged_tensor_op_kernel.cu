@@ -320,15 +320,11 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     int* merged_offsets) {
     //每个block处理从workload_offset[i+1]-workload_offset[i]个seq
     int block_id = blockIdx.x;
-    // if(block_id)
     if(workload_offset[block_id] == workload_offset[block_id + 1]) return;
     
     int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
-    // int tensor_id = block_id / num_bucket_per_batch / batch_size;//tensor1 tensor2 tensor3
-    // int batch_id = (block_id / num_bucket_per_batch) % batch_size;//第几个batch。 offset[0, 17, 25, 34, 44] 
     int tensor_id = (block_id / num_bucket_per_batch) % num_tensors;
     int batch_id =  block_id / num_bucket_per_batch / num_tensors; 
-    //int bucket_id = block_id / num_bucket_per_batch;//好像没用的一个变量
     int idx = block_id % num_bucket_per_batch;//第几个bucket
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
@@ -343,50 +339,39 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     //对于source_values,搬运input_jagged_tensor.value_list[tensor_id]中从seq_start开始的len
     //todo:len和workloadofffset的作用重复？ 另起一个kernel计算真的有节省时间吗？
 
-    // for(int seq_offset = warp_id; seq_offset < (seq_end - seq_start); seq_offset += 32){
     for(int seq_offset = warp_id; seq_offset < workload_offset[block_id+1]-workload_offset[block_id]; seq_offset += 32){
         int src_row = seq_start + seq_offset + idx*seqlen_per_block;//增加bucket内偏移量
         int dst_row = workload_offset[block_id] + seq_offset;
-        if(threadIdx.x == 0) {
-            printf("block_id: %d, num_bucket_per_batch: %d,batch_size: %d,\n tensor_id: %d, batch_id: %d, idx: %d, src_row: %d, dst_row: %d\n seq_end-seq_start: %d\n", block_id, num_bucket_per_batch, batch_size, tensor_id, batch_id, idx, src_row, dst_row, seq_end-seq_start);
-        }
-
-        //printf("block_id: %d, num_bucket_per_batch: %d,batch_size: %d,\n tensor_id: %d, batch_id: %d, idx: %d, src_row: %d, dst_row: %d\n\n", block_id, num_bucket_per_batch, batch_size, tensor_id, batch_id, idx, src_row, dst_row);
         // warp-level parallelization for hidden_dim
         // each thread in warp handles multiple hidden dimensions
         int elements_per_thread = (hidden_dim + 32 - 1) / 32;
         int thread_start = lane_id * elements_per_thread;
         int thread_end = min(thread_start + elements_per_thread, hidden_dim);
-        if(dst_row == 11&&thread_start == 0){
-            printf("block_id: %d, batch_id: %d, tensor_id: %d, src_row: %d, dst_row: %d, workload_offset[block_id]: %d, seq_offset: %d\nthread_start: %d, thread_end: %d\n", block_id, batch_id, tensor_id, src_row, dst_row, workload_offset[block_id], seq_offset, thread_start, thread_end);
-        }
-        if(dst_row == 10&&thread_start == 0){
-            printf("block_id: %d, batch_id: %d, tensor_id: %d, src_row: %d, dst_row: %d, workload_offset[block_id]: %d, seq_offset: %d\nthread_start: %d, thread_end: %d\n", block_id, batch_id, tensor_id, src_row, dst_row, workload_offset[block_id], seq_offset, thread_start, thread_end);
-        }
+
         // vectorized copy 
-        // if (hidden_dim % 4 == 0 && thread_start % 4 == 0) {
-        //     int vectorized_start = (thread_start + 3) / 4 * 4;
-        //     int vectorized_end = thread_end / 4 * 4;
+        if (hidden_dim % 4 == 0 && thread_start % 4 == 0) {
+            int vectorized_start = (thread_start + 3) / 4 * 4;
+            int vectorized_end = thread_end / 4 * 4;
             
-        //     for (int h = thread_start; h < vectorized_start && h < thread_end; ++h) {
-        //         merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
-        //     }
+            for (int h = thread_start; h < vectorized_start && h < thread_end; ++h) {
+                merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
+            }
             
-        //     for (int h = vectorized_start; h < vectorized_end; h += 4) {
-        //         copy_float4(&merged_values[dst_row * hidden_dim + h],
-        //                     &values[src_row * hidden_dim + h]);
-        //     }
+            for (int h = vectorized_start; h < vectorized_end; h += 4) {
+                copy_float4(&merged_values[dst_row * hidden_dim + h],
+                            &values[src_row * hidden_dim + h]);
+            }
             
-        //     // handle remaining elements
-        //     for (int h = vectorized_end; h < thread_end; ++h) {
-        //         merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
-        //     }
-        // } else {
+            // handle remaining elements
+            for (int h = vectorized_end; h < thread_end; ++h) {
+                merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
+            }
+        } else {
             // scalar copy
             for (int h = thread_start; h < thread_end; ++h) {
                 merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
             }
-        // }
+        }
     }
 }
 
@@ -459,7 +444,7 @@ void concat_2D_jagged_tensors_cuda_forward (
             
             dim3 opt_blocks(total_blocks);
             dim3 opt_threads(threads);
-            printf("total_blocks: %d, threads: %d\n", total_blocks, threads);
+
             concat_2D_jagged_tensors_forward_kernel_opt_v4<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
                 input_jagged_tensor_typed,
                 num_tensors,
@@ -638,17 +623,14 @@ __global__ void compute_block_workloads_cuda_kernel(
     int block_id = blockIdx.x;
     int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
 
-    // int tensor_id = block_id / num_bucket_per_batch / batch_size;//tensor1 tensor2 tensor3
-    // int batch_id = (block_id / num_bucket_per_batch) % batch_size;//第几个batch。 offset[0, 17, 25, 34, 44] 
     int tensor_id = (block_id / num_bucket_per_batch) % num_tensors;
     int batch_id =  block_id / num_bucket_per_batch / num_tensors; 
-    //int bucket_id = block_id / num_bucket_per_batch;//好像没用的一个变量
     int idx = block_id % num_bucket_per_batch;//第几个bucket
     const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
     int seq_start = offsets[batch_id];
     int seq_end = offsets[batch_id + 1];
     int len = seq_end - seq_start;
-    printf("block_id: %d, num_bucket_per_batch: %d, tensor_id: %d, batch_id: %d, idx: %d, len: %d, seqlen_per_block: %d\n", block_id, num_bucket_per_batch, tensor_id, batch_id, idx, len, seqlen_per_block);
+
     if(len - idx * seqlen_per_block >= seqlen_per_block) {
         block_workloads[block_id] = seqlen_per_block;
     } else if(len - idx * seqlen_per_block > 0 && len - idx * seqlen_per_block < seqlen_per_block) {

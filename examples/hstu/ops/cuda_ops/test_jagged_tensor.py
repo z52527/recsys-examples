@@ -89,33 +89,6 @@ def test_jagged_tensor_creation(batch_size, max_len, hidden_dim):
     assert jt.lengths().shape[0] == batch_size
     assert jt.offsets().shape[0] == batch_size + 1 
 
-
-
-#test N jagged tensor concat kernel
-@pytest.mark.parametrize("num", [1, 2, 3, 4])
-@pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
-    (2, 3, 4),
-    (4, 5, 8),
-    (1, 2, 16),
-    (4, 10, 5)
-])
-def test_n_jagged_tensor_concat_kernel(num, batch_size, max_len, hidden_dim):
-    with torch.cuda.nvtx.range("Test Setup", color="blue"):
-        jt_list = [create_test_jagged_tensor(batch_size, max_len, hidden_dim) for _ in range(num)]
-        max_seqlens = [max(jt.lengths()) for jt in jt_list]
-        from JaggedTensorOpFunction import jagged_2D_tensor_concat
-
-    max_seqlen = max(max_seqlens)
-    with torch.cuda.nvtx.range("Custom Implementation", color="purple"):
-        result = jagged_2D_tensor_concat([jt.values() for jt in jt_list], [jt.offsets() for jt in jt_list], max_seqlens, max_seqlen)
-    
-    with torch.cuda.nvtx.range("Original Implementation", color="green"):
-        result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-
-    with torch.cuda.nvtx.range("Result Verification", color="yellow"):
-        assert torch.equal(result[0], result2[0])
-        assert torch.equal(result[1], result2[1])
-
 @pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
     (2, 3, 4)
 ])
@@ -128,8 +101,6 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
         calculated_max_seq_len = max_len_jt1 + max_len_jt2
     # from triton_jagged import _Concat2DJaggedFunction
     from ops.triton_ops.triton_jagged import triton_concat_2D_jagged
-    # for _ in range(20):
-    #todo:benchmark
 
     with torch.cuda.nvtx.range("triton concat", color="purple"):
         result = triton_concat_2D_jagged(
@@ -167,8 +138,8 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
     (32, 1, 1),
     (40, 256, 256)
 ])
-def test_cudaop_vs_pytorch(num, batch_size, max_len, hidden_dim):
-
+def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):
+# add triton here
     jt_list = [create_test_jagged_tensor(batch_size, max_len, hidden_dim) for _ in range(num)]
     max_seqlens = [max(jt.lengths()) for jt in jt_list]
     max_seqlen1 = max(max_seqlens)
@@ -213,7 +184,7 @@ def test_cudaop_vs_pytorch(num, batch_size, max_len, hidden_dim):
     (1, 2, 16),
 ])
 def test_cudaop_vs_pytorch_benchmark(num, batch_size, max_len, hidden_dim, dtype=torch.float32):
-
+#todo: move triton here
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
         jt_list = [create_test_jagged_tensor(batch_size, max_len, hidden_dim) for _ in range(num)]
         max_seqlens = [max(jt.lengths()) for jt in jt_list]
@@ -323,56 +294,6 @@ def test_cudaop_vs_pytorch_benchmark(num, batch_size, max_len, hidden_dim, dtype
 
 
 
-    
-
-
-@pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
-    (2, 3, 4),
-    (4, 5, 8),
-])
-def test_jagged_tensor_concat_autograd(batch_size, max_len, hidden_dim):
-
-    jt1 = create_test_jagged_tensor(batch_size, max_len, hidden_dim)
-    jt2 = create_test_jagged_tensor(batch_size, max_len + 1, hidden_dim)
-    jt_list = [jt1, jt2]
-    assert jt1.values().requires_grad, "jt1.values() should require grad"
-    assert jt2.values().requires_grad, "jt2.values() should require grad"
-    max_seqlens = [torch.max(jt.lengths()).item() if jt.lengths().numel() > 0 else 0 for jt in jt_list]
-    merged_offsets = jt1.offsets().clone()
-    merged_offsets.add_(jt2.offsets())
-    total_length = merged_offsets[-1].item()
-    merged_values = (
-        torch.empty(
-            (total_length, hidden_dim),
-            dtype=jt1.values().dtype,
-            device=jt1.values().device,
-        )
-        .requires_grad_(True)
-    )
-#cuda backward
-    merged_values, merged_lengths = _JaggedTensorOpFunction.apply([jt1.offsets(), jt2.offsets()], max_seqlens, max(max_seqlens), *[jt1.values(), jt2.values()])
-    grad_for_merged_values = torch.randn_like(merged_values)
-    assert merged_values.requires_grad, "merged_values should require grad"
-    merged_values.backward(gradient=grad_for_merged_values)
-
-    grad_for_jt1 = jt1.values().grad
-    grad_for_jt2 = jt2.values().grad
-    jt1.values().grad = None
-    jt2.values().grad = None
-#reference backward
-    result = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-    result[0].backward(gradient=grad_for_merged_values)
-
-    # Check if the gradients accumulated in jtN.values().grad match the expected ones.
-    assert jt1.values().grad is not None, "Gradient for jt1.values() should exist"
-    assert torch.allclose(jt1.values().grad, grad_for_jt1), \
-        "Autograd gradient for cuda op does not match expected pytorch output"
-
-    assert jt2.values().grad is not None, "Gradient for jt2.values() should exist"
-    assert torch.allclose(jt2.values().grad, grad_for_jt2), \
-        "Autograd gradient for cuda op does not match expected pytorch output"
-    
-    print(f"Autograd test passed for bs={batch_size}, ml={max_len}, hd={hidden_dim}")
 
 #Test different data type
 @pytest.mark.parametrize("batch_size,max_len,hidden_dim, dtype", [
@@ -388,133 +309,3 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
     result = jagged_2D_tensor_concat([jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [3, 4], 4)
     print(result)
     
-#test all jagged tensor concat function
-#todo:合并到benchmark
-@pytest.mark.parametrize("num", [1, 2, 3, 4])
-@pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
-    (2, 3, 4),
-    (4, 5, 8),
-    (1, 2, 16),
-    (4, 10, 5),
-    (32, 1024, 64)
-])
-def test_all_jagged_tensor_concat_function(num, batch_size, max_len, hidden_dim):
-    if num == 2:
-        test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim)
-    else:
-        test_cudaop_vs_pytorch(num, batch_size, max_len, hidden_dim)
-
-def test_debug_with_specific_input():
-    """独立调试函数，使用指定的输入数据"""
-    print("=== Debug Test with Specific Input ===")
-    
-    # 手动构造第一个 JaggedTensor
-    values1 = torch.tensor([
-        [-0.8500, -0.0200,  0.1900],
-        [-0.1700, -0.7700, -0.9000],
-        [ 0.7900, -0.7900,  0.4000],
-        [-0.7900, -0.4500,  0.7000],
-        [ 1.0000, -0.7000, -0.5000],
-        [ 0.5000,  0.5300, -1.0000],
-        [ 0.3000,  0.6200, -0.7900],
-        [ 0.3300, -0.0100, -0.9900],
-        [ 0.8000,  0.3100,  0.5300],
-        [ 0.9900, -0.3700, -0.7600],
-        [-0.1600, -0.1900, -0.8800],
-        [-0.2700,  0.6100,  0.5400],
-        [ 0.3400, -0.4400,  0.3500],
-        [ 0.9900,  0.0600, -0.8200]
-    ], device='cuda:0', requires_grad=True)
-    
-    lengths1 = torch.tensor([4, 5, 5], device='cuda:0')
-    offsets1 = torch.tensor([0, 4, 9, 14], device='cuda:0', dtype=torch.int32)
-    
-    # 手动构造第二个 JaggedTensor
-    values2 = torch.tensor([
-        [-0.6300, -0.4500, -0.7200],
-        [-0.3100, -0.0700,  0.2500],
-        [ 0.5900, -0.9200, -0.5300],
-        [ 0.2800,  0.0700, -0.8400],
-        [-0.2600, -0.4800, -0.8200],
-        [-0.3800,  0.3500,  0.4300],
-        [ 0.7200,  0.7800, -0.2300],
-        [-0.5400, -0.3300,  0.2100],
-        [-0.8100,  0.0200,  0.8600]
-    ], device='cuda:0', requires_grad=True)
-    
-    lengths2 = torch.tensor([5, 2, 2], device='cuda:0')
-    offsets2 = torch.tensor([0, 5, 7, 9], device='cuda:0', dtype=torch.int32)
-    
-    # 创建 JaggedTensor 对象
-    jt1 = JaggedTensor(values=values1, lengths=lengths1, offsets=offsets1)
-    jt2 = JaggedTensor(values=values2, lengths=lengths2, offsets=offsets2)
-    jt_list = [jt1, jt2]
-    
-    # 计算最大序列长度
-    max_seqlens = [torch.max(jt.lengths()).item() for jt in jt_list]
-    print(f"Max sequence lengths: {max_seqlens}")
-    
-    # 打印输入数据
-    print("\n--- Input Data ---")
-    print_jagged_tensor(jt_list)
-    
-    # 导入测试函数
-    from JaggedTensorOpFunction import jagged_2D_tensor_concat
-    
-    # 测试自定义实现
-    print("--- Testing Custom Implementation ---")
-    with torch.cuda.nvtx.range("Custom Implementation", color="purple"):
-        result_custom = jagged_2D_tensor_concat(
-            [jt.values() for jt in jt_list], 
-            [jt.offsets() for jt in jt_list], 
-            max_seqlens,
-            max(max_seqlens)
-        )
-    
-    # 测试PyTorch参考实现
-    print("--- Testing PyTorch Reference Implementation ---")
-    with torch.cuda.nvtx.range("PyTorch Implementation", color="green"):
-        result_pytorch = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-    
-    # 打印结果
-    print("\n--- Results ---")
-    print("Custom result values:")
-    print(result_custom[0])
-    print("Custom result lengths:")
-    print(result_custom[1])
-    
-    print("\nPyTorch result values:")
-    print(result_pytorch[0])
-    print("PyTorch result lengths:")
-    print(result_pytorch[1])
-    
-    # 验证结果是否一致
-    print("\n--- Verification ---")
-    values_equal = torch.allclose(result_custom[0], result_pytorch[0], atol=1e-6)
-    lengths_equal = torch.equal(result_custom[1], result_pytorch[1])
-    
-    print(f"Values equal: {values_equal}")
-    print(f"Lengths equal: {lengths_equal}")
-    
-    if values_equal and lengths_equal:
-        print("✅ Test PASSED: Results match!")
-    else:
-        print("❌ Test FAILED: Results don't match!")
-        if not values_equal:
-            print("Values difference:")
-            print(result_custom[0] - result_pytorch[0])
-    
-    return result_custom, result_pytorch
-
-
-if __name__ == "__main__":
-    # test_jagged_tensor_concat_kernel()
-    # test_jagged_tensor_concat_autograd(batch_size=2, max_len=3, hidden_dim=4)
-    # test_different_type(batchsize=2, max_len=3, hidden_dim=4, dtype=torch.float64)
-    # test_n_jagged_tensor_concat_kernel(num=4, batch_size=2, max_len=3, hidden_dim=4)
-
-    # test_triton_jagged_tensor_concat(batch_size=2, max_len=3, hidden_dim=4)
-    ##存在错误的输入
-       # test_cudaop_vs_pytorch(num = 2, batch_size = 3, max_len = 5, hidden_dim = 3) 
-    # 使用指定输入数据进行独立调试
-    test_debug_with_specific_input()

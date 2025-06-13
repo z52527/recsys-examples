@@ -565,7 +565,7 @@ __global__ void concat_2D_jagged_tensors_backward_kernel_opt_v4(
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
     const int32_t* offsets = grad_jagged_tensor.offsets_list[tensor_id];
-    const T* values = grad_jagged_tensor.value_list[tensor_id];
+    T* values = grad_jagged_tensor.value_list[tensor_id];
     int seq_start = offsets[batch_id];
     int seq_end = offsets[batch_id + 1];
     int len = seq_end - seq_start;
@@ -615,7 +615,7 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
     torch::Tensor merged_offsets) {
 
     int num_tensors = offsets_list.size();
-    int num_rows = grad_lengths.size(0);
+    int batch_size = grad_lengths.size(0);
     int hidden_dim = grad_output.size(-1);
 
     std::vector<torch::Tensor> grad_inputs(num_tensors);
@@ -628,8 +628,8 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
     }
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
-    int threads = 128;
-    int blocks = (num_rows + threads - 1) / threads;
+    // int threads = 128;
+    // int blocks = (num_rows + threads - 1) / threads;
 
 
     // DISPATCH_KERNEL_BY_TYPE(
@@ -644,32 +644,28 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
                 grad_jagged_tensor.value_list[i] = grad_inputs[i].data_ptr<scalar_t>();
                 grad_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
             }
+            int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
+            int total_blocks = batch_size * blocks_per_batch * num_tensors;
+            // 避免超过1024线程限制
 
-            // choose kernel based on problem size
-            if (hidden_dim <= 256 && num_tensors <= 16) {
-                // use optimized kernel with shared memory and warp cooperation
-                dim3 opt_blocks(num_rows);
-                dim3 opt_threads(min(num_tensors * 32, 1024));  // each tensor gets one warp
-                
-                concat_2D_jagged_tensors_backward_kernel_opt<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
-                    grad_jagged_tensor,
-                    num_tensors,
-                    num_rows,
-                    hidden_dim,
-                    grad_output.data_ptr<scalar_t>(),
-                    merged_offsets.data_ptr<int>()
-                );
-            } else {
-                // use basic kernel for large problems
-                concat_2D_jagged_tensors_backward_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
-                    grad_jagged_tensor,
-                    num_tensors,
-                    num_rows,
-                    hidden_dim,
-                    grad_output.data_ptr<scalar_t>(),
-                    merged_offsets.data_ptr<int>()
-                );
-            }
+            
+            // warp配置：保证不超过1024线程
+            int target_warps = min(32, max(1, seqlen_per_block)); // 每个warp处理1个序列
+            int threads = min(1024, target_warps * 32);
+            
+            dim3 opt_blocks(total_blocks);
+            dim3 opt_threads(threads);
+            concat_2D_jagged_tensors_backward_kernel_opt_v4<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
+                grad_jagged_tensor,
+                num_tensors,
+                batch_size,
+                hidden_dim,
+                max_seqlen,
+                seqlen_per_block,
+                workload_offset.data_ptr<int>(),
+                grad_output.data_ptr<scalar_t>(),
+                merged_offsets.data_ptr<int>()
+            );
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         }
     );

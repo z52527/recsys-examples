@@ -26,7 +26,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
             # for offset_tensor in offsets_list[1:]:
             #     merged_offsets.add_(offset_tensor) 
         # import pdb; pdb.set_trace()
-        ctx.save_for_backward(merged_offsets, *offsets_list)
+
         with torch.cuda.nvtx.range("Calculate merged lengths", color="purple"):
             # total_length = merged_offsets[-1].item()
             total_length = sum(v.size(0) for v in values_list)
@@ -77,13 +77,28 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 merged_offsets,
             )
         
+        # 保存张量变量
+        ctx.save_for_backward(merged_offsets, workload_offset, *offsets_list)
+        # 保存非张量变量
+        ctx.seqlen_per_block = seqlen_per_block
+        ctx.max_seqlen = max_seqlen
         return merged_values, merged_lengths
 
 
     @staticmethod
     def backward(ctx, grad_output, grad_lengths):
-        merged_offsets, *offsets_list = ctx.saved_tensors
-        grad_input = hstu_cuda_ops.concat_2D_jagged_tensors_backward(grad_output, grad_lengths, offsets_list, merged_offsets)
+        # 处理特殊情况：只有一个张量时，直接返回梯度
+        if len(ctx.saved_tensors) == 0:
+            # 这是 len(offsets_list) == 1 的情况，直接返回梯度
+            return None, None, None, grad_output
+        
+        # 获取保存的张量变量
+        merged_offsets, workload_offset, *offsets_list = ctx.saved_tensors
+        # 获取保存的非张量变量
+        seqlen_per_block = ctx.seqlen_per_block
+        max_seqlen = ctx.max_seqlen
+        
+        grad_input = hstu_cuda_ops.concat_2D_jagged_tensors_backward(grad_output, grad_lengths, seqlen_per_block, max_seqlen, workload_offset, offsets_list, merged_offsets)
         return None, None, None, *grad_input
 
 def switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:

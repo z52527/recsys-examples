@@ -178,7 +178,33 @@ def test_cudaop_vs_pytorch(num, batch_size, max_len, hidden_dim):
     result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
     assert torch.equal(result[0], result2[0])
     assert torch.equal(result[1], result2[1])
-        
+    # 验证一次反向传播的正确性
+    grad_for_merged_values = torch.randn_like(result[0])
+    assert result[0].requires_grad, "merged_values should require grad" 
+    # 使用 torch.autograd.grad 获取梯度（避免修改原始张量的 .grad 属性）
+    input_tensors = [jt.values() for jt in jt_list]
+    grad_list_cuda = torch.autograd.grad(
+        outputs=result[0],
+        inputs=input_tensors,
+        grad_outputs=grad_for_merged_values,
+        retain_graph=False,
+        create_graph=False
+    )
+    
+    grad_list_pytorch = torch.autograd.grad(
+        outputs=result2[0],
+        inputs=input_tensors,
+        grad_outputs=grad_for_merged_values,
+        retain_graph=False,
+        create_graph=False
+    )
+
+    # Check if the gradients match
+    for i, (grad_cuda, grad_pytorch) in enumerate(zip(grad_list_cuda, grad_list_pytorch)):
+        assert grad_cuda is not None, f"CUDA gradient for tensor {i} should exist"
+        assert grad_pytorch is not None, f"PyTorch gradient for tensor {i} should exist"
+        assert torch.allclose(grad_cuda, grad_pytorch, atol=1e-5), \
+            f"Autograd gradient for cuda op does not match expected pytorch output for tensor {i}"    
 
 @pytest.mark.parametrize("num", [2, 3, 4])
 @pytest.mark.parametrize("batch_size,max_len,hidden_dim", [
@@ -252,25 +278,50 @@ def test_cudaop_vs_pytorch_benchmark(num, batch_size, max_len, hidden_dim, dtype
 #backward benchmark
     result_cudaop = jagged_2D_tensor_concat([jt.values() for jt in jt_list], [jt.offsets() for jt in jt_list], max_seqlens, max_seqlen1)
     grad_for_merged_values = torch.randn_like(result_cudaop[0])
-    # todo  grad_for_merged_values2 = torch.randn_like(result_cudaop[0]) 
     assert result_cudaop[0].requires_grad, "merged_values should require grad"
 
-    for _ in range(100):
-        result_cudaop[0].backward(gradient=grad_for_merged_values)
-        grad_list = []
-        for jt in jt_list:
-            grad_list.append(jt.values().grad)
-            jt.values().grad = None
+    torch.cuda.synchronize()
+    start.record()
+    for i in range(100):
+        # 使用 torch.autograd.grad 避免梯度累积和计算图保留问题
+        input_tensors = [jt.values() for jt in jt_list]
+        grads = torch.autograd.grad(
+            outputs=result_cudaop[0],
+            inputs=input_tensors,
+            grad_outputs=grad_for_merged_values,
+            retain_graph=True,  # 保留计算图用于下次计算
+            create_graph=False,  # 不创建梯度的计算图
+            only_inputs=True  # 只计算输入的梯度
+        )
+        # 注意：torch.autograd.grad 不会自动累积梯度到 .grad 属性中
+    end.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start.elapsed_time(end) / 100
+    print(f"CUDA kernel backward time: {elapsed_time_ms:.3f} ms")
 
-#reference backward
-    result_pytorch = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens) 
-    result_pytorch[0].backward(gradient=grad_for_merged_values)
+#reference backward benchmark
+    result_pytorch = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
 
-    # Check if the gradients accumulated in jtN.values().grad match the expected ones.
-    for jt, grad in zip(jt_list, grad_list):
-        assert jt.values().grad is not None, "Gradient for jt.values() should exist"
-        assert torch.allclose(jt.values().grad, grad), \
-            "Autograd gradient for cuda op does not match expected pytorch output"
+    torch.cuda.synchronize()
+    start.record()
+    for i in range(100):
+        # 使用 torch.autograd.grad 避免梯度累积和计算图保留问题
+        input_tensors = [jt.values() for jt in jt_list]
+        grads = torch.autograd.grad(
+            outputs=result_pytorch[0],
+            inputs=input_tensors,
+            grad_outputs=grad_for_merged_values,
+            retain_graph=True,  # 保留计算图用于下次计算
+            create_graph=False,  # 不创建梯度的计算图
+            only_inputs=True  # 只计算输入的梯度
+        )
+        # 注意：torch.autograd.grad 不会自动累积梯度到 .grad 属性中
+    end.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start.elapsed_time(end) / 100
+    print(f"PyTorch backward time: {elapsed_time_ms:.3f} ms")
+
+
 
     
 

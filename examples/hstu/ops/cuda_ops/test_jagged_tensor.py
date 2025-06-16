@@ -128,8 +128,7 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
     assert torch.equal(jt2.values().grad, grad_for_jt2)
 
 
-# 验证结果正确性
-# @pytest.mark.parametrize("num", [2, 3, 4])
+# Verify result correctness
 @pytest.mark.parametrize("num", [1, 2, 127, 129, 256])
 @pytest.mark.parametrize(
     "batch_size,max_len,hidden_dim",
@@ -140,16 +139,15 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
         (4, 10, 5),
         (32, 1, 1),
         (40, 256, 256),
-        (1, 1, 1),  # 最小可能尺寸
-        (1, 1, 2),  # 最小batch，最小长度
-        (2, 1, 1),  # 最小hidden_dim
-        (1, 1000, 16),  # 长序列
-        (100, 10, 8),  # 大batch size
-        (4, 4, 512),  # 大hidden dimension
+        (1, 1, 1),  # Minimum possible size
+        (1, 1, 2),  # Minimum batch, minimum length
+        (2, 1, 1),  # Minimum hidden_dim
+        (1, 1000, 16),  # Long sequence
+        (100, 10, 8),  # Large batch size
+        (4, 4, 512),  # Large hidden dimension
     ],
 )
 def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):
-    # add triton here
     jt_list = [
         create_test_jagged_tensor(batch_size, max_len, hidden_dim) for _ in range(num)
     ]
@@ -198,10 +196,10 @@ def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):
     result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
     assert torch.equal(result[0], result2[0])
     assert torch.equal(result[1], result2[1])
-    # 验证一次反向传播的正确性
+    # Verify backward propagation correctness
     grad_for_merged_values = torch.randn_like(result[0])
     assert result[0].requires_grad, "merged_values should require grad"
-    # 使用 torch.autograd.grad 获取梯度（避免修改原始张量的 .grad 属性）
+    # Use torch.autograd.grad to get gradients (avoid modifying original tensor's .grad attribute)
     input_tensors = [jt.values() for jt in jt_list]
     grad_list_cuda = torch.autograd.grad(
         outputs=result[0],
@@ -245,7 +243,6 @@ def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):
 def test_cudaop_vs_pytorch_benchmark(
     num, batch_size, max_len, hidden_dim, dtype=torch.float32
 ):
-    # todo: move triton here
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
         jt_list = [
             create_test_jagged_tensor(batch_size, max_len, hidden_dim)
@@ -304,7 +301,7 @@ def test_cudaop_vs_pytorch_benchmark(
     torch.cuda.synchronize()
     cuda_forward_time = start.elapsed_time(end) / 100
     print(f"CUDA kernel time: {cuda_forward_time:.3f} ms")
-    # 根据dtype计算每个元素的字节数
+    # Calculate bytes per element based on dtype
     if dtype == torch.float32:
         bytes_per_element = 4
     elif dtype in [torch.float16, torch.bfloat16, torch.half]:
@@ -339,9 +336,7 @@ def test_cudaop_vs_pytorch_benchmark(
     pytorch_forward_time = start.elapsed_time(end) / 100
     print(f"Pytorch time: {pytorch_forward_time:.3f} ms")
     pytorch_total_bytes = sum(jt.values().numel() for jt in jt_list) * bytes_per_element
-    pytorch_throughput = (
-        pytorch_total_bytes / pytorch_forward_time / 1e3
-    )  # 修改：除以1e3得到MB/s
+    pytorch_throughput = pytorch_total_bytes / pytorch_forward_time / 1e3
     print(f"pytorch_throughput: {pytorch_throughput:.3f} MB/s")
 
     # backward benchmark
@@ -357,15 +352,15 @@ def test_cudaop_vs_pytorch_benchmark(
     torch.cuda.synchronize()
     start.record()
     for i in range(100):
-        # 使用 torch.autograd.grad 避免梯度累积和计算图保留问题
+        # Use torch.autograd.grad to avoid gradient accumulation and graph retention issues
         input_tensors = [jt.values() for jt in jt_list]
         grads = torch.autograd.grad(
             outputs=result_cudaop[0],
             inputs=input_tensors,
             grad_outputs=grad_for_merged_values,
-            retain_graph=True,  # 保留计算图用于下次计算
-            create_graph=False,  # 不创建梯度的计算图
-            only_inputs=True,  # 只计算输入的梯度
+            retain_graph=True,  # Retain computation graph for next calculation
+            create_graph=False,  # Don't create computation graph for gradients
+            only_inputs=True,  # Only compute gradients for inputs
         )
     end.record()
     torch.cuda.synchronize()
@@ -378,22 +373,22 @@ def test_cudaop_vs_pytorch_benchmark(
     torch.cuda.synchronize()
     start.record()
     for i in range(100):
-        # 使用 torch.autograd.grad 避免梯度累积和计算图保留问题
+        # Use torch.autograd.grad to avoid gradient accumulation and graph retention issues
         input_tensors = [jt.values() for jt in jt_list]
         grads = torch.autograd.grad(
             outputs=result_pytorch[0],
             inputs=input_tensors,
             grad_outputs=grad_for_merged_values,
-            retain_graph=True,  # 保留计算图用于下次计算
-            create_graph=False,  # 不创建梯度的计算图
-            only_inputs=True,  # 只计算输入的梯度
+            retain_graph=True,  # Retain computation graph for next calculation
+            create_graph=False,  # Don't create computation graph for gradients
+            only_inputs=True,  # Only compute gradients for inputs
         )
     end.record()
     torch.cuda.synchronize()
     pytorch_backward_time = start.elapsed_time(end) / 100
     print(f"PyTorch backward time: {pytorch_backward_time:.3f} ms")
 
-    # 计算吞吐量
+    # Calculate throughput
     cuda_forward_throughput = total_bytes / cuda_forward_time / 1e3  # MB/s
     pytorch_forward_throughput = (
         pytorch_total_bytes / pytorch_forward_time / 1e3
@@ -617,7 +612,7 @@ def test_cudaop_vs_tritonop_benchmark(
     torch.cuda.synchronize()
     triton_backward_time = start.elapsed_time(end) / 100
 
-    # 计算吞吐量
+    # Calculate throughput
     if dtype == torch.float32:
         bytes_per_element = 4
     elif dtype in [torch.float16, torch.bfloat16, torch.half]:
@@ -638,7 +633,7 @@ def test_cudaop_vs_tritonop_benchmark(
     cuda_backward_throughput = total_bytes / cuda_backward_time / 1e3  # MB/s
     triton_backward_throughput = total_bytes / triton_backward_time / 1e3  # MB/s
 
-    # 打印结果
+    # Print results
     print(f"\nPerformance Results:")
     print(
         f"{'Operation':<15} {'CUDA (ms)':<12} {'Triton (ms)':<12} {'Speedup':<10} {'CUDA MB/s':<12} {'Triton MB/s':<12}"

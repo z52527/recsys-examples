@@ -729,7 +729,6 @@ void compute_block_workloads_cuda(
         TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
         offsets_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
     }
-    // 使用更多线程提高GPU利用率，减少kernel启动开销
     int threads_per_block = min(1024, total_blocks); // 最多1024线程
     int num_blocks = (total_blocks + threads_per_block - 1) / threads_per_block;
     dim3 blocks(num_blocks);

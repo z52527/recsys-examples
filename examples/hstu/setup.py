@@ -1,10 +1,13 @@
 import os
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
 
 def nvcc_threads_args():
     nvcc_threads = os.getenv("NVCC_THREADS") or "4"
     return ["--threads", nvcc_threads]
+
 
 nvcc_flags = [
     "-g",
@@ -22,19 +25,20 @@ nvcc_flags = [
 ]
 
 setup(
-    name='hstu_cuda_ops',
-    description='HSTU CUDA ops',
+    name="hstu_cuda_ops",
+    description="HSTU CUDA ops",
     ext_modules=[
         CUDAExtension(
-            name='hstu_cuda_ops',
-            sources=['ops/cuda_ops/csrc/jagged_tensor_op_cuda.cpp', 'ops/cuda_ops/csrc/jagged_tensor_op_kernel.cu'],
+            name="hstu_cuda_ops",
+            sources=[
+                "ops/cuda_ops/csrc/jagged_tensor_op_cuda.cpp",
+                "ops/cuda_ops/csrc/jagged_tensor_op_kernel.cu",
+            ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
                 "nvcc": nvcc_threads_args() + nvcc_flags,
-            }
+            },
         )
     ],
-    cmdclass={
-        'build_ext': BuildExtension
-    }
+    cmdclass={"build_ext": BuildExtension},
 )

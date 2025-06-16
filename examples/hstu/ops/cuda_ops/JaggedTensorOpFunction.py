@@ -30,13 +30,8 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
             merged_offsets = torch.sum(
                 torch.stack(offsets_list), dim=0, dtype=offsets_list[0].dtype
             )
-            # merged_offsets = offsets_list[0].clone()
-            # for offset_tensor in offsets_list[1:]:
-            #     merged_offsets.add_(offset_tensor)
-        # import pdb; pdb.set_trace()
 
         with torch.cuda.nvtx.range("Calculate merged lengths", color="purple"):
-            # total_length = merged_offsets[-1].item()
             total_length = sum(v.size(0) for v in values_list)
 
             hidden_dim = values_list[0].size(-1)
@@ -53,7 +48,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         batch_size = offsets_list[0].size(0) - 1
 
         with torch.cuda.nvtx.range("calculate seqlen_per_block", color="purple"):
-            # hidden_dim越大，seqlen_per_block越小
+            # the larger hidden_dim is, the smaller seqlen_per_block becomes
             seqlen_per_block = (
                 8
                 if hidden_dim <= 128
@@ -89,23 +84,23 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 merged_offsets,
             )
 
-        # 保存张量变量
+        # save tensor variables
         ctx.save_for_backward(merged_offsets, workload_offset, *offsets_list)
-        # 保存非张量变量
+        # save non-tensor variables
         ctx.seqlen_per_block = seqlen_per_block
         ctx.max_seqlen = max_seqlen
         return merged_values, merged_lengths
 
     @staticmethod
     def backward(ctx, grad_output, grad_lengths):
-        # 处理特殊情况：只有一个张量时，直接返回梯度
+        # handle special case: when there's only one tensor, return gradient directly
         if len(ctx.saved_tensors) == 0:
-            # 这是 len(offsets_list) == 1 的情况，直接返回梯度
+            # len(offsets_list) == 1, return gradient directly
             return None, None, None, grad_output
 
-        # 获取保存的张量变量
+        # get saved tensor variables
         merged_offsets, workload_offset, *offsets_list = ctx.saved_tensors
-        # 获取保存的非张量变量
+        # get saved non-tensor variables
         seqlen_per_block = ctx.seqlen_per_block
         max_seqlen = ctx.max_seqlen
 

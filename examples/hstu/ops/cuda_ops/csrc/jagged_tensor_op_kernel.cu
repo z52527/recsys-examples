@@ -9,7 +9,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/Dispatch.h>
 #include "../include/utils.h"
-// todo: 如果太大，可能会copy到global memory，确认const buffer
+
 constexpr int kMaxNumTensors = 128;
 template <typename T>
 struct InputJaggedTensor {
@@ -145,8 +145,8 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v2(
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
     int seq_id = block_id * seqlen_per_block;
-    //int seq_id = block_id * seqlen_per_block + threadIdx.x;不太对
-    //这个batch里从这个block开始为空，直接返回
+    // int seq_id = block_id * seqlen_per_block + threadIdx.x; not correct
+    // if this batch is empty from this block onwards, return directly
     if(block_id * seqlen_per_block > merged_offsets[batch_id+1] - merged_offsets[batch_id]) return;
     if (batch_id >= num_rows) return;
 
@@ -218,7 +218,6 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
     if (threadIdx.x < num_tensors) {
         const int32_t* offsets = input_jagged_tensor.offsets_list[threadIdx.x];
         shared_lens[threadIdx.x] = offsets[batch_id + 1] - offsets[batch_id];
-        //printf("batch_id: %d, threadIdx.x: %d, shared_lens[%d]: %d, offsets[%d]: %d, offsets[%d]: %d\n", batch_id, threadIdx.x, threadIdx.x, shared_lens[threadIdx.x], batch_id + 1, offsets[batch_id + 1], batch_id, offsets[batch_id]);
     }
     if (threadIdx.x == 0) {
         shared_cum_lens[0] = 0;
@@ -228,7 +227,6 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
     if (threadIdx.x == 0) {
         for (int i = 0; i < num_tensors; ++i) {
             shared_cum_lens[i + 1] = shared_cum_lens[i] + shared_lens[i];
-            // printf("batch_id: %d, shared_cum_lens[%d]: %d, shared_cum_lens[%d]: %d, shared_lens[%d]: %d\n", batch_id, i + 1, shared_cum_lens[i + 1], i, shared_cum_lens[i], i, shared_lens[i]);
         }
     } 
     __syncthreads();
@@ -242,10 +240,6 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
     // early return if no work
     if (seq_start >= total_seqlen) return;
 
-    //total_seqlen print some strange value
-    //printf("seq_start: %d, seq_end: %d, total_seqlen: %d\n", seq_start, seq_end, total_seqlen);
-
-
     // each warp processes different sequences in this block
     for (int seq_offset = warp_id; seq_offset < (seq_end - seq_start); seq_offset += num_warps) {
         int global_seq_idx = seq_start + seq_offset;
@@ -255,9 +249,7 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
         while (tensor_id < num_tensors && global_seq_idx >= shared_cum_lens[tensor_id + 1]) {
             tensor_id++;
         }
-        // if(tensor_id == 3) {
-        //     printf("tensor_id: %d, global_seq_idx: %d, shared_cum_lens[tensor_id]: %d\n", tensor_id, global_seq_idx, shared_cum_lens[tensor_id]);
-        // }
+
         if (tensor_id >= num_tensors) continue;
         // calculate local sequence index within tensor
         int local_seq_idx = global_seq_idx - shared_cum_lens[tensor_id];
@@ -266,15 +258,11 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
         const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
         int tensor_start = offsets[batch_id];
         int tensor_end = offsets[batch_id + 1];
-        // if(tensor_id == 3) {
-        //     printf("batch_id: %d, block_id: %d, warp_id: %d,lane_id: %d, tensor_start: %d, tensor_end: %d, local_seq_idx: %d, merged_offsets[batch_id]: %d\n", batch_id, block_id, warp_id, lane_id, tensor_start, tensor_end, local_seq_idx, merged_offsets[batch_id]);
-        // }
+
         if (local_seq_idx < (tensor_end - tensor_start)) {
             int src_row = tensor_start + local_seq_idx;
             int dst_row = merged_offsets[batch_id] + global_seq_idx;
-            if(tensor_id == 3) {
-                //printf("src_row: %d, dst_row: %d  merged_offsets[batch_id]: %d  global_seq_idx: %d\n ", src_row, dst_row, merged_offsets[batch_id], global_seq_idx);
-            }
+
             // warp-level parallelization for hidden_dim
             // each thread in warp handles multiple hidden dimensions
             int elements_per_thread = (hidden_dim + 32 - 1) / 32;
@@ -319,14 +307,14 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     int* workload_offset,
     T* merged_values,
     int* merged_offsets) {
-    //每个block处理从workload_offset[i+1]-workload_offset[i]个seq
+    // each block processes workload_offset[i+1]-workload_offset[i] sequences
     int block_id = blockIdx.x;
     if(workload_offset[block_id] == workload_offset[block_id + 1]) return;
     
     int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
     int tensor_id = (block_id / num_bucket_per_batch) % num_tensors;
     int batch_id =  block_id / num_bucket_per_batch / num_tensors; 
-    int idx = block_id % num_bucket_per_batch;//第几个bucket
+    int idx = block_id % num_bucket_per_batch; // which bucket
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
     const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
@@ -334,13 +322,13 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     int seq_start = offsets[batch_id];
     int seq_end = offsets[batch_id + 1];
     int len = seq_end - seq_start;
-    //len - idx * seqlen_per_block >= seqlen_per_block
+    // len - idx * seqlen_per_block >= seqlen_per_block
 
-    //对于merge_values, 每个block处理从workload_offset[block_id]开始workload_offset[block_id+1]-workload_offset[block_id]个seq
-    //对于source_values,搬运input_jagged_tensor.value_list[tensor_id]中从seq_start开始的len
+    // for merged_values, each block processes workload_offset[block_id+1]-workload_offset[block_id] sequences starting from workload_offset[block_id] 
+    // for source_values, copy len sequences from input_jagged_tensor.value_list[tensor_id] starting from seq_start
 
     for(int seq_offset = warp_id; seq_offset < workload_offset[block_id+1]-workload_offset[block_id]; seq_offset += 32){
-        int src_row = seq_start + seq_offset + idx*seqlen_per_block;//增加bucket内偏移量
+        int src_row = seq_start + seq_offset + idx*seqlen_per_block; // add bucket offset
         int dst_row = workload_offset[block_id] + seq_offset;
         // warp-level parallelization for hidden_dim
         // each thread in warp handles multiple hidden dimensions
@@ -435,11 +423,9 @@ void concat_2D_jagged_tensors_cuda_forward (
             }
             int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
             int total_blocks = batch_size * blocks_per_batch * num_tensors;
-            // 避免超过1024线程限制
 
-            
-            // warp配置：保证不超过1024线程
-            int target_warps = min(32, max(1, seqlen_per_block)); // 每个warp处理1个序列
+            // warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
+            int target_warps = min(32, max(1, seqlen_per_block)); 
             int threads = min(1024, target_warps * 32);
             
             dim3 opt_blocks(total_blocks);
@@ -554,14 +540,14 @@ __global__ void concat_2D_jagged_tensors_backward_kernel_opt_v4(
     int* workload_offset,
     T* grad_output,
     int* merged_offsets) {
-    //每个block处理从workload_offset[i+1]-workload_offset[i]个seq
+    // each block processes workload_offset[i+1]-workload_offset[i] sequences
     int block_id = blockIdx.x;
     if(workload_offset[block_id] == workload_offset[block_id + 1]) return;
     
     int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
     int tensor_id = (block_id / num_bucket_per_batch) % num_tensors;
     int batch_id =  block_id / num_bucket_per_batch / num_tensors; 
-    int idx = block_id % num_bucket_per_batch;//第几个bucket
+    int idx = block_id % num_bucket_per_batch; // which bucket
     int warp_id = threadIdx.x / 32;
     int lane_id = threadIdx.x % 32;
     const int32_t* offsets = grad_jagged_tensor.offsets_list[tensor_id];
@@ -571,7 +557,8 @@ __global__ void concat_2D_jagged_tensors_backward_kernel_opt_v4(
     int len = seq_end - seq_start;
 
     for(int seq_offset = warp_id; seq_offset < workload_offset[block_id+1]-workload_offset[block_id]; seq_offset += 32){
-        int src_row = seq_start + seq_offset + idx*seqlen_per_block;//增加bucket内偏移量
+        // add bucket offset
+        int src_row = seq_start + seq_offset + idx*seqlen_per_block; 
         int dst_row = workload_offset[block_id] + seq_offset;
         // warp-level parallelization for hidden_dim
         // each thread in warp handles multiple hidden dimensions
@@ -628,11 +615,7 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
     }
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
-    // int threads = 128;
-    // int blocks = (num_rows + threads - 1) / threads;
 
-
-    // DISPATCH_KERNEL_BY_TYPE(
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::kHalf, at::kBFloat16,
         grad_output.scalar_type(), 
@@ -646,11 +629,9 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
             }
             int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
             int total_blocks = batch_size * blocks_per_batch * num_tensors;
-            // 避免超过1024线程限制
-
             
-            // warp配置：保证不超过1024线程
-            int target_warps = min(32, max(1, seqlen_per_block)); // 每个warp处理1个序列
+            // warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
+            int target_warps = min(32, max(1, seqlen_per_block)); 
             int threads = min(1024, target_warps * 32);
             
             dim3 opt_blocks(total_blocks);
@@ -688,14 +669,12 @@ __global__ void compute_block_workloads_cuda_kernel(
 
     int tensor_id = (work_id / num_bucket_per_batch) % num_tensors;
     int batch_id = work_id / num_bucket_per_batch / num_tensors; 
-    int idx = work_id % num_bucket_per_batch;//第几个bucket
+    int idx = work_id % num_bucket_per_batch; // which bucket
     const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
     int seq_start = offsets[batch_id];
     int seq_end = offsets[batch_id + 1];
     int len = seq_end - seq_start;
 
-    // block_workloads[work_id] = max(len % seqlen_per_block, 0);
-    // 使用数学运算避免分支冲突，提高warp效率
     int remaining_len = len - idx * seqlen_per_block;
     block_workloads[work_id] = max(0, min(remaining_len, seqlen_per_block));
 
@@ -703,14 +682,14 @@ __global__ void compute_block_workloads_cuda_kernel(
 }
 
 /*
-target: 获得每个block应该处理merged_offsets的多少行
+target: determine how many rows each block should process from merged_offsets
 e.g. [4, 1, 4, 4, 4, 0, 4, 1, ...]
 
-工作原理:
-1. 每个block负责某个batch的一个bucket(seqlen_per_block大小的序列段)
-2. 计算该batch所有tensor的总序列数
-3. 根据bucket位置计算该block的实际工作量
-4. 输出到block_workloads数组，供后续前缀和计算使用
+Working principle:
+1. Each block is responsible for one bucket (sequence segment of seqlen_per_block size) of a batch
+2. Calculate the total number of sequences for all tensors in that batch
+3. Calculate the actual workload for that block based on bucket position
+4. Output to block_workloads array for subsequent prefix sum calculation
 */
 void compute_block_workloads_cuda(
     const std::vector<torch::Tensor>& offsets_list,
@@ -729,7 +708,7 @@ void compute_block_workloads_cuda(
         TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
         offsets_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
     }
-    int threads_per_block = min(1024, total_blocks); // 最多1024线程
+    int threads_per_block = min(1024, total_blocks);
     int num_blocks = (total_blocks + threads_per_block - 1) / threads_per_block;
     dim3 blocks(num_blocks);
     dim3 threads(threads_per_block);

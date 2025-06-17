@@ -145,6 +145,7 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
         (1, 1000, 16),  # Long sequence
         (100, 10, 8),  # Large batch size
         (4, 4, 512),  # Large hidden dimension
+        # (32, 8192, 128)
     ],
 )
 def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):

@@ -459,12 +459,10 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
 @pytest.mark.parametrize(
     "batch_size,max_len,hidden_dim",
     [
-        (2, 3, 4),
-        (4, 5, 8),
-        (8, 10, 16),
-        (16, 32, 32),
-        (32, 64, 64),
-        (64, 128, 128),
+        (32, 1024, 128),
+        (32, 2048, 128),
+        (32, 4096, 128),
+        (32, 8192, 128),
     ],
 )
 def test_cudaop_vs_tritonop_benchmark(
@@ -494,7 +492,12 @@ def test_cudaop_vs_tritonop_benchmark(
         max_seqlen1 = max(max_len_jt1_1, max_len_jt2_1)
         max_seqlen2 = max(max_len_jt1_2, max_len_jt2_2)
 
+        #GEMM setup
+        size = 8192
+        a = torch.randn(size, size, device='cuda', dtype=torch.float32)
+        b = torch.randn(size, size, device='cuda', dtype=torch.float32)
     # Warmup
+    #todo: backward and gemm need warmup
     print("Warming up...")
     for _ in range(10):
         current_jt_list = jt_list1 if _ % 2 == 0 else jt_list2
@@ -505,27 +508,47 @@ def test_cudaop_vs_tritonop_benchmark(
             calculated_max_seq_len1 if _ % 2 == 0 else calculated_max_seq_len2
         )
 
-        _ = jagged_2D_tensor_concat(
+        result = jagged_2D_tensor_concat(
             [current_jt_list[0].values(), current_jt_list[1].values()],
             [current_jt_list[0].offsets(), current_jt_list[1].offsets()],
             [current_max_len_1, current_max_len_2],
             current_max_seqlen,
         )
-        _ = triton_concat_2D_jagged(
+        result2 = triton_concat_2D_jagged(
             current_calculated_max_seq_len,
             current_jt_list[0].values(),
             current_jt_list[1].values(),
             current_jt_list[0].offsets(),
             current_jt_list[1].offsets(),
         )
+        grad_for_merged_values = torch.randn_like(result[0])
+        with torch.cuda.nvtx.range("cudawarmup", color="purple"):
+            result[0].backward(gradient=grad_for_merged_values)
+        grad_for_jt1 = current_jt_list[0].values().grad
+        grad_for_jt2 = current_jt_list[1].values().grad
+        current_jt_list[0].values().grad = None
+        current_jt_list[1].values().grad = None
+        with torch.cuda.nvtx.range("triton warmup", color="purple"):
+            result2.backward(gradient=grad_for_merged_values)
+        #GEMM warmup
+        with torch.cuda.nvtx.range("GEMM warmup", color="purple"):
+            for _ in range(10):
+                c = torch.mm(a, b)
+
+
+
 
     torch.cuda.synchronize()
 
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
 
+    with torch.cuda.nvtx.range("GEMM", color="purple"):
+        for _ in range(10):
+            c = torch.mm(a, b)
+
     start.record()
-    for _ in range(100):
+    for _ in range(1):
         current_jt_list = jt_list1 if _ % 2 == 0 else jt_list2
         current_max_len_1 = max_len_jt1_1 if _ % 2 == 0 else max_len_jt1_2
         current_max_len_2 = max_len_jt2_1 if _ % 2 == 0 else max_len_jt2_2
@@ -541,6 +564,11 @@ def test_cudaop_vs_tritonop_benchmark(
     end.record()
     torch.cuda.synchronize()
     cuda_forward_time = start.elapsed_time(end) / 100
+
+    #Before benchmark add workload GEMM
+    with torch.cuda.nvtx.range("GEMM", color="purple"):
+        for _ in range(10):
+            c = torch.mm(a, b)
 
     # Triton Forward Benchmark
     start.record()
@@ -562,6 +590,9 @@ def test_cudaop_vs_tritonop_benchmark(
     torch.cuda.synchronize()
     triton_forward_time = start.elapsed_time(end) / 100
 
+    with torch.cuda.nvtx.range("GEMM", color="purple"):
+        for _ in range(10):
+            c = torch.mm(a, b)
     # CUDA Backward Benchmark
     cuda_result_for_backward = jagged_2D_tensor_concat(
         [jt_list1[0].values(), jt_list1[1].values()],
@@ -572,7 +603,7 @@ def test_cudaop_vs_tritonop_benchmark(
     grad_for_backward = torch.randn_like(cuda_result_for_backward[0])
 
     start.record()
-    for _ in range(100):
+    for _ in range(1):
         input_tensors = [jt_list1[0].values(), jt_list1[1].values()]
         with torch.cuda.nvtx.range("CUDA Backward", color="red"):
             grads = torch.autograd.grad(
@@ -587,6 +618,9 @@ def test_cudaop_vs_tritonop_benchmark(
     torch.cuda.synchronize()
     cuda_backward_time = start.elapsed_time(end) / 100
 
+    with torch.cuda.nvtx.range("GEMM", color="purple"):
+        for _ in range(10):
+            c = torch.mm(a, b)
     # Triton Backward Benchmark
     triton_result_for_backward = triton_concat_2D_jagged(
         calculated_max_seq_len1,

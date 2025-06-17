@@ -297,6 +297,7 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
     }
 }
 template <typename T>
+// __launch_bounds__() __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
 __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     const InputJaggedTensor<T> input_jagged_tensor,
     const int32_t num_tensors,
@@ -592,27 +593,19 @@ __global__ void concat_2D_jagged_tensors_backward_kernel_opt_v4(
         }
     }
 }
-std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
+void concat_2D_jagged_tensors_cuda_backward(
     torch::Tensor grad_output,
     torch::Tensor grad_lengths,  
     int seqlen_per_block,
     int max_seqlen,
     torch::Tensor workload_offset,
+    const std::vector<torch::Tensor>& grad_inputs,
     const std::vector<torch::Tensor>& offsets_list,
     torch::Tensor merged_offsets) {
 
     int num_tensors = offsets_list.size();
     int batch_size = grad_lengths.size(0);
     int hidden_dim = grad_output.size(-1);
-
-    std::vector<torch::Tensor> grad_inputs(num_tensors);
-    for (int i = 0; i < num_tensors; ++i) {
-        int tensor_size = offsets_list[i].index({offsets_list[i].size(0) - 1}).item<int>();
-        grad_inputs[i] = torch::empty(
-            {tensor_size, hidden_dim},
-            grad_output.options()
-        );
-    }
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
@@ -650,7 +643,7 @@ std::vector<torch::Tensor> concat_2D_jagged_tensors_cuda_backward(
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         }
     );
-    return grad_inputs;
+    return;
 }
 
 __global__ void compute_block_workloads_cuda_kernel(

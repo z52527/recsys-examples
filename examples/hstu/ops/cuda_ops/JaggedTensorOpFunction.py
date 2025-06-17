@@ -89,6 +89,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # save non-tensor variables
         ctx.seqlen_per_block = seqlen_per_block
         ctx.max_seqlen = max_seqlen
+        ctx.input_shapes = [v.shape for v in values_list]
         return merged_values, merged_lengths
 
     @staticmethod
@@ -103,17 +104,20 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # get saved non-tensor variables
         seqlen_per_block = ctx.seqlen_per_block
         max_seqlen = ctx.max_seqlen
+        
+        grad_inputs = [torch.empty(shape, dtype=grad_output.dtype, device=grad_output.device) for shape in ctx.input_shapes]
 
-        grad_input = hstu_cuda_ops.concat_2D_jagged_tensors_backward(
+        hstu_cuda_ops.concat_2D_jagged_tensors_backward(
             grad_output,
             grad_lengths,
             seqlen_per_block,
             max_seqlen,
             workload_offset,
+            grad_inputs,
             offsets_list,
             merged_offsets,
         )
-        return None, None, None, *grad_input
+        return (None, None, None, *grad_inputs)
 
 
 def switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:

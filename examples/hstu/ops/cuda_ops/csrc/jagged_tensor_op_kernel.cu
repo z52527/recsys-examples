@@ -522,7 +522,7 @@ __global__ void concat_2D_jagged_tensors_backward_kernel_opt(
         for (int row_offset = lane_id; row_offset < num_rows_in_tensor; row_offset += 32) {
             int i = start + row_offset;
             int out_row = out_start + row_offset;
-            
+            //todo: split here to two kernels
             if (hidden_dim % 4 == 0 && hidden_dim <= 256) {
                 for (int h = 0; h < hidden_dim; h += 4) {
                     copy_float4(&grad_values[i * hidden_dim + h],

@@ -567,7 +567,7 @@ def test_cudaop_vs_tritonop_benchmark(
             c = torch.mm(a, b)
 
     start.record()
-    for _ in range(1):
+    for _ in range(100):
         current_jt_list = jt_list1 if _ % 2 == 0 else jt_list2
         current_max_len_1 = max_len_jt1_1 if _ % 2 == 0 else max_len_jt1_2
         current_max_len_2 = max_len_jt2_1 if _ % 2 == 0 else max_len_jt2_2
@@ -622,7 +622,7 @@ def test_cudaop_vs_tritonop_benchmark(
     grad_for_backward = torch.randn_like(cuda_result_for_backward[0])
 
     start.record()
-    for _ in range(1):
+    for _ in range(100):
         input_tensors = [jt_list1[0].values(), jt_list1[1].values()]
         with torch.cuda.nvtx.range("CUDA Backward", color="red"):
             grads = torch.autograd.grad(

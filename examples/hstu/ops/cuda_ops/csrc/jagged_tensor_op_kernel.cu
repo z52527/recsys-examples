@@ -297,8 +297,8 @@ __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
     }
 }
 template <typename T>
-// __launch_bounds__() __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
-__global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
+__launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
+// __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     const InputJaggedTensor<T> input_jagged_tensor,
     const int32_t num_tensors,
     const int32_t batch_size,
@@ -537,7 +537,7 @@ __global__ void concat_2D_jagged_tensors_backward_kernel_opt(
     }
 }
 template <typename T>
-__global__ void concat_2D_jagged_tensors_backward_kernel_opt_v4(
+__launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_kernel_opt_v4(
     const InputJaggedTensor<T> grad_jagged_tensor,
     const int32_t num_tensors,
     const int32_t batch_size,

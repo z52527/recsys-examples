@@ -392,6 +392,7 @@ void concat_2D_jagged_tensors_cuda_forward (
     const std::vector<torch::Tensor>& offsets_list,
     int seqlen_per_block,
     int max_seqlen,
+    int max_block_size,
     torch::Tensor workload_offset,
     torch::Tensor merged_values,
     torch::Tensor merged_offsets){
@@ -427,12 +428,13 @@ void concat_2D_jagged_tensors_cuda_forward (
             // warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
             int target_warps = min(32, max(1, seqlen_per_block)); 
             int threads = min(1024, target_warps * 32);
+            //todo:python side max_grid_size not work now, use cudaDeviceProp to get max_grid_size
+            // cudaDeviceProp prop;
+            // cudaGetDeviceProperties(&prop, 0);
+            // int max_grid_size = prop.maxGridSize[0];
 
-            cudaDeviceProp prop;
-            cudaGetDeviceProperties(&prop, 0);
-            int max_grid_size = prop.maxGridSize[0];
-
-            dim3 opt_blocks(min(max_grid_size, total_blocks));
+            dim3 opt_blocks(min(max_block_size, total_blocks));
+            // dim3 opt_blocks(total_blocks);
             dim3 opt_threads(threads);
 
             concat_2D_jagged_tensors_forward_kernel_opt_v4<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
@@ -604,6 +606,7 @@ void concat_2D_jagged_tensors_cuda_backward(
     torch::Tensor grad_lengths,  
     int seqlen_per_block,
     int max_seqlen,
+    int max_block_size,
     torch::Tensor workload_offset,
     const std::vector<torch::Tensor>& grad_inputs,
     const std::vector<torch::Tensor>& offsets_list,
@@ -632,12 +635,11 @@ void concat_2D_jagged_tensors_cuda_backward(
             // warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
             int target_warps = min(32, max(1, seqlen_per_block)); 
             int threads = min(1024, target_warps * 32);
-
-            cudaDeviceProp prop;
-            cudaGetDeviceProperties(&prop, 0);
-            int max_grid_size = prop.maxGridSize[0];
-            
-            dim3 opt_blocks(min(max_grid_size, total_blocks));
+            //todo:python side max_grid_size not work now, use cudaDeviceProp to get max_grid_size
+            // cudaDeviceProp prop;
+            // cudaGetDeviceProperties(&prop, 0);
+            // int max_grid_size = prop.maxGridSize[0];
+            dim3 opt_blocks(min(max_block_size, total_blocks));
             dim3 opt_threads(threads);
             concat_2D_jagged_tensors_backward_kernel_opt_v4<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
                 grad_jagged_tensor,

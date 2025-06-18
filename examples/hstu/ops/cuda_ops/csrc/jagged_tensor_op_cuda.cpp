@@ -7,6 +7,7 @@ void concat_2D_jagged_tensors_cuda_forward (
     const std::vector<at::Tensor>& offsets_list,
     int seqlen_per_block,
     int max_seqlen,
+    int max_block_size,
     at::Tensor workload_offset,
     at::Tensor merged_values,
     at::Tensor merged_offsets);
@@ -16,6 +17,7 @@ void concat_2D_jagged_tensors_cuda_backward(
     torch::Tensor grad_lengths,
     int seqlen_per_block,
     int max_seqlen,
+    int max_block_size,
     torch::Tensor workload_offset,
     const std::vector<torch::Tensor>& grad_inputs,
     const std::vector<torch::Tensor>& offsets_list,
@@ -32,6 +34,7 @@ void concat_2D_jagged_tensors_forward (
     const std::vector<at::Tensor>& offsets_list,
     int seqlen_per_block,
     int max_seqlen,
+    int max_block_size,
     at::Tensor workload_offset,
     at::Tensor merged_values,
     at::Tensor merged_offsets) {
@@ -44,6 +47,7 @@ void concat_2D_jagged_tensors_forward (
         offsets_list, 
         seqlen_per_block,
         max_seqlen,
+        max_block_size,
         workload_offset,
         merged_values, 
         merged_offsets);
@@ -55,6 +59,7 @@ void concat_2D_jagged_tensors_backward(
     torch::Tensor grad_lengths,
     int seqlen_per_block,
     int max_seqlen,
+    int max_block_size,
     torch::Tensor workload_offset,
     const std::vector<torch::Tensor>& grad_inputs,
     const std::vector<torch::Tensor>& offsets_list,
@@ -64,6 +69,7 @@ void concat_2D_jagged_tensors_backward(
         grad_lengths,
         seqlen_per_block,
         max_seqlen,
+        max_block_size,
         workload_offset,
         grad_inputs,
         offsets_list,

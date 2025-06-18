@@ -244,6 +244,15 @@ def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):
 def test_cudaop_vs_pytorch_benchmark(
     num, batch_size, max_len, hidden_dim, dtype=torch.float32
 ):
+    # Set random seeds for reproducibility
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    import numpy as np
+    np.random.seed(0)
+    import random
+    random.seed(0)
+    
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
         jt_list = [
             create_test_jagged_tensor(batch_size, max_len, hidden_dim)
@@ -471,6 +480,15 @@ def test_cudaop_vs_tritonop_benchmark(
 ):
     from JaggedTensorOpFunction import jagged_2D_tensor_concat
     from ops.triton_ops.triton_jagged import triton_concat_2D_jagged
+
+    # Set random seeds for reproducibility
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    import numpy as np
+    np.random.seed(0)
+    import random
+    random.seed(0)
 
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
         jt_list1 = [

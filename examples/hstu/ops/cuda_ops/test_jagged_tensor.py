@@ -149,9 +149,9 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
         # (32, 8192, 128)
     ],
 )
-def test_forward_backward_verification(num, batch_size, max_len, hidden_dim):
+def test_forward_backward_verification(num, batch_size, max_len, hidden_dim, dtype=torch.float32):
     jt_list = [
-        create_test_jagged_tensor(batch_size, max_len, hidden_dim) for _ in range(num)
+        create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype) for _ in range(num)
     ]
     max_seqlens = [max(jt.lengths()) for jt in jt_list]
     max_seqlen1 = max(max_seqlens)

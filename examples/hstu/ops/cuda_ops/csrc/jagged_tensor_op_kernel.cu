@@ -40,263 +40,6 @@ __device__ __forceinline__ void copy_float4(T* dst, const T* src) {
 }
 
 template <typename T>
-__global__ void concat_2D_jagged_tensors_forward_kernel(
-	const InputJaggedTensor<T> input_jagged_tensor,
-	const int32_t num_tensors,
-	const int32_t num_rows,
-	const int32_t hidden_dim,
-	T* merged_values,
-    int* merged_offsets) {
-	
-	int row = blockIdx.x * blockDim.x + threadIdx.x;
-	if (row >= num_rows) return;
-	int out_idx = merged_offsets[row];
-
-	for (int t = 0; t < num_tensors; ++t) {
-		const T* values = input_jagged_tensor.value_list[t];
-		const int32_t* offsets = input_jagged_tensor.offsets_list[t];
-		int start = offsets[row];
-		int end = offsets[row + 1];
-
-		for (int i = start; i < end; ++i) {
-			for (int h = 0; h < hidden_dim; ++h) {
-				merged_values[out_idx * hidden_dim + h] = values[i * hidden_dim + h];
-			}
-			out_idx++;
-		} 
-	}
-}
-
-template <typename T>
-__global__ void concat_2D_jagged_tensors_forward_kernel_opt(
-	const InputJaggedTensor<T> input_jagged_tensor,
-	const int32_t num_tensors,
-	const int32_t num_rows,
-	const int32_t hidden_dim,
-	T* merged_values,
-    int* merged_offsets) {
-	
-    // shared memory to cache offset lengths for current batch
-    __shared__ int32_t shared_lens[kMaxNumTensors];
-    
-    int batch_id = blockIdx.x;
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
-    
-    if (batch_id >= num_rows) return;
-    
-    // load offset lengths to shared memory
-    if (threadIdx.x < num_tensors) {
-        const int32_t* offsets = input_jagged_tensor.offsets_list[threadIdx.x];
-        shared_lens[threadIdx.x] = offsets[batch_id + 1] - offsets[batch_id];
-    }
-    __syncthreads();
-    
-    // each warp processes one tensor
-    if (warp_id < num_tensors) {
-        const T* values = input_jagged_tensor.value_list[warp_id];
-        const int32_t* offsets = input_jagged_tensor.offsets_list[warp_id];
-        int start = offsets[batch_id];
-        int end = offsets[batch_id + 1];
-        int num_rows_in_tensor = end - start;
-        
-        // calculate output start position for current tensor
-        int out_start = merged_offsets[batch_id];
-        for (int t = 0; t < warp_id; ++t) {
-            out_start += shared_lens[t];
-        }
-
-        //each thread handles different rows
-        for (int row_offset = lane_id; row_offset < num_rows_in_tensor; row_offset += 32) {
-            int i = start + row_offset;
-            int out_row = out_start + row_offset;
-            
-            // each thread copies entire hidden_dim 
-            if (hidden_dim % 4 == 0 && hidden_dim <= 256) {
-                for (int h = 0; h < hidden_dim; h += 4) {
-                    copy_float4(&merged_values[out_row * hidden_dim + h],
-                               &values[i * hidden_dim + h]);
-                }
-            } else {
-                for (int h = 0; h < hidden_dim; ++h) {
-                    merged_values[out_row * hidden_dim + h] = values[i * hidden_dim + h];
-                }
-            }
-        }
-    }
-}
-
-template <typename T>
-__global__ void concat_2D_jagged_tensors_forward_kernel_opt_v2(
-	const InputJaggedTensor<T> input_jagged_tensor,
-	const int32_t num_tensors,
-	const int32_t num_rows,
-	const int32_t hidden_dim,
-    const int32_t max_seqlen,
-    const int32_t seqlen_per_block,
-	T* merged_values,
-    int* merged_offsets) {
-    // shared memory to cache offset lengths for current batch
-    __shared__ int32_t shared_lens[kMaxNumTensors];
-    
-    int batch_id = blockIdx.x / (max_seqlen / seqlen_per_block);
-    int block_id = blockIdx.x % (max_seqlen / seqlen_per_block); // range 0, max_seqlen/seqlen_per_block - 1
-    //一个block处理seqlen_per_block个seq 如何划分给不同的warp？还是直接线程做？
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
-    int seq_id = block_id * seqlen_per_block;
-    // int seq_id = block_id * seqlen_per_block + threadIdx.x; not correct
-    // if this batch is empty from this block onwards, return directly
-    if(block_id * seqlen_per_block > merged_offsets[batch_id+1] - merged_offsets[batch_id]) return;
-    if (batch_id >= num_rows) return;
-
-    // load offset lengths to shared memory
-    if (threadIdx.x < num_tensors) {
-        const int32_t* offsets = input_jagged_tensor.offsets_list[threadIdx.x];
-        shared_lens[threadIdx.x] = offsets[batch_id + 1] - offsets[batch_id];
-    }
-    __syncthreads();
-    
-    // each warp processes one tensor
-    if (warp_id < num_tensors) {
-        const T* values = input_jagged_tensor.value_list[warp_id];
-        const int32_t* offsets = input_jagged_tensor.offsets_list[warp_id];
-        int start = offsets[batch_id];
-        int end = offsets[batch_id + 1];
-        int num_rows_in_tensor = end - start;
-        
-        // calculate output start position for current tensor
-        int out_start = merged_offsets[batch_id];
-        for (int t = 0; t < warp_id; ++t) {
-            out_start += shared_lens[t];
-        }
-
-        //each thread handles different rows
-        for (int row_offset = lane_id; row_offset < num_rows_in_tensor; row_offset += 32) {
-            int i = start + row_offset;
-            int out_row = out_start + row_offset;
-            
-            // each thread copies entire hidden_dim 
-            if (hidden_dim % 4 == 0 && hidden_dim <= 256) {
-                for (int h = 0; h < hidden_dim; h += 4) {
-                    copy_float4(&merged_values[out_row * hidden_dim + h],
-                               &values[i * hidden_dim + h]);
-                }
-            } else {
-                for (int h = 0; h < hidden_dim; ++h) {
-                    merged_values[out_row * hidden_dim + h] = values[i * hidden_dim + h];
-                }
-            }
-        }
-    }
-}
-
-template <typename T>
-__global__ void concat_2D_jagged_tensors_forward_kernel_opt_v3(
-    const InputJaggedTensor<T> input_jagged_tensor,
-    const int32_t num_tensors,
-    const int32_t num_rows,
-    const int32_t hidden_dim,
-    const int32_t max_seqlen,
-    const int32_t seqlen_per_block,
-    T* merged_values,
-    int* merged_offsets) {
-    
-    // shared memory to cache offset lengths for current batch
-    __shared__ int32_t shared_lens[kMaxNumTensors];
-    __shared__ int32_t shared_cum_lens[kMaxNumTensors + 1];
-    
-    int batch_id = blockIdx.x / ((max_seqlen + seqlen_per_block - 1) / seqlen_per_block);
-    int block_id = blockIdx.x % ((max_seqlen + seqlen_per_block - 1) / seqlen_per_block);
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
-    int num_warps = blockDim.x / 32;
-    
-    if (batch_id >= num_rows) return;
-    
-    // load offset lengths to shared memory
-    if (threadIdx.x < num_tensors) {
-        const int32_t* offsets = input_jagged_tensor.offsets_list[threadIdx.x];
-        shared_lens[threadIdx.x] = offsets[batch_id + 1] - offsets[batch_id];
-    }
-    if (threadIdx.x == 0) {
-        shared_cum_lens[0] = 0;
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-        for (int i = 0; i < num_tensors; ++i) {
-            shared_cum_lens[i + 1] = shared_cum_lens[i] + shared_lens[i];
-        }
-    } 
-    __syncthreads();
-
-    int total_seqlen = shared_cum_lens[num_tensors];
-    
-    // calculate sequence range for this block
-    int seq_start = block_id * seqlen_per_block;
-    int seq_end = min(seq_start + seqlen_per_block, total_seqlen);
-    
-    // early return if no work
-    if (seq_start >= total_seqlen) return;
-
-    // each warp processes different sequences in this block
-    for (int seq_offset = warp_id; seq_offset < (seq_end - seq_start); seq_offset += num_warps) {
-        int global_seq_idx = seq_start + seq_offset;
-
-        // find which tensor this sequence belongs to
-        int tensor_id = 0;
-        while (tensor_id < num_tensors && global_seq_idx >= shared_cum_lens[tensor_id + 1]) {
-            tensor_id++;
-        }
-
-        if (tensor_id >= num_tensors) continue;
-        // calculate local sequence index within tensor
-        int local_seq_idx = global_seq_idx - shared_cum_lens[tensor_id];
-        
-        const T* values = input_jagged_tensor.value_list[tensor_id];
-        const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
-        int tensor_start = offsets[batch_id];
-        int tensor_end = offsets[batch_id + 1];
-
-        if (local_seq_idx < (tensor_end - tensor_start)) {
-            int src_row = tensor_start + local_seq_idx;
-            int dst_row = merged_offsets[batch_id] + global_seq_idx;
-
-            // warp-level parallelization for hidden_dim
-            // each thread in warp handles multiple hidden dimensions
-            int elements_per_thread = (hidden_dim + 32 - 1) / 32;
-            int thread_start = lane_id * elements_per_thread;
-            int thread_end = min(thread_start + elements_per_thread, hidden_dim);
-            
-            // vectorized copy 
-            if (hidden_dim % 4 == 0 && thread_start % 4 == 0) {
-                int vectorized_start = (thread_start + 3) / 4 * 4;
-                int vectorized_end = thread_end / 4 * 4;
-                
-                for (int h = thread_start; h < vectorized_start && h < thread_end; ++h) {
-                    merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
-                }
-                
-                for (int h = vectorized_start; h < vectorized_end; h += 4) {
-                    copy_float4(&merged_values[dst_row * hidden_dim + h],
-                               &values[src_row * hidden_dim + h]);
-                }
-                
-                // handle remaining elements
-                for (int h = vectorized_end; h < thread_end; ++h) {
-                    merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
-                }
-            } else {
-                // scalar copy
-                for (int h = thread_start; h < thread_end; ++h) {
-                    merged_values[dst_row * hidden_dim + h] = values[src_row * hidden_dim + h];
-                }
-            }
-        }
-    }
-}
-template <typename T>
 __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
 // __global__ void concat_2D_jagged_tensors_forward_kernel_opt_v4(
     const InputJaggedTensor<T> input_jagged_tensor,
@@ -363,30 +106,87 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kern
     }
 }
 
-__global__ void concat_1D_jagged_tensor_kernel(
-	const float** values_list,
-	const int** offsets_list,
-	int num_tensor,
-	int num_rows,//total_length
-	float* merged_values,
-	int* merged_offsets){
-	
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-	if (row >= num_rows) return;
 
-	int out_idx = merged_offsets[row]; // data start from this row
-	for(int i = 0; i < num_tensor; i++){
-		const float* values = values_list[i];
-		const int* offsets = offsets_list[i];
-		int st = offsets[row];
-		int end = offsets[row+1];
-		for(int j = st; j < end; j++){
-			merged_values[out_idx++] = values[j];
-		}
-	}
+template <typename T, int HIDDEN_DIM>
+__launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kernel_alignment(
+    const InputJaggedTensor<T> input_jagged_tensor,
+    const int32_t num_tensors,
+    const int32_t batch_size,
+    const int32_t max_seqlen,
+    const int32_t total_blocks,
+    const int32_t seqlen_per_block,
+    int* workload_offset,
+    T* merged_values,
+    int* merged_offsets) {
+    // each block processes workload_offset[i+1]-workload_offset[i] sequences
+    constexpr int elements_per_thread = (HIDDEN_DIM + 31) / 32;
+    for(int block_id = blockIdx.x; block_id < total_blocks; block_id += gridDim.x){
+        if(workload_offset[block_id] == workload_offset[block_id + 1]) continue;
+        
+        int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
+        int tensor_id = (block_id / num_bucket_per_batch) % num_tensors;
+        int batch_id =  block_id / num_bucket_per_batch / num_tensors; 
+        int idx = block_id % num_bucket_per_batch; // which bucket
+        int warp_id = threadIdx.x / 32;
+        int lane_id = threadIdx.x % 32;
+        const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
+        const T* values = input_jagged_tensor.value_list[tensor_id];
+        int seq_start = offsets[batch_id];
+        
+        // for merged_values, each block processes workload_offset[block_id+1]-workload_offset[block_id] sequences starting from workload_offset[block_id] 
+        // for source_values, copy len sequences from input_jagged_tensor.value_list[tensor_id] starting from seq_start
+
+        for(int seq_offset = warp_id; seq_offset < workload_offset[block_id+1]-workload_offset[block_id]; seq_offset += 32){
+            int src_row = seq_start + seq_offset + idx*seqlen_per_block; // add bucket offset
+            int dst_row = workload_offset[block_id] + seq_offset;
+            int h_start = lane_id * elements_per_thread;
+            #pragma unroll
+            for(int i = 0; i < elements_per_thread; i += 4) {
+                copy_float4(&merged_values[dst_row * HIDDEN_DIM + h_start + i], &values[src_row * HIDDEN_DIM + h_start + i]);
+            }
+        }
+    }
 }
+template <typename T>
+__launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kernel_warp(
+    const InputJaggedTensor<T> input_jagged_tensor,
+    const int32_t num_tensors,
+    const int32_t batch_size,
+    const int32_t hidden_dim,
+    const int32_t max_seqlen,
+    const int32_t total_blocks,
+    const int32_t seqlen_per_block,
+    int* workload_offset,
+    T* merged_values,
+    int* merged_offsets) {
+    // each block processes workload_offset[i+1]-workload_offset[i] sequences
+    for(int block_id = blockIdx.x; block_id < total_blocks; block_id += gridDim.x){
+        if(workload_offset[block_id] == workload_offset[block_id + 1]) continue;
+        
+        int num_bucket_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
+        int tensor_id = (block_id / num_bucket_per_batch) % num_tensors;
+        int batch_id =  block_id / num_bucket_per_batch / num_tensors; 
+        int idx = block_id % num_bucket_per_batch; // which bucket
+        int warp_id = threadIdx.x / 32;
+        int lane_id = threadIdx.x % 32;
+        const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
+        const T* values = input_jagged_tensor.value_list[tensor_id];
+        int seq_start = offsets[batch_id];
+        
+        // for merged_values, each block processes workload_offset[block_id+1]-workload_offset[block_id] sequences starting from workload_offset[block_id] 
+        // for source_values, copy len sequences from input_jagged_tensor.value_list[tensor_id] starting from seq_start
 
-
+        for(int seq_offset = warp_id; seq_offset < workload_offset[block_id+1]-workload_offset[block_id]; seq_offset += 32){
+            int src_row = seq_start + seq_offset + idx*seqlen_per_block; // add bucket offset
+            int dst_row = workload_offset[block_id] + seq_offset;
+            int vec4_count = hidden_dim / 4;
+            for (int i = lane_id; i < vec4_count; i += 32) {
+                int h = i * 4;
+                copy_float4(&merged_values[dst_row * hidden_dim + h], &values[src_row * hidden_dim + h]);
+            }
+        }
+    }
+}
 void concat_2D_jagged_tensors_cuda_forward (
     const std::vector<torch::Tensor>& values_list,
     const std::vector<torch::Tensor>& offsets_list,
@@ -436,19 +236,95 @@ void concat_2D_jagged_tensors_cuda_forward (
             dim3 opt_blocks(min(max_block_size, total_blocks));
             // dim3 opt_blocks(total_blocks);
             dim3 opt_threads(threads);
+            
+            int elements_per_thread = (hidden_dim + 32 - 1) / 32;
+            if(hidden_dim % 4 == 0 && elements_per_thread % 4 == 0){
+                switch(hidden_dim){
+                    case 128:
+                        concat_2D_jagged_tensors_forward_kernel_alignment<scalar_t, 128><<<opt_blocks, opt_threads, 0, stream>>>(
+                            input_jagged_tensor_typed,
+                            num_tensors,
+                            batch_size,
+                            max_seqlen,
+                            total_blocks,
+                            seqlen_per_block,
+                            workload_offset.data_ptr<int>(),
+                            merged_values.data_ptr<scalar_t>(),
+                            merged_offsets.data_ptr<int>()
+                        );
+                        break;
+                    case 256:
+                        concat_2D_jagged_tensors_forward_kernel_alignment<scalar_t, 256><<<opt_blocks, opt_threads, 0, stream>>>(
+                            input_jagged_tensor_typed,
+                            num_tensors,
+                            batch_size,
+                            max_seqlen,
+                            total_blocks,
+                            seqlen_per_block,
+                            workload_offset.data_ptr<int>(),
+                            merged_values.data_ptr<scalar_t>(),
+                            merged_offsets.data_ptr<int>()
+                        );
+                        break;
+                    case 512:
+                        concat_2D_jagged_tensors_forward_kernel_alignment<scalar_t, 512><<<opt_blocks, opt_threads, 0, stream>>>(
+                            input_jagged_tensor_typed,
+                            num_tensors,
+                            batch_size,
+                            max_seqlen,
+                            total_blocks,
+                            seqlen_per_block,
+                            workload_offset.data_ptr<int>(),
+                            merged_values.data_ptr<scalar_t>(),
+                            merged_offsets.data_ptr<int>()
+                        );
+                        break;
+                    default:
+                        concat_2D_jagged_tensors_forward_kernel_warp<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
+                            input_jagged_tensor_typed,
+                            num_tensors,
+                            batch_size,
+                            hidden_dim,
+                            max_seqlen,
+                            total_blocks,
+                            seqlen_per_block,
+                            workload_offset.data_ptr<int>(),
+                            merged_values.data_ptr<scalar_t>(),
+                            merged_offsets.data_ptr<int>()
+                        );
+                        break;
+                }
 
-            concat_2D_jagged_tensors_forward_kernel_opt_v4<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
-                input_jagged_tensor_typed,
-                num_tensors,
-                batch_size,
-                hidden_dim,
-                max_seqlen,
-                total_blocks,
-                seqlen_per_block,
-                workload_offset.data_ptr<int>(),
-                merged_values.data_ptr<scalar_t>(),
-                merged_offsets.data_ptr<int>()
-            );
+            }
+            else if(hidden_dim % 4 == 0){
+                concat_2D_jagged_tensors_forward_kernel_warp<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
+                    input_jagged_tensor_typed,
+                    num_tensors,
+                    batch_size,
+                    hidden_dim,
+                    max_seqlen,
+                    total_blocks,
+                    seqlen_per_block,
+                    workload_offset.data_ptr<int>(),
+                    merged_values.data_ptr<scalar_t>(),
+                    merged_offsets.data_ptr<int>()
+                );
+            }
+            else {
+                concat_2D_jagged_tensors_forward_kernel_opt_v4<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(
+                    input_jagged_tensor_typed,
+                    num_tensors,
+                    batch_size,
+                    hidden_dim,
+                    max_seqlen,
+                    total_blocks,
+                    seqlen_per_block,
+                    workload_offset.data_ptr<int>(),
+                    merged_values.data_ptr<scalar_t>(),
+                    merged_offsets.data_ptr<int>()
+                );
+            }
+
             
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         }

@@ -178,29 +178,42 @@ def jagged_2D_tensor_concat(
         batch_values = values_list[i:end_idx]
         batch_offsets = offsets_list[i:end_idx]
         batch_max_seqlens = max_seqlens[i:end_idx]
+        
         batch_max_seqlen = max(batch_max_seqlens)
 
         batch_result = _JaggedTensorOpFunction.apply(
             batch_offsets, batch_max_seqlen, *batch_values
         )
-
+        print(f"batch_result: {batch_result[0]}")
         if result_values is None:
             # First batch
             result_values, result_lengths = batch_result
+            prev_max_seqlen = sum(batch_max_seqlens)
         else:
             # Merge with previous result using 2-tensor concat
             prev_offsets = length_to_complete_offsets(result_lengths)
             curr_offsets = length_to_complete_offsets(batch_result[1])
 
-            prev_max_seqlen = torch.max(result_lengths).item()
-            curr_max_seqlen = torch.max(batch_result[1]).item()
-
+            # prev_max_seqlen = torch.max(result_lengths).item()
+            # curr_max_seqlen = torch.max(batch_result[1]).item()
+            # import pdb; pdb.set_trace()
+            # Merge two results
+            # result_values, result_lengths = _JaggedTensorOpFunction.apply(
+            #     [prev_offsets, curr_offsets],
+            #     max(prev_max_seqlen, curr_max_seqlen),
+            #     result_values,
+            #     batch_result[0],
+            # )
+            max_seqlen = prev_max_seqlen + sum(batch_max_seqlens)
+            # import pdb; pdb.set_trace()
             # Merge two results
             result_values, result_lengths = _JaggedTensorOpFunction.apply(
                 [prev_offsets, curr_offsets],
-                max(prev_max_seqlen, curr_max_seqlen),
+                max_seqlen,
                 result_values,
                 batch_result[0],
             )
+            prev_max_seqlen = max_seqlen
+        
 
     return result_values, result_lengths

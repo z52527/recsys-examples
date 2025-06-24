@@ -193,6 +193,9 @@ def test_forward_backward_verification(num, batch_size, max_len, hidden_dim, dty
         max_seqlens,
     )
     result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
+    # print(f"cudaop result: {result[0]}")
+    # print(f"pytorch result: {result2[0]}")
+    # print(f"values:{jt_list[0].values()}")
     assert torch.equal(result[0], result2[0])
     assert torch.equal(result[1], result2[1])
     # Verify backward propagation correctness
@@ -710,4 +713,4 @@ def test_cudaop_vs_tritonop_benchmark(
     if backward_speedup > 1:
         print(f"CUDA is {backward_speedup:.2f}x faster than Triton for backward pass")
     else:
-        print(f"Triton is {1/backward_speedup:.2f}x faster than CUDA for backward pass")
+        print(f"Triton is {1/backward_speedup:.2f}x faster than CUDA for backward pas

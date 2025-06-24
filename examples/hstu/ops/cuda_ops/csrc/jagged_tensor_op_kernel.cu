@@ -343,7 +343,7 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_ker
 }
 template <typename T>
 __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_kernel_warp(
-    const InputJaggedTensor<T> input_jagged_tensor,
+    const InputJaggedTensor<T> grad_jagged_tensor,
     const int32_t num_tensors,
     const int32_t batch_size,
     const int32_t hidden_dim,
@@ -363,12 +363,12 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_ker
         int idx = block_id % num_bucket_per_batch; // which bucket
         int warp_id = threadIdx.x / 32;
         int lane_id = threadIdx.x % 32;
-        const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
-        const T* values = input_jagged_tensor.value_list[tensor_id];
+        const int32_t* offsets = grad_jagged_tensor.offsets_list[tensor_id];
+        T* values = grad_jagged_tensor.value_list[tensor_id];
         int seq_start = offsets[batch_id];
         
-        // for merged_values, each block processes workload_offset[block_id+1]-workload_offset[block_id] sequences starting from workload_offset[block_id] 
-        // for source_values, copy len sequences from input_jagged_tensor.value_list[tensor_id] starting from seq_start
+        // for backward pass: copy gradients from merged grad_output back to individual input gradients
+        // dst_row in grad_output -> src_row in values (individual tensor gradients)
 
         for(int seq_offset = warp_id; seq_offset < workload_offset[block_id+1]-workload_offset[block_id]; seq_offset += 32){
             int src_row = seq_start + seq_offset + idx*seqlen_per_block; // add bucket offset
@@ -376,7 +376,7 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_ker
             int vec4_count = hidden_dim / 4;
             for (int i = lane_id; i < vec4_count; i += 32) {
                 int h = i * 4;
-                copy_float4(&grad_output[dst_row * hidden_dim + h], &values[src_row * hidden_dim + h]);
+                copy_float4(&values[src_row * hidden_dim + h], &grad_output[dst_row * hidden_dim + h]);
             }
         }
     }

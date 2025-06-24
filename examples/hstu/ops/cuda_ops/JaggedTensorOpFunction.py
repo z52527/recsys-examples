@@ -52,8 +52,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         device_properties = torch.cuda.get_device_properties(0)
         #todo:python side max_grid_size not work now, cuda side use cudaDeviceProp to get max_grid_size
         # max_grid_size = 
-        OPTIMIZER_BLOCKSIZE_VEC = 64
-        max_block_size = int(device_properties.multi_processor_count * (device_properties.max_threads_per_multi_processor / OPTIMIZER_BLOCKSIZE_VEC))
+        # OPTIMIZER_BLOCKSIZE_VEC = 64
+        BLOCK_SIZE = 256
+        GRID_SIZE = int(device_properties.multi_processor_count * (device_properties.max_threads_per_multi_processor / BLOCK_SIZE))
         # import pdb; pdb.set_trace()
         with torch.cuda.nvtx.range("calculate seqlen_per_block", color="purple"):
             # the larger hidden_dim is, the smaller seqlen_per_block becomes
@@ -87,7 +88,8 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 offsets_list,
                 seqlen_per_block,
                 max_seqlen,
-                max_block_size,
+                BLOCK_SIZE,
+                GRID_SIZE,
                 workload_offset,
                 merged_values,
                 merged_offsets,
@@ -98,7 +100,8 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # save non-tensor variables
         ctx.seqlen_per_block = seqlen_per_block
         ctx.max_seqlen = max_seqlen
-        ctx.max_block_size = max_block_size
+        ctx.BLOCK_SIZE = BLOCK_SIZE
+        ctx.GRID_SIZE = GRID_SIZE
         ctx.input_shapes = [v.shape for v in values_list]
         return merged_values, merged_lengths
 
@@ -114,21 +117,24 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # get saved non-tensor variables
         seqlen_per_block = ctx.seqlen_per_block
         max_seqlen = ctx.max_seqlen
-        max_block_size = ctx.max_block_size
+        BLOCK_SIZE = ctx.BLOCK_SIZE
+        GRID_SIZE = ctx.GRID_SIZE
         
         grad_inputs = [torch.empty(shape, dtype=grad_output.dtype, device=grad_output.device) for shape in ctx.input_shapes]
 
-        hstu_cuda_ops.concat_2D_jagged_tensors_backward(
-            grad_output,
-            grad_lengths,
-            seqlen_per_block,
-            max_seqlen,
-            max_block_size,
-            workload_offset,
-            grad_inputs,
-            offsets_list,
-            merged_offsets,
-        )
+        with torch.cuda.nvtx.range("CUDA Backward", color="red"):
+            hstu_cuda_ops.concat_2D_jagged_tensors_backward(
+                grad_output,
+                grad_lengths,
+                seqlen_per_block,
+                max_seqlen,
+                BLOCK_SIZE,
+                GRID_SIZE,
+                workload_offset,
+                grad_inputs,
+                offsets_list,
+                merged_offsets,
+            )
         return (None, None, None, *grad_inputs)
 
 

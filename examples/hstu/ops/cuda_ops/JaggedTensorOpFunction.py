@@ -10,7 +10,6 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
     def forward(
         ctx,
         offsets_list: List[torch.Tensor],
-        max_seqlens: List[int],
         max_seqlen: int,
         *values_list,
     ):
@@ -47,15 +46,10 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
             ).requires_grad_(True)
         batch_size = offsets_list[0].size(0) - 1
 
-        device = values_list[0].device
-        # max_grid_size = torch.cuda.get_device_properties(device).multi_processor_count
         device_properties = torch.cuda.get_device_properties(0)
-        #todo:python side max_grid_size not work now, cuda side use cudaDeviceProp to get max_grid_size
-        # max_grid_size = 
-        # OPTIMIZER_BLOCKSIZE_VEC = 64
         BLOCK_SIZE = 256
         GRID_SIZE = int(device_properties.multi_processor_count * (device_properties.max_threads_per_multi_processor / BLOCK_SIZE))
-        # import pdb; pdb.set_trace()
+
         with torch.cuda.nvtx.range("calculate seqlen_per_block", color="purple"):
             # the larger hidden_dim is, the smaller seqlen_per_block becomes
             seqlen_per_block = (
@@ -117,7 +111,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # handle special case: when there's only one tensor, return gradient directly
         if len(ctx.saved_tensors) == 0:
             # len(offsets_list) == 1, return gradient directly
-            return None, None, None, grad_output
+            return None, None, grad_output
 
         # get saved tensor variables
         merged_offsets, workload_offset, *offsets_list = ctx.saved_tensors
@@ -143,7 +137,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 offsets_list,
                 merged_offsets,
             )
-        return (None, None, None, *grad_inputs)
+        return (None, None, *grad_inputs)
 
 
 def switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
@@ -160,7 +154,6 @@ def jagged_2D_tensor_concat(
     values_list: List[torch.Tensor],
     offsets_list: List[torch.Tensor],
     max_seqlens: List[int],
-    max_seqlen: int,
 ):
     assert len(values_list) == len(offsets_list)
     assert all(values_list[0].dtype == v.dtype for v in values_list)
@@ -170,11 +163,12 @@ def jagged_2D_tensor_concat(
 
     values_list = [switch_to_contiguous_if_needed(v) for v in values_list]
 
+    max_seqlen = max(max_seqlens)
     # Handle case where values_list length > 128 by batching
     batch_size = 128
     if len(values_list) <= batch_size:
         return _JaggedTensorOpFunction.apply(
-            offsets_list, max_seqlens, max_seqlen, *values_list
+            offsets_list, max_seqlen, *values_list
         )
 
     result_values, result_lengths = None, None
@@ -187,7 +181,7 @@ def jagged_2D_tensor_concat(
         batch_max_seqlen = max(batch_max_seqlens)
 
         batch_result = _JaggedTensorOpFunction.apply(
-            batch_offsets, batch_max_seqlens, batch_max_seqlen, *batch_values
+            batch_offsets, batch_max_seqlen, *batch_values
         )
 
         if result_values is None:
@@ -204,7 +198,6 @@ def jagged_2D_tensor_concat(
             # Merge two results
             result_values, result_lengths = _JaggedTensorOpFunction.apply(
                 [prev_offsets, curr_offsets],
-                [prev_max_seqlen, curr_max_seqlen],
                 max(prev_max_seqlen, curr_max_seqlen),
                 result_values,
                 batch_result[0],

@@ -109,7 +109,6 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
             [jt1.values(), jt2.values()],
             [jt1.offsets(), jt2.offsets()],
             [max_len_jt1, max_len_jt2],
-            max(max_len_jt1, max_len_jt2),
         )
 
     assert torch.equal(result, result2[0])
@@ -167,7 +166,6 @@ def test_forward_backward_verification(num, batch_size, max_len, hidden_dim, dty
             [jt_list[0].values(), jt_list[1].values()],
             [jt_list[0].offsets(), jt_list[1].offsets()],
             [max_len_jt1, max_len_jt2],
-            max_seqlen1,
         )
         result2 = triton_concat_2D_jagged(
             calculated_max_seq_len,
@@ -193,7 +191,6 @@ def test_forward_backward_verification(num, batch_size, max_len, hidden_dim, dty
         [jt.values() for jt in jt_list],
         [jt.offsets() for jt in jt_list],
         max_seqlens,
-        max_seqlen1,
     )
     result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
     assert torch.equal(result[0], result2[0])
@@ -276,7 +273,6 @@ def test_cudaop_vs_pytorch_benchmark(
                 [jt.values() for jt in jt_list],
                 [jt.offsets() for jt in jt_list],
                 max_seqlens,
-                max_seqlen1,
             )
             result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
         else:
@@ -284,7 +280,6 @@ def test_cudaop_vs_pytorch_benchmark(
                 [jt.values() for jt in jt_list2],
                 [jt.offsets() for jt in jt_list2],
                 max_seqlens2,
-                max_seqlen2,
             )
             result2 = concat_2D_jagged_tensors_pytorch(jt_list2, max_seqlens2)
         assert torch.equal(result[0], result2[0])
@@ -306,7 +301,6 @@ def test_cudaop_vs_pytorch_benchmark(
                 [jt.values() for jt in current_jt_list],
                 [jt.offsets() for jt in current_jt_list],
                 current_max_seqlens,
-                current_max_seqlen,
             )
     end.record()
     torch.cuda.synchronize()
@@ -355,7 +349,6 @@ def test_cudaop_vs_pytorch_benchmark(
         [jt.values() for jt in jt_list],
         [jt.offsets() for jt in jt_list],
         max_seqlens,
-        max_seqlen1,
     )
     grad_for_merged_values = torch.randn_like(result_cudaop[0])
     assert result_cudaop[0].requires_grad, "merged_values should require grad"
@@ -462,7 +455,7 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
     from JaggedTensorOpFunction import jagged_2D_tensor_concat
 
     result = jagged_2D_tensor_concat(
-        [jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [3, 4], 4
+        [jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [3, 4]
     )
     print(result)
 
@@ -531,8 +524,7 @@ def test_cudaop_vs_tritonop_benchmark(
         result = jagged_2D_tensor_concat(
             [current_jt_list[0].values(), current_jt_list[1].values()],
             [current_jt_list[0].offsets(), current_jt_list[1].offsets()],
-            [current_max_len_1, current_max_len_2],
-            current_max_seqlen,
+            [current_max_len_1, current_max_len_2]
         )
         result2 = triton_concat_2D_jagged(
             current_calculated_max_seq_len,
@@ -568,7 +560,7 @@ def test_cudaop_vs_tritonop_benchmark(
             c = torch.mm(a, b)
 
     start.record()
-    for _ in range(1):
+    for _ in range(100):
         current_jt_list = jt_list1 if _ % 2 == 0 else jt_list2
         current_max_len_1 = max_len_jt1_1 if _ % 2 == 0 else max_len_jt1_2
         current_max_len_2 = max_len_jt2_1 if _ % 2 == 0 else max_len_jt2_2
@@ -579,7 +571,6 @@ def test_cudaop_vs_tritonop_benchmark(
                 [current_jt_list[0].values(), current_jt_list[1].values()],
                 [current_jt_list[0].offsets(), current_jt_list[1].offsets()],
                 [current_max_len_1, current_max_len_2],
-                current_max_seqlen,
             )
     end.record()
     torch.cuda.synchronize()
@@ -618,12 +609,11 @@ def test_cudaop_vs_tritonop_benchmark(
         [jt_list1[0].values(), jt_list1[1].values()],
         [jt_list1[0].offsets(), jt_list1[1].offsets()],
         [max_len_jt1_1, max_len_jt2_1],
-        max_seqlen1,
     )
     grad_for_backward = torch.randn_like(cuda_result_for_backward[0])
 
     start.record()
-    for _ in range(1):
+    for _ in range(100):
         input_tensors = [jt_list1[0].values(), jt_list1[1].values()]
         with torch.cuda.nvtx.range("CUDA Backward", color="red"):
             grads = torch.autograd.grad(

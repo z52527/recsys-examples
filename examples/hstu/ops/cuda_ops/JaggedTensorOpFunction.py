@@ -194,18 +194,7 @@ def jagged_2D_tensor_concat(
             prev_offsets = length_to_complete_offsets(result_lengths)
             curr_offsets = length_to_complete_offsets(batch_result[1])
 
-            # prev_max_seqlen = torch.max(result_lengths).item()
-            # curr_max_seqlen = torch.max(batch_result[1]).item()
-            # import pdb; pdb.set_trace()
-            # Merge two results
-            # result_values, result_lengths = _JaggedTensorOpFunction.apply(
-            #     [prev_offsets, curr_offsets],
-            #     max(prev_max_seqlen, curr_max_seqlen),
-            #     result_values,
-            #     batch_result[0],
-            # )
             max_seqlen = prev_max_seqlen + sum(batch_max_seqlens)
-            # import pdb; pdb.set_trace()
             # Merge two results
             result_values, result_lengths = _JaggedTensorOpFunction.apply(
                 [prev_offsets, curr_offsets],

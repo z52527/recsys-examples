@@ -75,6 +75,11 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 dtype=torch.int32,
                 device=values_list[0].device,
             )
+            #warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
+            target_warps = min(32, max(1, seqlen_per_block)); 
+            threads = min(BLOCK_SIZE, target_warps * 32);
+            blocks = min(GRID_SIZE, total_blocks)
+
         with torch.cuda.nvtx.range("calculate blocks workload", color="purple"):
             hstu_cuda_ops.compute_block_workloads(
                 offsets_list, seqlen_per_block, max_seqlen, block_workloads
@@ -88,8 +93,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 offsets_list,
                 seqlen_per_block,
                 max_seqlen,
-                BLOCK_SIZE,
-                GRID_SIZE,
+                total_blocks,
+                blocks,
+                threads,
                 workload_offset,
                 merged_values,
                 merged_offsets,
@@ -100,8 +106,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # save non-tensor variables
         ctx.seqlen_per_block = seqlen_per_block
         ctx.max_seqlen = max_seqlen
-        ctx.BLOCK_SIZE = BLOCK_SIZE
-        ctx.GRID_SIZE = GRID_SIZE
+        ctx.blocks = blocks
+        ctx.threads = threads
+        ctx.total_blocks = total_blocks
         ctx.input_shapes = [v.shape for v in values_list]
         return merged_values, merged_lengths
 
@@ -117,9 +124,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # get saved non-tensor variables
         seqlen_per_block = ctx.seqlen_per_block
         max_seqlen = ctx.max_seqlen
-        BLOCK_SIZE = ctx.BLOCK_SIZE
-        GRID_SIZE = ctx.GRID_SIZE
-        
+        blocks = ctx.blocks
+        threads = ctx.threads
+        total_blocks = ctx.total_blocks
         grad_inputs = [torch.empty(shape, dtype=grad_output.dtype, device=grad_output.device) for shape in ctx.input_shapes]
 
         with torch.cuda.nvtx.range("CUDA Backward", color="red"):
@@ -128,8 +135,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 grad_lengths,
                 seqlen_per_block,
                 max_seqlen,
-                BLOCK_SIZE,
-                GRID_SIZE,
+                total_blocks,
+                blocks,
+                threads,
                 workload_offset,
                 grad_inputs,
                 offsets_list,

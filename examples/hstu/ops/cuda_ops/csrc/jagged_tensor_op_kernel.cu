@@ -8,7 +8,6 @@
 #include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/Dispatch.h>
-#include "../include/utils.h"
 
 constexpr int kMaxNumTensors = 128;
 template <typename T>
@@ -192,8 +191,9 @@ void concat_2D_jagged_tensors_cuda_forward (
     const std::vector<torch::Tensor>& offsets_list,
     int seqlen_per_block,
     int max_seqlen,
-    int block_size,
-    int grid_size,
+    int total_blocks,
+    int blocks,
+    int threads,
     torch::Tensor workload_offset,
     torch::Tensor merged_values,
     torch::Tensor merged_offsets){
@@ -223,19 +223,8 @@ void concat_2D_jagged_tensors_cuda_forward (
                 input_jagged_tensor_typed.value_list[i] = values_list[i].data_ptr<scalar_t>();
                 input_jagged_tensor_typed.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
             }
-            int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
-            int total_blocks = batch_size * blocks_per_batch * num_tensors;
 
-            // warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
-            int target_warps = min(32, max(1, seqlen_per_block)); 
-            int threads = min(block_size, target_warps * 32);
-            //todo:python side max_grid_size not work now, use cudaDeviceProp to get max_grid_size
-            // cudaDeviceProp prop;
-            // cudaGetDeviceProperties(&prop, 0);
-            // int max_grid_size = prop.maxGridSize[0];
-
-            dim3 opt_blocks(min(grid_size, total_blocks));
-            // dim3 opt_blocks(total_blocks);
+            dim3 opt_blocks(blocks);
             dim3 opt_threads(threads);
             
             //int elements_per_thread = (hidden_dim + 32 - 1) / 32;
@@ -386,8 +375,9 @@ void concat_2D_jagged_tensors_cuda_backward(
     torch::Tensor grad_lengths,  
     int seqlen_per_block,
     int max_seqlen,
-    int block_size,
-    int grid_size,
+    int total_blocks,
+    int blocks,
+    int threads,
     torch::Tensor workload_offset,
     const std::vector<torch::Tensor>& grad_inputs,
     const std::vector<torch::Tensor>& offsets_list,
@@ -410,17 +400,8 @@ void concat_2D_jagged_tensors_cuda_backward(
                 grad_jagged_tensor.value_list[i] = grad_inputs[i].data_ptr<scalar_t>();
                 grad_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
             }
-            int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
-            int total_blocks = batch_size * blocks_per_batch * num_tensors;
             
-            // warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
-            int target_warps = min(32, max(1, seqlen_per_block)); 
-            int threads = min(block_size, target_warps * 32);
-            //todo:python side max_grid_size not work now, use cudaDeviceProp to get max_grid_size
-            // cudaDeviceProp prop;
-            // cudaGetDeviceProperties(&prop, 0);
-            // int max_grid_size = prop.maxGridSize[0];
-            dim3 opt_blocks(min(grid_size, total_blocks));
+            dim3 opt_blocks(blocks);
             dim3 opt_threads(threads);
             if(hidden_dim % 4 == 0){
                 concat_2D_jagged_tensors_backward_kernel_warp<scalar_t><<<opt_blocks, opt_threads, 0, stream>>>(

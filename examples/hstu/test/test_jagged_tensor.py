@@ -2,7 +2,7 @@ from typing import List, Tuple
 
 import pytest
 import torch
-from JaggedTensorOpFunction import jagged_2D_tensor_concat
+from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 from torchrec.sparse.jagged_tensor import JaggedTensor
 
 
@@ -148,13 +148,16 @@ def test_triton_jagged_tensor_concat(batch_size, max_len, hidden_dim):
         # (32, 8192, 128)
     ],
 )
-def test_forward_backward_verification(num, batch_size, max_len, hidden_dim, dtype=torch.half):
+def test_forward_backward_verification(
+    num, batch_size, max_len, hidden_dim, dtype=torch.half
+):
     jt_list = [
-        create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype) for _ in range(num)
+        create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype)
+        for _ in range(num)
     ]
     max_seqlens = [max(jt.lengths()) for jt in jt_list]
-    max_seqlen1 = max(max_seqlens)
-    from JaggedTensorOpFunction import jagged_2D_tensor_concat
+    max(max_seqlens)
+    from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 
     if num == 2:
         from ops.triton_ops.triton_jagged import triton_concat_2D_jagged
@@ -250,10 +253,12 @@ def test_cudaop_vs_pytorch_benchmark(
     torch.cuda.manual_seed(0)
     torch.cuda.manual_seed_all(0)
     import numpy as np
+
     np.random.seed(0)
     import random
+
     random.seed(0)
-    
+
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
         jt_list = [
             create_test_jagged_tensor(batch_size, max_len, hidden_dim)
@@ -268,7 +273,7 @@ def test_cudaop_vs_pytorch_benchmark(
         max_seqlens2 = [max(jt.lengths()) for jt in jt_list2]
     max_seqlen1 = max(max_seqlens)
     max_seqlen2 = max(max_seqlens2)
-    from JaggedTensorOpFunction import jagged_2D_tensor_concat
+    from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 
     for _ in range(20):
         if _ % 2 == 0:
@@ -455,7 +460,7 @@ def test_cudaop_vs_pytorch_benchmark(
 def test_different_type(batch_size, max_len, hidden_dim, dtype):
     jt1 = create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=dtype)
     jt2 = create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=dtype)
-    from JaggedTensorOpFunction import jagged_2D_tensor_concat
+    from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 
     result = jagged_2D_tensor_concat(
         [jt1.values(), jt2.values()], [jt1.offsets(), jt2.offsets()], [3, 4]
@@ -475,7 +480,7 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
 def test_cudaop_vs_tritonop_benchmark(
     batch_size, max_len, hidden_dim, dtype=torch.float32
 ):
-    from JaggedTensorOpFunction import jagged_2D_tensor_concat
+    from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
     from ops.triton_ops.triton_jagged import triton_concat_2D_jagged
 
     # Set random seeds for reproducibility
@@ -483,8 +488,10 @@ def test_cudaop_vs_tritonop_benchmark(
     torch.cuda.manual_seed(0)
     torch.cuda.manual_seed_all(0)
     import numpy as np
+
     np.random.seed(0)
     import random
+
     random.seed(0)
 
     with torch.cuda.nvtx.range("Test Setup", color="blue"):
@@ -508,12 +515,12 @@ def test_cudaop_vs_tritonop_benchmark(
         max_seqlen1 = max(max_len_jt1_1, max_len_jt2_1)
         max_seqlen2 = max(max_len_jt1_2, max_len_jt2_2)
 
-        #GEMM setup
+        # GEMM setup
         size = 8192
-        a = torch.randn(size, size, device='cuda', dtype=torch.float32)
-        b = torch.randn(size, size, device='cuda', dtype=torch.float32)
+        a = torch.randn(size, size, device="cuda", dtype=torch.float32)
+        b = torch.randn(size, size, device="cuda", dtype=torch.float32)
     # Warmup
-    #todo: backward and gemm need warmup
+    # todo: backward and gemm need warmup
     print("Warming up...")
     for _ in range(10):
         current_jt_list = jt_list1 if _ % 2 == 0 else jt_list2
@@ -527,7 +534,7 @@ def test_cudaop_vs_tritonop_benchmark(
         result = jagged_2D_tensor_concat(
             [current_jt_list[0].values(), current_jt_list[1].values()],
             [current_jt_list[0].offsets(), current_jt_list[1].offsets()],
-            [current_max_len_1, current_max_len_2]
+            [current_max_len_1, current_max_len_2],
         )
         result2 = triton_concat_2D_jagged(
             current_calculated_max_seq_len,
@@ -539,19 +546,16 @@ def test_cudaop_vs_tritonop_benchmark(
         grad_for_merged_values = torch.randn_like(result[0])
         with torch.cuda.nvtx.range("cudawarmup", color="purple"):
             result[0].backward(gradient=grad_for_merged_values)
-        grad_for_jt1 = current_jt_list[0].values().grad
-        grad_for_jt2 = current_jt_list[1].values().grad
+        current_jt_list[0].values().grad
+        current_jt_list[1].values().grad
         current_jt_list[0].values().grad = None
         current_jt_list[1].values().grad = None
         with torch.cuda.nvtx.range("triton warmup", color="purple"):
             result2.backward(gradient=grad_for_merged_values)
-        #GEMM warmup
+        # GEMM warmup
         with torch.cuda.nvtx.range("GEMM warmup", color="purple"):
             for _ in range(10):
-                c = torch.mm(a, b)
-
-
-
+                torch.mm(a, b)
 
     torch.cuda.synchronize()
 
@@ -560,7 +564,7 @@ def test_cudaop_vs_tritonop_benchmark(
 
     with torch.cuda.nvtx.range("GEMM", color="purple"):
         for _ in range(10):
-            c = torch.mm(a, b)
+            torch.mm(a, b)
 
     start.record()
     for _ in range(100):
@@ -579,10 +583,10 @@ def test_cudaop_vs_tritonop_benchmark(
     torch.cuda.synchronize()
     cuda_forward_time = start.elapsed_time(end) / 100
 
-    #Before benchmark add workload GEMM
+    # Before benchmark add workload GEMM
     with torch.cuda.nvtx.range("GEMM", color="purple"):
         for _ in range(10):
-            c = torch.mm(a, b)
+            torch.mm(a, b)
 
     # Triton Forward Benchmark
     start.record()
@@ -606,7 +610,7 @@ def test_cudaop_vs_tritonop_benchmark(
 
     with torch.cuda.nvtx.range("GEMM", color="purple"):
         for _ in range(10):
-            c = torch.mm(a, b)
+            torch.mm(a, b)
     # CUDA Backward Benchmark
     cuda_result_for_backward = jagged_2D_tensor_concat(
         [jt_list1[0].values(), jt_list1[1].values()],
@@ -633,7 +637,7 @@ def test_cudaop_vs_tritonop_benchmark(
 
     with torch.cuda.nvtx.range("GEMM", color="purple"):
         for _ in range(10):
-            c = torch.mm(a, b)
+            torch.mm(a, b)
     # Triton Backward Benchmark
     triton_result_for_backward = triton_concat_2D_jagged(
         calculated_max_seq_len1,
@@ -715,119 +719,128 @@ def test_cudaop_vs_tritonop_benchmark(
     else:
         print(f"Triton is {1/backward_speedup:.2f}x faster than CUDA for backward pass")
 
+
 def test_debug_with_specific_input():
     """独立调试函数，使用指定的输入数据"""
     print("=== Debug Test with Specific Input ===")
-    
+
     # 重置可能的全局状态
     torch.set_default_dtype(torch.float32)
-    
+
     # 检查并禁用自动混合精度
-    if hasattr(torch.backends.cudnn, 'allow_tf32'):
+    if hasattr(torch.backends.cudnn, "allow_tf32"):
         torch.backends.cudnn.allow_tf32 = False
-    if hasattr(torch.backends.cuda, 'matmul'):
+    if hasattr(torch.backends.cuda, "matmul"):
         torch.backends.cuda.matmul.allow_tf32 = False
-    
+
     print(f"Current default dtype: {torch.get_default_dtype()}")
-    
+
     # 手动构造第一个 JaggedTensor，明确指定dtype
-    values1 = torch.tensor([
-        [-0.8500, -0.0200,  0.1900],
-        [-0.1700, -0.7700, -0.9000],
-        [ 0.7900, -0.7900,  0.4000],
-        [-0.7900, -0.4500,  0.7000],
-        [ 1.0000, -0.7000, -0.5000],
-        [ 0.5000,  0.5300, -1.0000],
-        [ 0.3000,  0.6200, -0.7900],
-        [ 0.3300, -0.0100, -0.9900],
-        [ 0.8000,  0.3100,  0.5300],
-        [ 0.9900, -0.3700, -0.7600],
-        [-0.1600, -0.1900, -0.8800],
-        [-0.2700,  0.6100,  0.5400],
-        [ 0.3400, -0.4400,  0.3500],
-        [ 0.9900,  0.0600, -0.8200]
-    ], device='cuda:0', dtype=torch.float32, requires_grad=True)
-    
-    lengths1 = torch.tensor([4, 5, 5], device='cuda:0')
-    offsets1 = torch.tensor([0, 4, 9, 14], device='cuda:0', dtype=torch.int64)
-    
+    values1 = torch.tensor(
+        [
+            [-0.8500, -0.0200, 0.1900],
+            [-0.1700, -0.7700, -0.9000],
+            [0.7900, -0.7900, 0.4000],
+            [-0.7900, -0.4500, 0.7000],
+            [1.0000, -0.7000, -0.5000],
+            [0.5000, 0.5300, -1.0000],
+            [0.3000, 0.6200, -0.7900],
+            [0.3300, -0.0100, -0.9900],
+            [0.8000, 0.3100, 0.5300],
+            [0.9900, -0.3700, -0.7600],
+            [-0.1600, -0.1900, -0.8800],
+            [-0.2700, 0.6100, 0.5400],
+            [0.3400, -0.4400, 0.3500],
+            [0.9900, 0.0600, -0.8200],
+        ],
+        device="cuda:0",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    lengths1 = torch.tensor([4, 5, 5], device="cuda:0")
+    offsets1 = torch.tensor([0, 4, 9, 14], device="cuda:0", dtype=torch.int64)
+
     # 手动构造第二个 JaggedTensor，明确指定dtype
-    values2 = torch.tensor([
-        [-0.6300, -0.4500, -0.7200],
-        [-0.3100, -0.0700,  0.2500],
-        [ 0.5900, -0.9200, -0.5300],
-        [ 0.2800,  0.0700, -0.8400],
-        [-0.2600, -0.4800, -0.8200],
-        [-0.3800,  0.3500,  0.4300],
-        [ 0.7200,  0.7800, -0.2300],
-        [-0.5400, -0.3300,  0.2100],
-        [-0.8100,  0.0200,  0.8600]
-    ], device='cuda:0', dtype=torch.float32, requires_grad=True)
-    
-    lengths2 = torch.tensor([5, 2, 2], device='cuda:0')
-    offsets2 = torch.tensor([0, 5, 7, 9], device='cuda:0', dtype=torch.int64)
-    
+    values2 = torch.tensor(
+        [
+            [-0.6300, -0.4500, -0.7200],
+            [-0.3100, -0.0700, 0.2500],
+            [0.5900, -0.9200, -0.5300],
+            [0.2800, 0.0700, -0.8400],
+            [-0.2600, -0.4800, -0.8200],
+            [-0.3800, 0.3500, 0.4300],
+            [0.7200, 0.7800, -0.2300],
+            [-0.5400, -0.3300, 0.2100],
+            [-0.8100, 0.0200, 0.8600],
+        ],
+        device="cuda:0",
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    lengths2 = torch.tensor([5, 2, 2], device="cuda:0")
+    offsets2 = torch.tensor([0, 5, 7, 9], device="cuda:0", dtype=torch.int64)
+
     # 创建 JaggedTensor 对象
     jt1 = JaggedTensor(values=values1, lengths=lengths1, offsets=offsets1)
     jt2 = JaggedTensor(values=values2, lengths=lengths2, offsets=offsets2)
     jt_list = [jt1, jt2]
-    
+
     # 计算最大序列长度
     max_seqlens = [torch.max(jt.lengths()).item() for jt in jt_list]
     print(f"Max sequence lengths: {max_seqlens}")
-    
+
     # 验证数据类型
     print(f"values1 dtype: {values1.dtype}")
     print(f"values2 dtype: {values2.dtype}")
     print(f"jt1.values() dtype: {jt1.values().dtype}")
     print(f"jt2.values() dtype: {jt2.values().dtype}")
-    
+
     # 打印输入数据
     print("\n--- Input Data ---")
     print_jagged_tensor(jt_list)
-    
+
     # 导入测试函数
-    from JaggedTensorOpFunction import jagged_2D_tensor_concat
-    
+    from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
+
     # 测试自定义实现
     print("--- Testing Custom Implementation ---")
     # 最后验证传入CUDA内核的数据类型
     input_values = [jt.values() for jt in jt_list]
     print(f"Input values dtypes: {[v.dtype for v in input_values]}")
     print(f"Input values devices: {[v.device for v in input_values]}")
-    
+
     with torch.cuda.nvtx.range("Custom Implementation", color="purple"):
         result_custom = jagged_2D_tensor_concat(
-            input_values, 
-            [jt.offsets() for jt in jt_list], 
-            max_seqlens
+            input_values, [jt.offsets() for jt in jt_list], max_seqlens
         )
-    
+
     # 测试PyTorch参考实现
     print("--- Testing PyTorch Reference Implementation ---")
     with torch.cuda.nvtx.range("PyTorch Implementation", color="green"):
         result_pytorch = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-    
+
     # 打印结果
     print("\n--- Results ---")
     print("Custom result values:")
     print(result_custom[0])
     print("Custom result lengths:")
     print(result_custom[1])
-    
+
     print("\nPyTorch result values:")
     print(result_pytorch[0])
     print("PyTorch result lengths:")
     print(result_pytorch[1])
-    
+
     # 验证结果是否一致
     print("\n--- Verification ---")
     values_equal = torch.allclose(result_custom[0], result_pytorch[0], atol=1e-6)
     lengths_equal = torch.equal(result_custom[1], result_pytorch[1])
-    
+
     print(f"Values equal: {values_equal}")
     print(f"Lengths equal: {lengths_equal}")
-    
+
     if values_equal and lengths_equal:
         print("✅ Test PASSED: Results match!")
     else:
@@ -835,5 +848,5 @@ def test_debug_with_specific_input():
         if not values_equal:
             print("Values difference:")
             print(result_custom[0] - result_pytorch[0])
-    
+
     return result_custom, result_pytorch

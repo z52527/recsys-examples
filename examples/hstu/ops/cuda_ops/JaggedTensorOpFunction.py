@@ -48,7 +48,10 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
 
         device_properties = torch.cuda.get_device_properties(0)
         BLOCK_SIZE = 256
-        GRID_SIZE = int(device_properties.multi_processor_count * (device_properties.max_threads_per_multi_processor / BLOCK_SIZE))
+        GRID_SIZE = int(
+            device_properties.multi_processor_count
+            * (device_properties.max_threads_per_multi_processor / BLOCK_SIZE)
+        )
 
         with torch.cuda.nvtx.range("calculate seqlen_per_block", color="purple"):
             # the larger hidden_dim is, the smaller seqlen_per_block becomes
@@ -69,9 +72,9 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 dtype=torch.int64,
                 device=values_list[0].device,
             )
-            #warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
-            target_warps = min(32, max(1, seqlen_per_block)); 
-            threads = min(BLOCK_SIZE, target_warps * 32);
+            # warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence
+            target_warps = min(32, max(1, seqlen_per_block))
+            threads = min(BLOCK_SIZE, target_warps * 32)
             blocks = min(GRID_SIZE, total_blocks)
 
         with torch.cuda.nvtx.range("calculate blocks workload", color="purple"):
@@ -121,7 +124,10 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         blocks = ctx.blocks
         threads = ctx.threads
         total_blocks = ctx.total_blocks
-        grad_inputs = [torch.empty(shape, dtype=grad_output.dtype, device=grad_output.device) for shape in ctx.input_shapes]
+        grad_inputs = [
+            torch.empty(shape, dtype=grad_output.dtype, device=grad_output.device)
+            for shape in ctx.input_shapes
+        ]
 
         with torch.cuda.nvtx.range("CUDA Backward", color="red"):
             hstu_cuda_ops.concat_2D_jagged_tensors_backward(
@@ -167,9 +173,7 @@ def jagged_2D_tensor_concat(
     # Handle case where values_list length > 128 by batching
     batch_size = 128
     if len(values_list) <= batch_size:
-        return _JaggedTensorOpFunction.apply(
-            offsets_list, max_seqlen, *values_list
-        )
+        return _JaggedTensorOpFunction.apply(offsets_list, max_seqlen, *values_list)
 
     result_values, result_lengths = None, None
 
@@ -178,7 +182,7 @@ def jagged_2D_tensor_concat(
         batch_values = values_list[i:end_idx]
         batch_offsets = offsets_list[i:end_idx]
         batch_max_seqlens = max_seqlens[i:end_idx]
-        
+
         batch_max_seqlen = max(batch_max_seqlens)
 
         batch_result = _JaggedTensorOpFunction.apply(
@@ -203,6 +207,5 @@ def jagged_2D_tensor_concat(
                 batch_result[0],
             )
             prev_max_seqlen = max_seqlen
-        
 
     return result_values, result_lengths

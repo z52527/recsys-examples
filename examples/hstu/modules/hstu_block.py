@@ -122,17 +122,16 @@ class HSTUBlock(MegatronModule):
                 all_max_seqlens,
             )
             #保留，返回使用
-            sequence_embeddings_lengths_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
-                sequence_embeddings_lengths_after_concat
-            )
             contextual_max_seqlen = max(
                 len(batch.contextual_feature_names), sum(contextual_max_seqlens)
             )
-            # need contextual_seqlen and offset as return value
-            
             #这两行是否会浪费空间？
             contextual_seqlen = sequence_embeddings_lengths_after_concat - sequence_embeddings_lengths
             sequence_embeddings_lengths = sequence_embeddings_lengths_after_concat
+
+            sequence_embeddings_lengths_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
+                sequence_embeddings_lengths
+            )
 
             contextual_seqlen_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
                 contextual_seqlen

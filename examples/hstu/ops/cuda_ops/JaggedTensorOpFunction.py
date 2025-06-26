@@ -66,7 +66,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
             total_blocks = batch_size * blocks_per_batch * num_tensors
             block_workloads = torch.empty(
                 total_blocks,
-                dtype=torch.int32,
+                dtype=torch.int64,
                 device=values_list[0].device,
             )
             #warp configuration: ensure not exceeding 1024 threads, each warp processes 1 sequence

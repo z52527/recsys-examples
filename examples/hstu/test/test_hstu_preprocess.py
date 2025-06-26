@@ -95,6 +95,7 @@ def test_hstu_preprocess(
     embedding_dict = embeddings.to_dict()
     item_embedding = embedding_dict[item_feature_name].values()
     item_embedding_offests_cpu = embedding_dict[item_feature_name].offsets().cpu()
+    # print(f"offsets dtype: {item_embedding_offests_cpu.dtype}")
     if action_feature_name is not None:
         action_embedding = embedding_dict[action_feature_name].values()
 
@@ -110,7 +111,7 @@ def test_hstu_preprocess(
             )
             cur_start, cur_end = (
                 contextual_embedding_offsets_cpu[sample_id],
-                contextual_embedding_offsets_cpu[sample_id + 1],
+                contextual_embedding_offsets_cpu[sample_id + 1], #todo offsets 算错了？index超了
             )
 
             for i in range(cur_start, cur_end):

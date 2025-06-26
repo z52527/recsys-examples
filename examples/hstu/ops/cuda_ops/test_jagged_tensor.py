@@ -50,10 +50,10 @@ def create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=torch.float
     offsets = (
         torch.cat([torch.tensor([0]).cuda(), torch.cumsum(lengths, dim=0)])
         .cuda()
-        .to(torch.int32)
+        .to(torch.int64)
     )
 
-    offsets[1:] = torch.cumsum(lengths, dim=0, dtype=torch.int32)
+    offsets[1:] = torch.cumsum(lengths, dim=0, dtype=torch.int64)
     total_len = int(offsets[-1].item())
     values = (
         torch.empty(
@@ -749,7 +749,7 @@ def test_debug_with_specific_input():
     ], device='cuda:0', dtype=torch.float32, requires_grad=True)
     
     lengths1 = torch.tensor([4, 5, 5], device='cuda:0')
-    offsets1 = torch.tensor([0, 4, 9, 14], device='cuda:0', dtype=torch.int32)
+    offsets1 = torch.tensor([0, 4, 9, 14], device='cuda:0', dtype=torch.int64)
     
     # 手动构造第二个 JaggedTensor，明确指定dtype
     values2 = torch.tensor([
@@ -765,7 +765,7 @@ def test_debug_with_specific_input():
     ], device='cuda:0', dtype=torch.float32, requires_grad=True)
     
     lengths2 = torch.tensor([5, 2, 2], device='cuda:0')
-    offsets2 = torch.tensor([0, 5, 7, 9], device='cuda:0', dtype=torch.int32)
+    offsets2 = torch.tensor([0, 5, 7, 9], device='cuda:0', dtype=torch.int64)
     
     # 创建 JaggedTensor 对象
     jt1 = JaggedTensor(values=values1, lengths=lengths1, offsets=offsets1)

@@ -13,7 +13,7 @@ constexpr int kMaxNumTensors = 128;
 template <typename T>
 struct InputJaggedTensor {
 	T* value_list[kMaxNumTensors];
-	int32_t* offsets_list[kMaxNumTensors];
+	int64_t* offsets_list[kMaxNumTensors];
 };
 
 // float4 vectorized copy function
@@ -42,9 +42,9 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kern
     int32_t max_seqlen,
     int32_t total_blocks,
     int32_t seqlen_per_block,
-    int* workload_offset,
+    int64_t* workload_offset,
     T* merged_values,
-    int* merged_offsets
+    int64_t* merged_offsets
     ) {
     // each block processes workload_offset[i+1]-workload_offset[i] sequences
     for(int block_id = blockIdx.x; block_id < total_blocks; block_id += gridDim.x){
@@ -56,7 +56,7 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_forward_kern
         int idx = block_id % num_bucket_per_batch; // which bucket
         int warp_id = threadIdx.x / 32;
         int lane_id = threadIdx.x % 32;
-        const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
+        const int64_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
         const T* values = input_jagged_tensor.value_list[tensor_id];
         int seq_start = offsets[batch_id];
         
@@ -109,7 +109,7 @@ void concat_2D_jagged_tensors_cuda_forward (
             for (int i = 0; i < num_tensors; ++i) {
                 TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
                 input_jagged_tensor_typed.value_list[i] = values_list[i].data_ptr<scalar_t>();
-                input_jagged_tensor_typed.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
+                input_jagged_tensor_typed.offsets_list[i] = offsets_list[i].data_ptr<int64_t>();
             }
 
             dim3 opt_blocks(blocks);
@@ -133,9 +133,9 @@ void concat_2D_jagged_tensors_cuda_forward (
                 kernel_func_ptr = reinterpret_cast<void*>(&concat_2D_jagged_tensors_forward_kernel<scalar_t, copy<scalar_t>, 1>);
             }
             
-            auto workload_ptr = workload_offset.data_ptr<int>();
+            auto workload_ptr = workload_offset.data_ptr<int64_t>();
             auto merged_values_ptr = merged_values.data_ptr<scalar_t>();
-            auto merged_offsets_ptr = merged_offsets.data_ptr<int>();
+            auto merged_offsets_ptr = merged_offsets.data_ptr<int64_t>();
             
             void* args[] = {
                 &input_jagged_tensor_typed,
@@ -167,9 +167,9 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_ker
     const int32_t max_seqlen,
     const int32_t total_blocks,
     const int32_t seqlen_per_block,
-    int* workload_offset,
+    int64_t* workload_offset,
     T* grad_output,
-    int* merged_offsets) {
+    int64_t* merged_offsets) {
     // each block processes workload_offset[i+1]-workload_offset[i] sequences
     for(int block_id = blockIdx.x; block_id < total_blocks; block_id += gridDim.x){
         if(workload_offset[block_id] == workload_offset[block_id + 1]) continue;
@@ -180,7 +180,7 @@ __launch_bounds__(1024, 2) __global__ void concat_2D_jagged_tensors_backward_ker
         int idx = block_id % num_bucket_per_batch; // which bucket
         int warp_id = threadIdx.x / 32;
         int lane_id = threadIdx.x % 32;
-        const int32_t* offsets = grad_jagged_tensor.offsets_list[tensor_id];
+        const int64_t* offsets = grad_jagged_tensor.offsets_list[tensor_id];
         T* values = grad_jagged_tensor.value_list[tensor_id];
         int seq_start = offsets[batch_id];
         
@@ -226,7 +226,7 @@ void concat_2D_jagged_tensors_cuda_backward(
             for (int i = 0; i < num_tensors; ++i) {
                 TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
                 grad_jagged_tensor.value_list[i] = grad_inputs[i].data_ptr<scalar_t>();
-                grad_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
+                grad_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int64_t>();
             }
             
             dim3 opt_blocks(blocks);
@@ -250,9 +250,9 @@ void concat_2D_jagged_tensors_cuda_backward(
                 kernel_func_ptr = reinterpret_cast<void*>(&concat_2D_jagged_tensors_backward_kernel<scalar_t, copy<scalar_t>, 1>);
             }
             
-            auto workload_ptr = workload_offset.data_ptr<int>();
+            auto workload_ptr = workload_offset.data_ptr<int64_t>();
             auto grad_output_ptr = grad_output.data_ptr<scalar_t>();
-            auto merged_offsets_ptr = merged_offsets.data_ptr<int>();
+            auto merged_offsets_ptr = merged_offsets.data_ptr<int64_t>();
             
             void* args[] = {
                 &grad_jagged_tensor,
@@ -275,13 +275,13 @@ void concat_2D_jagged_tensors_cuda_backward(
 }
 
 __global__ void compute_block_workloads_cuda_kernel(
-    const InputJaggedTensor<int32_t> input_jagged_tensor,
+    const InputJaggedTensor<int64_t> input_jagged_tensor,
     const int32_t num_tensors,
     const int32_t batch_size,
     const int32_t seqlen_per_block,
     const int32_t max_seqlen,
     const int32_t total_blocks,
-    int* block_workloads) {
+    int64_t* block_workloads) {
     
     int work_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (work_id >= total_blocks) return;
@@ -291,7 +291,7 @@ __global__ void compute_block_workloads_cuda_kernel(
     int tensor_id = (work_id / num_bucket_per_batch) % num_tensors;
     int batch_id = work_id / num_bucket_per_batch / num_tensors; 
     int idx = work_id % num_bucket_per_batch; // which bucket
-    const int32_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
+    const int64_t* offsets = input_jagged_tensor.offsets_list[tensor_id];
     int seq_start = offsets[batch_id];
     int seq_end = offsets[batch_id + 1];
     int len = seq_end - seq_start;
@@ -324,10 +324,10 @@ void compute_block_workloads_cuda(
     int blocks_per_batch = (max_seqlen + seqlen_per_block - 1) / seqlen_per_block;
     int total_blocks = batch_size * blocks_per_batch * num_tensors;
 
-    InputJaggedTensor<int32_t> offsets_jagged_tensor;
+    InputJaggedTensor<int64_t> offsets_jagged_tensor;
     for (int i = 0; i < num_tensors; ++i) {
         TORCH_CHECK(i < kMaxNumTensors, "Number of tensors exceeds kMaxNumTensors");
-        offsets_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int32_t>();
+        offsets_jagged_tensor.offsets_list[i] = offsets_list[i].data_ptr<int64_t>();
     }
     int threads_per_block = min(1024, total_blocks);
     int num_blocks = (total_blocks + threads_per_block - 1) / threads_per_block;
@@ -341,7 +341,7 @@ void compute_block_workloads_cuda(
         seqlen_per_block,
         max_seqlen,
         total_blocks,
-        block_workloads.data_ptr<int>()
+        block_workloads.data_ptr<int64_t>()
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return;

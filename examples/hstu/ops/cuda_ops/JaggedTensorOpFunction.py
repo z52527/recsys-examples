@@ -23,8 +23,7 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         assert all(
             dim == dim_list[0] for dim in dim_list
         ), "All tensors must have the same value dimension"
-        # if isinstance(max_seqlen, torch.Tensor):
-        #     max_seqlen = int(max_seqlen.item())
+
         with torch.cuda.nvtx.range("Calculate merged offsets", color="purple"):
             merged_offsets = torch.sum(
                 torch.stack(offsets_list), dim=0, dtype=offsets_list[0].dtype
@@ -182,13 +181,12 @@ def jagged_2D_tensor_concat(
         batch_values = values_list[i:end_idx]
         batch_offsets = offsets_list[i:end_idx]
         batch_max_seqlens = max_seqlens[i:end_idx]
-
         batch_max_seqlen = max(batch_max_seqlens)
 
         batch_result = _JaggedTensorOpFunction.apply(
             batch_offsets, batch_max_seqlen, *batch_values
         )
-        print(f"batch_result: {batch_result[0]}")
+
         if result_values is None:
             # First batch
             result_values, result_lengths = batch_result

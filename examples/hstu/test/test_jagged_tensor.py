@@ -196,9 +196,6 @@ def test_forward_backward_verification(
         max_seqlens,
     )
     result2 = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-    # print(f"cudaop result: {result[0]}")
-    # print(f"pytorch result: {result2[0]}")
-    # print(f"values:{jt_list[0].values()}")
     assert torch.equal(result[0], result2[0])
     assert torch.equal(result[1], result2[1])
     # Verify backward propagation correctness
@@ -471,6 +468,7 @@ def test_different_type(batch_size, max_len, hidden_dim, dtype):
 @pytest.mark.parametrize(
     "batch_size,max_len,hidden_dim",
     [
+        (1, 8, 1),
         (32, 1024, 128),
         (32, 2048, 128),
         (32, 4096, 128),
@@ -718,135 +716,3 @@ def test_cudaop_vs_tritonop_benchmark(
         print(f"CUDA is {backward_speedup:.2f}x faster than Triton for backward pass")
     else:
         print(f"Triton is {1/backward_speedup:.2f}x faster than CUDA for backward pass")
-
-
-def test_debug_with_specific_input():
-    """独立调试函数，使用指定的输入数据"""
-    print("=== Debug Test with Specific Input ===")
-
-    # 重置可能的全局状态
-    torch.set_default_dtype(torch.float32)
-
-    # 检查并禁用自动混合精度
-    if hasattr(torch.backends.cudnn, "allow_tf32"):
-        torch.backends.cudnn.allow_tf32 = False
-    if hasattr(torch.backends.cuda, "matmul"):
-        torch.backends.cuda.matmul.allow_tf32 = False
-
-    print(f"Current default dtype: {torch.get_default_dtype()}")
-
-    # 手动构造第一个 JaggedTensor，明确指定dtype
-    values1 = torch.tensor(
-        [
-            [-0.8500, -0.0200, 0.1900],
-            [-0.1700, -0.7700, -0.9000],
-            [0.7900, -0.7900, 0.4000],
-            [-0.7900, -0.4500, 0.7000],
-            [1.0000, -0.7000, -0.5000],
-            [0.5000, 0.5300, -1.0000],
-            [0.3000, 0.6200, -0.7900],
-            [0.3300, -0.0100, -0.9900],
-            [0.8000, 0.3100, 0.5300],
-            [0.9900, -0.3700, -0.7600],
-            [-0.1600, -0.1900, -0.8800],
-            [-0.2700, 0.6100, 0.5400],
-            [0.3400, -0.4400, 0.3500],
-            [0.9900, 0.0600, -0.8200],
-        ],
-        device="cuda:0",
-        dtype=torch.float32,
-        requires_grad=True,
-    )
-
-    lengths1 = torch.tensor([4, 5, 5], device="cuda:0")
-    offsets1 = torch.tensor([0, 4, 9, 14], device="cuda:0", dtype=torch.int64)
-
-    # 手动构造第二个 JaggedTensor，明确指定dtype
-    values2 = torch.tensor(
-        [
-            [-0.6300, -0.4500, -0.7200],
-            [-0.3100, -0.0700, 0.2500],
-            [0.5900, -0.9200, -0.5300],
-            [0.2800, 0.0700, -0.8400],
-            [-0.2600, -0.4800, -0.8200],
-            [-0.3800, 0.3500, 0.4300],
-            [0.7200, 0.7800, -0.2300],
-            [-0.5400, -0.3300, 0.2100],
-            [-0.8100, 0.0200, 0.8600],
-        ],
-        device="cuda:0",
-        dtype=torch.float32,
-        requires_grad=True,
-    )
-
-    lengths2 = torch.tensor([5, 2, 2], device="cuda:0")
-    offsets2 = torch.tensor([0, 5, 7, 9], device="cuda:0", dtype=torch.int64)
-
-    # 创建 JaggedTensor 对象
-    jt1 = JaggedTensor(values=values1, lengths=lengths1, offsets=offsets1)
-    jt2 = JaggedTensor(values=values2, lengths=lengths2, offsets=offsets2)
-    jt_list = [jt1, jt2]
-
-    # 计算最大序列长度
-    max_seqlens = [torch.max(jt.lengths()).item() for jt in jt_list]
-    print(f"Max sequence lengths: {max_seqlens}")
-
-    # 验证数据类型
-    print(f"values1 dtype: {values1.dtype}")
-    print(f"values2 dtype: {values2.dtype}")
-    print(f"jt1.values() dtype: {jt1.values().dtype}")
-    print(f"jt2.values() dtype: {jt2.values().dtype}")
-
-    # 打印输入数据
-    print("\n--- Input Data ---")
-    print_jagged_tensor(jt_list)
-
-    # 导入测试函数
-    from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
-
-    # 测试自定义实现
-    print("--- Testing Custom Implementation ---")
-    # 最后验证传入CUDA内核的数据类型
-    input_values = [jt.values() for jt in jt_list]
-    print(f"Input values dtypes: {[v.dtype for v in input_values]}")
-    print(f"Input values devices: {[v.device for v in input_values]}")
-
-    with torch.cuda.nvtx.range("Custom Implementation", color="purple"):
-        result_custom = jagged_2D_tensor_concat(
-            input_values, [jt.offsets() for jt in jt_list], max_seqlens
-        )
-
-    # 测试PyTorch参考实现
-    print("--- Testing PyTorch Reference Implementation ---")
-    with torch.cuda.nvtx.range("PyTorch Implementation", color="green"):
-        result_pytorch = concat_2D_jagged_tensors_pytorch(jt_list, max_seqlens)
-
-    # 打印结果
-    print("\n--- Results ---")
-    print("Custom result values:")
-    print(result_custom[0])
-    print("Custom result lengths:")
-    print(result_custom[1])
-
-    print("\nPyTorch result values:")
-    print(result_pytorch[0])
-    print("PyTorch result lengths:")
-    print(result_pytorch[1])
-
-    # 验证结果是否一致
-    print("\n--- Verification ---")
-    values_equal = torch.allclose(result_custom[0], result_pytorch[0], atol=1e-6)
-    lengths_equal = torch.equal(result_custom[1], result_pytorch[1])
-
-    print(f"Values equal: {values_equal}")
-    print(f"Lengths equal: {lengths_equal}")
-
-    if values_equal and lengths_equal:
-        print("✅ Test PASSED: Results match!")
-    else:
-        print("❌ Test FAILED: Results don't match!")
-        if not values_equal:
-            print("Values difference:")
-            print(result_custom[0] - result_pytorch[0])
-
-    return result_custom, result_pytorch

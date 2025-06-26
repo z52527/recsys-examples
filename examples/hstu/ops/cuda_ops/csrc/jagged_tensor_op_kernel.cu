@@ -29,7 +29,6 @@ __device__ __forceinline__ void copy_float2(T* dst, const T* src) {
 
 template<typename T>
 __device__ __forceinline__ void copy(T* dst, const T* src) {
-    // *reinterpret_cast<T*>(dst) = *reinterpret_cast<const T*>(src);
     *dst = *src;
 }
 

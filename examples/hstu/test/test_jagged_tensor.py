@@ -1,9 +1,20 @@
+import os
 from typing import List, Tuple
 
 import pytest
 import torch
+import torch.distributed as dist
 from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 from torchrec.sparse.jagged_tensor import JaggedTensor
+
+
+
+backend = "nccl"
+dist.init_process_group(backend=backend)
+local_rank = dist.get_rank()  # for one node
+world_size = dist.get_world_size()
+torch.cuda.set_device(local_rank)
+device = torch.device(f"cuda:{local_rank}")
 
 
 # Reference pytorch implementation
@@ -44,12 +55,16 @@ def concat_2D_jagged_tensors_pytorch(
 
 # Create test jagged tensor
 def create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=torch.float32):
+    # Clear GPU memory before creating large tensors
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+    
     lengths = torch.randint(
-        1, max_len + 1, size=(batch_size,), device=torch.device("cuda")
+        1, max_len + 1, size=(batch_size,), device=device
     )
     offsets = (
-        torch.cat([torch.tensor([0]).cuda(), torch.cumsum(lengths, dim=0)])
-        .cuda()
+        torch.cat([torch.tensor([0], device=device), torch.cumsum(lengths, dim=0)])
+        .to(device)
         .to(torch.int64)
     )
 
@@ -59,7 +74,7 @@ def create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype=torch.float
         torch.empty(
             (total_len, hidden_dim),
             dtype=dtype,
-            device=torch.device("cuda"),
+            device=device,
         )
         .uniform_(-1.0, 1.0)
         .requires_grad_(True)

@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/Dispatch.h>
 #include <cuda_bf16.h>
@@ -97,6 +98,10 @@ void concat_2D_jagged_tensors_cuda_forward (
 
 
     assert(merged_values.is_contiguous());
+
+    int device_id;
+    cudaGetDevice(&device_id);
+    c10::cuda::CUDAGuard guard(device_id);
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -216,6 +221,10 @@ void concat_2D_jagged_tensors_cuda_backward(
 
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
+    int device_id;
+    cudaGetDevice(&device_id);
+    c10::cuda::CUDAGuard guard(device_id);
+    
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::kHalf, at::kBFloat16,
         grad_output.scalar_type(), 

@@ -244,4 +244,80 @@ void get_new_length_and_offsets(uint64_t *d_unique_offsets,
   DEMB_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <typename EmbType, typename ScoreType>
+__global__ void mask_embeddings_by_frequency_kernel(
+    EmbType* embeddings_ptr, const ScoreType* scores_ptr,
+    int num_embeddings, int embedding_dim,
+    ScoreType frequency_threshold, int mask_dims) {
+  
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int warp_id = idx / 32;  
+  int lane_id = idx % 32; 
+  
+  if (warp_id >= num_embeddings) return;
+  
+  ScoreType score = scores_ptr[warp_id];
+
+  if (score < frequency_threshold) {
+    int start_dim = embedding_dim - mask_dims;
+    if (start_dim < 0) start_dim = 0;
+    
+    EmbType* embedding_base = embeddings_ptr + warp_id * embedding_dim;
+    
+    for (int dim = start_dim + lane_id; dim < embedding_dim; dim += 32) {
+      embedding_base[dim] = static_cast<EmbType>(0.0);
+    }
+  }
+}
+//   int block_size = 256;
+//   int grid_size = (num_embeddings + block_size - 1) / block_size;
+// template <typename EmbType, typename ScoreType>
+// __global__ void mask_embeddings_by_frequency_kernel(
+//     EmbType* embeddings_ptr, const ScoreType* scores_ptr,
+//     int num_embeddings, int embedding_dim,
+//     ScoreType frequency_threshold, int mask_dims) {
+  
+//   int emb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+//   if (emb_idx >= num_embeddings) return;
+  
+//   // Get the score for this embedding
+//   ScoreType score = scores_ptr[emb_idx];
+  
+//   // If score is below threshold, mask the last mask_dims dimensions
+//   if (score < frequency_threshold) {
+//     int start_dim = embedding_dim - mask_dims;
+//     for (int dim = start_dim; dim < embedding_dim; dim++) {
+//       if (dim >= 0) {  // Safety check
+//         embeddings_ptr[emb_idx * embedding_dim + dim] = static_cast<EmbType>(0.0);
+//       }
+//     }
+//   }
+// }
+
+void mask_embeddings_by_frequency(void *embeddings_ptr, void *scores_ptr,
+                                  int num_embeddings, int embedding_dim,
+                                  int frequency_threshold, int mask_dims,
+                                  DataType emb_type, DataType score_type,
+                                  int device_num_sms, cudaStream_t stream) {
+  if (frequency_threshold <= 0 || mask_dims <= 0) {
+    return;  // No masking needed
+  }
+
+  int num_warps_needed = num_embeddings; // each warp processes one embedding
+  int block_size = 256;  // 8 warps per block
+  int grid_size = (num_warps_needed + 7) / 8;  // 8 warps per block
+
+  DISPATCH_FLOAT_DATATYPE_FUNCTION(emb_type, emb_t, [&] {
+    DISPATCH_INTEGER_DATATYPE_FUNCTION(score_type, score_t, [&] {
+      mask_embeddings_by_frequency_kernel<emb_t, score_t>
+          <<<grid_size, block_size, 0, stream>>>(
+              reinterpret_cast<emb_t*>(embeddings_ptr),
+              reinterpret_cast<const score_t*>(scores_ptr),
+              num_embeddings, embedding_dim,
+              static_cast<score_t>(frequency_threshold), mask_dims);
+    });
+  });
+  DEMB_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 } // namespace dyn_emb

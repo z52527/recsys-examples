@@ -16,12 +16,14 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         # Early validation to prevent edge cases
         if len(offsets_list) == 0 or len(values_list) == 0:
             raise ValueError("offsets_list and values_list cannot be empty")
-        
+
         # Check batch_size
         batch_size = offsets_list[0].size(0) - 1
         if batch_size <= 0:
-            raise ValueError(f"Invalid batch_size: {batch_size}. offsets tensor size: {offsets_list[0].size()}")
-        
+            raise ValueError(
+                f"Invalid batch_size: {batch_size}. offsets tensor size: {offsets_list[0].size()}"
+            )
+
         if len(offsets_list) == 1:
             single_offsets = offsets_list[0]
             lengths = single_offsets[1:] - single_offsets[:-1]

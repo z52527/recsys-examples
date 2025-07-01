@@ -612,7 +612,6 @@ if (frequency_threshold > 0 && mask_dims > 0) {
 // }
 
 
-  //todo 在这里call mask函数
   // ========== 第10步：将unique embeddings scatter到最终输出位置 ==========
   // 获取源和目标的数据类型
   auto src_type =
@@ -621,6 +620,70 @@ if (frequency_threshold > 0 && mask_dims > 0) {
       scalartype_to_datatype(convertTypeMetaToScalarType(output_embs.dtype()));
   auto offset_type =
       scalartype_to_datatype(convertTypeMetaToScalarType(reverse_idx.dtype()));
+
+     // ========== DEBUG: 简单测试masking ==========
+   printf("=== MASKING DEBUG INFO ===\n");
+   printf("Frequency threshold: %d, Mask dims: %d\n", frequency_threshold, mask_dims);
+   printf("Total unique embeddings: %ld, Embedding dim: %d\n", total_unique_embs, dim);
+   
+   // 检查两个tensor是否指向同一内存
+   bool same_storage = unique_embeddings_for_scatter.data_ptr() == unique_embs.data_ptr();
+   printf("unique_embeddings_for_scatter and unique_embs point to same memory: %s\n", 
+          same_storage ? "YES" : "NO");
+   
+   if (!same_storage) {
+     printf("Different tensors detected - masking may have been applied!\n");
+   } else {
+     printf("Same tensor - no masking applied\n");
+   }
+     if (frequency_threshold > 0 && mask_dims > 0) {
+       printf("Tensor shape: [%ld, %ld]\n", total_unique_embs, (int64_t)dim);
+       
+       at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
+       at::Tensor h_unique_output_scores = unique_output_scores.cpu();
+       int masked_embeddings = 0;
+       
+               if (h_unique_embeddings_for_scatter.dtype() == at::kFloat) {
+          float* data_ptr = h_unique_embeddings_for_scatter.data_ptr<float>();
+          uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
+          
+          int should_be_masked = 0;
+          int actually_masked = 0;
+          int total_checked = std::min(10L, total_unique_embs);
+          
+          for(int j = 0; j < total_unique_embs; j++) {
+            uint64_t score = score_ptr[j];
+            if(score > frequency_threshold) continue;
+            bool should_mask = (score < frequency_threshold);
+            if (should_mask) should_be_masked++;
+            
+            int zero_count = 0;
+            for (int i = dim - mask_dims; i < dim; i++) {
+              float value = data_ptr[j * dim + i];
+              if (abs(value) < 1e-6) {
+                zero_count++;
+              }
+            }
+            bool is_masked = (zero_count == mask_dims);
+            if (is_masked) actually_masked++;
+            
+            printf("Embedding %d: score=%lu, should_mask=%s, is_masked=%s, last %d values=[", 
+                   j, score, should_mask?"YES":"NO", is_masked?"YES":"NO", mask_dims);
+            for (int i = dim - mask_dims; i < dim; i++) {
+              printf("%.3f ", data_ptr[j * dim + i]);
+            }
+            printf("]\n");
+          }
+          
+          printf("Summary: checked %d embeddings, %d should be masked, %d actually masked\n", 
+                 total_checked, should_be_masked, actually_masked);
+        }
+       
+               // printf("Checked first %d embeddings: %d are properly masked (last %d dims are zero)\n", 
+        //        total_unique_embs, masked_embeddings, mask_dims);
+     }
+   printf("========================\n");
+   // ========== END DEBUG ==========
 
   // 调用scatter_fused kernel将unique_embs根据reverse_idx散列到output_embs中
   // 这一步将去重后的embeddings重新分布到原始的位置，完成最终的lookup操作

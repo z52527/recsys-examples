@@ -13,6 +13,15 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
         max_seqlen: int,
         *values_list,
     ):
+        # Early validation to prevent edge cases
+        if len(offsets_list) == 0 or len(values_list) == 0:
+            raise ValueError("offsets_list and values_list cannot be empty")
+        
+        # Check batch_size
+        batch_size = offsets_list[0].size(0) - 1
+        if batch_size <= 0:
+            raise ValueError(f"Invalid batch_size: {batch_size}. offsets tensor size: {offsets_list[0].size()}")
+        
         if len(offsets_list) == 1:
             single_offsets = offsets_list[0]
             lengths = single_offsets[1:] - single_offsets[:-1]
@@ -43,7 +52,6 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
                 dtype=values_list[0].dtype,
                 device=values_list[0].device,
             ).requires_grad_(True)
-        batch_size = offsets_list[0].size(0) - 1
 
         device_properties = torch.cuda.get_device_properties(0)
         BLOCK_SIZE = 256
@@ -76,26 +84,33 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
             threads = min(BLOCK_SIZE, target_warps * 32)
             blocks = min(GRID_SIZE, total_blocks)
 
-        with torch.cuda.nvtx.range("calculate blocks workload", color="purple"):
-            hstu_cuda_ops.compute_block_workloads(
-                offsets_list, seqlen_per_block, max_seqlen, block_workloads
-            )
-        with torch.cuda.nvtx.range("workload offset cumsum", color="orange"):
+        # Handle max_seqlen == 0 case to prevent division by zero in CUDA kernel
+        if max_seqlen == 0:
+            # All sequences are empty, so workloads should be zero
+            block_workloads.zero_()
             workload_offset = length_to_complete_offsets(block_workloads)
+            # merged_values is already correctly allocated as empty tensor when total_length == 0
+        else:
+            with torch.cuda.nvtx.range("calculate blocks workload", color="purple"):
+                hstu_cuda_ops.compute_block_workloads(
+                    offsets_list, seqlen_per_block, max_seqlen, block_workloads
+                )
+            with torch.cuda.nvtx.range("workload offset cumsum", color="orange"):
+                workload_offset = length_to_complete_offsets(block_workloads)
 
-        with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
-            hstu_cuda_ops.concat_2D_jagged_tensors_forward(
-                values_list,
-                offsets_list,
-                seqlen_per_block,
-                max_seqlen,
-                total_blocks,
-                blocks,
-                threads,
-                workload_offset,
-                merged_values,
-                merged_offsets,
-            )
+            with torch.cuda.nvtx.range("Cpp part forward", color="purple"):
+                hstu_cuda_ops.concat_2D_jagged_tensors_forward(
+                    values_list,
+                    offsets_list,
+                    seqlen_per_block,
+                    max_seqlen,
+                    total_blocks,
+                    blocks,
+                    threads,
+                    workload_offset,
+                    merged_values,
+                    merged_offsets,
+                )
 
         # save tensor variables
         ctx.save_for_backward(merged_offsets, workload_offset, *offsets_list)
@@ -128,20 +143,26 @@ class _JaggedTensorOpFunction(torch.autograd.Function):
             for shape in ctx.input_shapes
         ]
 
-        with torch.cuda.nvtx.range("CUDA Backward", color="red"):
-            hstu_cuda_ops.concat_2D_jagged_tensors_backward(
-                grad_output,
-                grad_lengths,
-                seqlen_per_block,
-                max_seqlen,
-                total_blocks,
-                blocks,
-                threads,
-                workload_offset,
-                grad_inputs,
-                offsets_list,
-                merged_offsets,
-            )
+        # Handle max_seqlen == 0 case - return zero gradients
+        if max_seqlen == 0:
+            # Zero out all gradient inputs since no computation was done
+            for grad_input in grad_inputs:
+                grad_input.zero_()
+        else:
+            with torch.cuda.nvtx.range("CUDA Backward", color="red"):
+                hstu_cuda_ops.concat_2D_jagged_tensors_backward(
+                    grad_output,
+                    grad_lengths,
+                    seqlen_per_block,
+                    max_seqlen,
+                    total_blocks,
+                    blocks,
+                    threads,
+                    workload_offset,
+                    grad_inputs,
+                    offsets_list,
+                    merged_offsets,
+                )
         return (None, None, *grad_inputs)
 
 

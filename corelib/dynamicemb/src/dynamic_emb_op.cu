@@ -637,47 +637,70 @@ if (frequency_threshold > 0 && mask_dims > 0) {
      printf("Same tensor - no masking applied\n");
    }
      if (frequency_threshold > 0 && mask_dims > 0) {
-       printf("Tensor shape: [%ld, %ld]\n", total_unique_embs, (int64_t)dim);
-       
-       at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
-       at::Tensor h_unique_output_scores = unique_output_scores.cpu();
-       int masked_embeddings = 0;
-       
-               if (h_unique_embeddings_for_scatter.dtype() == at::kFloat) {
-          float* data_ptr = h_unique_embeddings_for_scatter.data_ptr<float>();
-          uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
-          
-          int should_be_masked = 0;
-          int actually_masked = 0;
-          int total_checked = std::min(10L, total_unique_embs);
-          
-          for(int j = 0; j < total_unique_embs; j++) {
-            uint64_t score = score_ptr[j];
-            if(score > frequency_threshold) continue;
-            bool should_mask = (score < frequency_threshold);
-            if (should_mask) should_be_masked++;
-            
-            int zero_count = 0;
-            for (int i = dim - mask_dims; i < dim; i++) {
-              float value = data_ptr[j * dim + i];
-              if (abs(value) < 1e-6) {
-                zero_count++;
-              }
-            }
-            bool is_masked = (zero_count == mask_dims);
-            if (is_masked) actually_masked++;
-            
-            printf("Embedding %d: score=%lu, should_mask=%s, is_masked=%s, last %d values=[", 
-                   j, score, should_mask?"YES":"NO", is_masked?"YES":"NO", mask_dims);
-            for (int i = dim - mask_dims; i < dim; i++) {
-              printf("%.3f ", data_ptr[j * dim + i]);
-            }
-            printf("]\n");
+        printf("Tensor shape: [%ld, %ld]\n", total_unique_embs, (int64_t)dim);
+        
+        at::Tensor h_unique_embs = unique_embs.cpu();
+        at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
+        at::Tensor h_unique_output_scores = unique_output_scores.cpu();
+        int masked_embeddings = 0;
+        float* data_ptr = h_unique_embs.data_ptr<float>();
+        uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
+        for(int j = 0; j < total_unique_embs; j++) {
+          uint64_t score = score_ptr[j];
+          if(score > frequency_threshold) continue;
+          for(int i = dim - mask_dims; i < dim; i++) {
+            data_ptr[j * dim + i] = 0.0;
           }
-          
-          printf("Summary: checked %d embeddings, %d should be masked, %d actually masked\n", 
-                 total_checked, should_be_masked, actually_masked);
         }
+        int count = 0;
+        float* data_ptr_for_scatter = h_unique_embeddings_for_scatter.data_ptr<float>();
+        for(int j = 0; j < total_unique_embs; j++) {
+          for(int i = 0; i < dim; i++) {
+            if(data_ptr_for_scatter[j * dim + i] == data_ptr[j * dim + i])
+              count++;
+          }
+        }
+        if(count == total_unique_embs * dim) {
+          printf("Masking is correct\n");
+        } else {
+          printf("Masking is incorrect\n");
+        }
+       //下面测试的逻辑太复杂，先注释掉
+        // if (h_unique_embeddings_for_scatter.dtype() == at::kFloat) {
+        //   float* data_ptr = h_unique_embeddings_for_scatter.data_ptr<float>();
+        //   uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
+          
+        //   int should_be_masked = 0;
+        //   int actually_masked = 0;
+        //   int total_checked = std::min(10L, total_unique_embs);
+          
+        //   for(int j = 0; j < total_unique_embs; j++) {
+        //     uint64_t score = score_ptr[j];
+        //     if(score > frequency_threshold) continue;
+        //     bool should_mask = (score < frequency_threshold);
+        //     if (should_mask) should_be_masked++;
+            
+        //     int zero_count = 0;
+        //     for (int i = dim - mask_dims; i < dim; i++) {
+        //       float value = data_ptr[j * dim + i];
+        //       if (abs(value) < 1e-6) {
+        //         zero_count++;
+        //       }
+        //     }
+        //     bool is_masked = (zero_count == mask_dims);
+        //     if (is_masked) actually_masked++;
+            
+        //     printf("Embedding %d: score=%lu, should_mask=%s, is_masked=%s, last %d values=[", 
+        //            j, score, should_mask?"YES":"NO", is_masked?"YES":"NO", mask_dims);
+        //     for (int i = dim - mask_dims; i < dim; i++) {
+        //       printf("%.3f ", data_ptr[j * dim + i]);
+        //     }
+        //     printf("]\n");
+        //   }
+          
+        //   printf("Summary: checked %d embeddings, %d should be masked, %d actually masked\n", 
+        //          total_checked, should_be_masked, actually_masked);
+        // }
        
                // printf("Checked first %d embeddings: %d are properly masked (last %d dims are zero)\n", 
         //        total_unique_embs, masked_embeddings, mask_dims);

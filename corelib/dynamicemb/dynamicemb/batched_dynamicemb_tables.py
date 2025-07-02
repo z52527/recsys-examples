@@ -294,7 +294,7 @@ class BatchedDynamicEmbeddingTables(nn.Module):
         self.bounds_check_mode_int: int = bounds_check_mode.value
         self._create_score()
         self.frequency_threshold = frequency_threshold
-        self.mask_dims = mask_dims  
+        self.mask_dims = mask_dims
 
         if device is not None:
             self.device_id = int(str(device)[-1])

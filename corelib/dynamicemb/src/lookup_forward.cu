@@ -269,30 +269,6 @@ __global__ void mask_embeddings_by_frequency_kernel(
     }
   }
 }
-//   int block_size = 256;
-//   int grid_size = (num_embeddings + block_size - 1) / block_size;
-// template <typename EmbType, typename ScoreType>
-// __global__ void mask_embeddings_by_frequency_kernel(
-//     EmbType* embeddings_ptr, const ScoreType* scores_ptr,
-//     int num_embeddings, int embedding_dim,
-//     ScoreType frequency_threshold, int mask_dims) {
-  
-//   int emb_idx = blockIdx.x * blockDim.x + threadIdx.x;
-//   if (emb_idx >= num_embeddings) return;
-  
-//   // Get the score for this embedding
-//   ScoreType score = scores_ptr[emb_idx];
-  
-//   // If score is below threshold, mask the last mask_dims dimensions
-//   if (score < frequency_threshold) {
-//     int start_dim = embedding_dim - mask_dims;
-//     for (int dim = start_dim; dim < embedding_dim; dim++) {
-//       if (dim >= 0) {  // Safety check
-//         embeddings_ptr[emb_idx * embedding_dim + dim] = static_cast<EmbType>(0.0);
-//       }
-//     }
-//   }
-// }
 
 void mask_embeddings_by_frequency(void *embeddings_ptr, void *scores_ptr,
                                   int num_embeddings, int embedding_dim,

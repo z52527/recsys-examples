@@ -380,184 +380,140 @@ void export_batch_matched(
     keys.data_ptr(), values.data_ptr(), nullptr, stream);
 }
 
-// DynamicEmb核心前向传播函数：处理embedding lookup的dense模式
-// 这个函数是整个DynamicEmb系统的核心，负责从动态embedding表中查找embedding向量
 void lookup_forward_dense(
-    std::vector<std::shared_ptr<dyn_emb::DynamicVariableBase>> tables,  // 动态embedding表的集合，每个表是一个HKV存储
-    const at::Tensor indices,           // 输入的key indices，形状为[total_indices_num]
-    const at::Tensor offsets,           // 每批次的offset信息，用于分割indices到不同的样本中
-    const py::list scores,              // 每个表的score值，用于动态更新策略
-    const std::vector<int> &table_offsets_in_feature, // 每个表在feature中的offset位置
-    at::Tensor table_offsets,           // 每个表的累积offset，形状为[table_num+1]
-    int table_num,                      // embedding表的数量
-    int batch_size,                     // 批次大小
-    int dim,                            // embedding维度
-    bool use_index_dedup,               // 是否使用索引去重
-    const at::Tensor unique_idx,        // 去重后的唯一索引
-    const at::Tensor reverse_idx,       // 反向索引，用于将unique结果映射回原始位置
-    const at::Tensor h_unique_nums,     // 每个表的unique数量(CPU tensor)
-    const at::Tensor d_unique_nums,     // 每个表的unique数量(GPU tensor)
-    const at::Tensor h_unique_offsets,  // 每个表的unique offset(CPU tensor)
-    const at::Tensor d_unique_offsets,  // 每个表的unique offset(GPU tensor)
-    const at::Tensor unique_embs,       // 存储unique embeddings的tensor
-    const at::Tensor output_embs,       // 最终输出的embeddings
-    int device_num_sms,                 // GPU的SM数量，用于kernel优化
+    std::vector<std::shared_ptr<dyn_emb::DynamicVariableBase>> tables,
+    const at::Tensor indices,
+    const at::Tensor offsets,
+    const py::list scores,
+    const std::vector<int> &table_offsets_in_feature,
+    at::Tensor table_offsets,
+    int table_num,
+    int batch_size,
+    int dim,
+    bool use_index_dedup,
+    const at::Tensor unique_idx,
+    const at::Tensor reverse_idx,
+    const at::Tensor h_unique_nums,
+    const at::Tensor d_unique_nums,
+    const at::Tensor h_unique_offsets,
+    const at::Tensor d_unique_offsets,
+    const at::Tensor unique_embs,
+    const at::Tensor output_embs,
+    int device_num_sms,
     std::shared_ptr<dyn_emb::UniqueOpBase> unique_op,
-    int frequency_threshold = 0, int mask_dims = 0) { // 去重操作的实现
+    int frequency_threshold = 0, int mask_dims = 0) {
 
-  // ========== 第1步：输入验证 ==========
-  // 确保所有tensor都在CUDA设备上
   if (!offsets.is_cuda() || !indices.is_cuda()) {
     throw std::runtime_error(
         "offsets or indices tensor must be on CUDA device");
   }
-
-  // 验证unique相关tensor的数据类型必须是uint64
+  // Check dtype of h_unique_nums and d_unique_nums
   if (h_unique_nums.scalar_type() != at::kUInt64 ||
       d_unique_nums.scalar_type() != at::kUInt64) {
     throw std::runtime_error(
         "h_unique_nums and d_unique_nums must have dtype uint64_t");
   }
 
-  // ========== 第2步：初始化CUDA环境和数据类型 ==========
-  auto stream = at::cuda::getCurrentCUDAStream().stream();  // 获取当前CUDA stream
-  int64_t indices_shape = indices.size(0);                  // 总的indices数量
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  int64_t indices_shape = indices.size(0);
   
-  // 转换PyTorch数据类型到内部DataType枚举
   auto unique_num_type = scalartype_to_datatype(
-      convertTypeMetaToScalarType(d_unique_nums.dtype()));    // unique_nums的数据类型
+      convertTypeMetaToScalarType(d_unique_nums.dtype()));
   auto unique_offset_type = scalartype_to_datatype(
-      convertTypeMetaToScalarType(d_unique_offsets.dtype())); // unique_offsets的数据类型
+      convertTypeMetaToScalarType(d_unique_offsets.dtype()));
 
-  // ========== 第3步：准备offset数据 ==========
-  // 创建CPU版本的offset tensor，用于后续的CPU计算
   at::Tensor h_offset =
       at::empty_like(offsets, offsets.options().device(at::kCPU));
-  // 异步将GPU上的offsets拷贝到CPU
   AT_CUDA_CHECK(cudaMemcpyAsync(h_offset.data_ptr(), offsets.data_ptr(),
                                 offsets.numel() * offsets.element_size(),
                                 cudaMemcpyDeviceToHost, stream));
 
-  // ========== 第4步：检查和调整unique操作的容量 ==========
-  size_t unique_op_capacity = unique_op->get_capacity(); // 获取当前去重操作的容量
-  // 如果输入数据量超过容量的一半，则扩容到2倍indices数量
+  size_t unique_op_capacity = unique_op->get_capacity();
   if (indices_shape * 2 > unique_op_capacity) {
-    // 创建新的keys和values tensor
     at::Tensor new_keys = at::empty({indices_shape * 2}, indices.options());
     at::Tensor new_vals = at::empty(
         {indices_shape * 2},
         at::TensorOptions().dtype(at::kUInt64).device(indices.device()));
-    // 重置unique操作的容量
     unique_op->reset_capacity(new_keys, new_vals, indices_shape * 2, stream);
   }
 
-  // ========== 第5步：为每个表创建临时unique indices tensor ==========
   std::vector<at::Tensor> tmp_unique_indices(table_num);
   for (int i = 0; i < table_num; ++i) {
-    // 为每个表创建与indices相同大小的临时tensor
     tmp_unique_indices[i] = at::empty_like(indices);
   }
 
-  // ========== 第6步：计算每个表的indices范围 ==========
-  // 创建CPU版本的table_offsets，用于计算每个表的数据范围
   at::Tensor h_table_offsets =
       at::empty({table_num + 1}, table_offsets.options().device(at::kCPU));
-  // 同步等待之前的GPU->CPU内存拷贝完成
   AT_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-  h_table_offsets[0] = 0; // 第一个offset总是0
+  h_table_offsets[0] = 0;
 
-  // ========== 第7步：对每个表执行unique操作 ==========
   for (int i = 0; i < table_num; ++i) {
-    // 计算当前表在feature中的范围
-    int table_offset_begin = table_offsets_in_feature[i];     // 表i的起始feature位置
-    int table_offset_end = table_offsets_in_feature[i + 1];   // 表i的结束feature位置
+    int table_offset_begin = table_offsets_in_feature[i];
+    int table_offset_end = table_offsets_in_feature[i + 1];
     
-    // 将feature offset转换为batch offset
-    int offset_begin = table_offset_begin * batch_size;       // 批次起始位置
-    int offset_end = table_offset_end * batch_size;           // 批次结束位置
+    int offset_begin = table_offset_begin * batch_size;
+    int offset_end = table_offset_end * batch_size;
 
-    // 从CPU的offset tensor中获取indices的实际范围
-    int64_t indices_begin = h_offset[offset_begin].item<int64_t>(); // 当前表的indices起始位置
-    int64_t indices_end = h_offset[offset_end].item<int64_t>();     // 当前表的indices结束位置
-    int64_t indices_length = indices_end - indices_begin;           // 当前表的indices数量
-    h_table_offsets[i + 1] = indices_end;                          // 累积offset
+    int64_t indices_begin = h_offset[offset_begin].item<int64_t>();
+    int64_t indices_end = h_offset[offset_end].item<int64_t>();
+    int64_t indices_length = indices_end - indices_begin;
+    h_table_offsets[i + 1] = indices_end;
 
     if (indices_length == 0) {
-      // 如果当前表没有数据，则将对应的unique_nums设置为0
       DEMB_CUDA_CHECK(cudaMemsetAsync(
           reinterpret_cast<uint64_t *>(d_unique_nums.data_ptr()) + i, 0,
           sizeof(uint64_t), stream));
-      // 更新unique_offsets
       dyn_emb::add_offset(d_unique_nums.data_ptr(), d_unique_offsets.data_ptr(),
                           i, unique_num_type, unique_offset_type, stream);
     } else {
-      // 如果有数据，则进行unique操作
-      // 创建当前表的indices子tensor
       at::Tensor tmp_indices = create_sub_tensor(indices, indices_begin);
-      // 创建当前表的reverse_idx子tensor
       at::Tensor tmp_reverse_idx =
           create_sub_tensor(reverse_idx, indices_begin);
-      // 创建当前表的unique_num子tensor
       at::Tensor tmp_d_unique_num = create_sub_tensor(d_unique_nums, i);
-      // 获取之前的unique offset
       at::Tensor previous_d_unique_num = create_sub_tensor(d_unique_offsets, i);
       
-      // 执行unique操作：去除重复的indices
       unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
                         tmp_unique_indices[i], tmp_d_unique_num, stream,
                         previous_d_unique_num);
-      // 更新cumulative offset
       dyn_emb::add_offset(d_unique_nums.data_ptr(), d_unique_offsets.data_ptr(),
                           i, unique_num_type, unique_offset_type, stream);
     }
   }
 
-  // ========== 第8步：同步GPU计算结果到CPU ==========
-  // 将unique数量从GPU拷贝到CPU
   AT_CUDA_CHECK(
       cudaMemcpyAsync(h_unique_nums.data_ptr(), d_unique_nums.data_ptr(),
                       d_unique_nums.numel() * d_unique_nums.element_size(),
                       cudaMemcpyDeviceToHost, stream));
-  // 将unique offsets从GPU拷贝到CPU
   AT_CUDA_CHECK(cudaMemcpyAsync(
       h_unique_offsets.data_ptr(), d_unique_offsets.data_ptr(),
       (d_unique_nums.numel() + 1) * d_unique_nums.element_size(),
       cudaMemcpyDeviceToHost, stream));
-  // 同步等待拷贝完成
   AT_CUDA_CHECK(cudaStreamSynchronize(stream));
-  // 将table_offsets从CPU拷贝到GPU
   AT_CUDA_CHECK(
       cudaMemcpyAsync(table_offsets.data_ptr(), h_table_offsets.data_ptr(),
                       table_offsets.numel() * table_offsets.element_size(),
                       cudaMemcpyHostToDevice, stream));
 
-  // ========== 第9步：从embedding表中查找embedding向量 ==========
-    // Reserve unique_output_scores tensor for all tables if frequency masking is enabled
   at::Tensor unique_output_scores;
   int64_t total_unique_embs = 0;
   for (int i = 0; i < table_num; ++i) {
     total_unique_embs += h_unique_nums[i].item<int64_t>();
   }
-// 按unique embeddings总数分配
   unique_output_scores = at::zeros({total_unique_embs}, 
       at::TensorOptions().dtype(at::kUInt64).device(indices.device()));
 
-
-  int64_t unique_embs_offset = 0; // 在unique_embs tensor中的累积offset
-  int64_t scores_offset = 0;  // 新增：scores的offset
+  int64_t unique_embs_offset = 0;
+  int64_t scores_offset = 0;
 
   for (int i = 0; i < table_num; ++i) {
-    int64_t tmp_unique_num = h_unique_nums[i].item<int64_t>(); // 当前表的unique数量
+    int64_t tmp_unique_num = h_unique_nums[i].item<int64_t>();
     if (tmp_unique_num != 0) {
-      // 创建当前表在unique_embs中的子tensor
       at::Tensor tmp_unique_embs =
           create_sub_tensor(unique_embs, unique_embs_offset * dim);
-    // 创建scores子tensor（新增）
       at::Tensor tmp_unique_scores = create_sub_tensor(unique_output_scores, scores_offset);
     
       if (use_index_dedup) {
-        // 如果使用索引去重，则调用find_and_initialize（仅查找，不插入新key）
         find_and_initialize(tables[i], tmp_unique_num, tmp_unique_indices[i], tmp_unique_embs, tmp_unique_scores);
         
         void *dst_ptr = reinterpret_cast<char *>(unique_idx.data_ptr()) +
@@ -567,11 +523,9 @@ void lookup_forward_dense(
         AT_CUDA_CHECK(cudaMemcpyAsync(dst_ptr, src_ptr, copy_size,
                                       cudaMemcpyDeviceToDevice, stream));
       } else {
-        // 如果不使用索引去重，则调用find_or_insert（查找或插入新key）
-        auto score = std::make_optional<uint64_t>(py::cast<uint64_t>(scores[i])); // 获取当前表的score
+        auto score = std::make_optional<uint64_t>(py::cast<uint64_t>(scores[i]));
         find_or_insert(tables[i], tmp_unique_num, tmp_unique_indices[i],
                       tmp_unique_embs, score);
-        //调用find pointer部分，todo 感觉这样写不太好，但修改目前的存在的find pointer不知道是否存在问题。
         auto stream = at::cuda::getCurrentCUDAStream().stream();
         at::Tensor vals_ptr_tensor = at::empty({static_cast<int64_t>(tmp_unique_num)}, 
           at::TensorOptions().dtype(at::kLong).device(tmp_unique_embs.device()));
@@ -583,8 +537,8 @@ void lookup_forward_dense(
             tmp_unique_scores.data_ptr(), stream);
           }
     }
-    scores_offset += tmp_unique_num;  // 更新scores的offset
-    unique_embs_offset += tmp_unique_num; // 更新累积offset
+    scores_offset += tmp_unique_num;
+    unique_embs_offset += tmp_unique_num;
   }
   
 at::Tensor unique_embeddings_for_scatter;
@@ -601,19 +555,7 @@ if (frequency_threshold > 0 && mask_dims > 0) {
 } else {
   unique_embeddings_for_scatter = unique_embs;
 }
-// template <typename T>
-// __global__ void mask_embeddings_by_frequency(
-//   int batch_size, 
-// int dim, 
-// int mask_dim, 
-// uint64_t* frequencies, 
-// uint64_t frequency_threshold, 
-// T* unique_embeds_for_scatter) {
-// }
 
-
-  // ========== 第10步：将unique embeddings scatter到最终输出位置 ==========
-  // 获取源和目标的数据类型
   auto src_type =
       scalartype_to_datatype(convertTypeMetaToScalarType(unique_embeddings_for_scatter.dtype()));
   auto dst_type =
@@ -621,12 +563,12 @@ if (frequency_threshold > 0 && mask_dims > 0) {
   auto offset_type =
       scalartype_to_datatype(convertTypeMetaToScalarType(reverse_idx.dtype()));
 
-     // ========== DEBUG: 简单测试masking ==========
+// #ifndef NDEBUG
+#ifdef DEBUG
    printf("=== MASKING DEBUG INFO ===\n");
    printf("Frequency threshold: %d, Mask dims: %d\n", frequency_threshold, mask_dims);
    printf("Total unique embeddings: %ld, Embedding dim: %d\n", total_unique_embs, dim);
    
-   // 检查两个tensor是否指向同一内存
    bool same_storage = unique_embeddings_for_scatter.data_ptr() == unique_embs.data_ptr();
    printf("unique_embeddings_for_scatter and unique_embs point to same memory: %s\n", 
           same_storage ? "YES" : "NO");
@@ -665,51 +607,10 @@ if (frequency_threshold > 0 && mask_dims > 0) {
         } else {
           printf("Masking is incorrect\n");
         }
-       //下面测试的逻辑太复杂，先注释掉
-        // if (h_unique_embeddings_for_scatter.dtype() == at::kFloat) {
-        //   float* data_ptr = h_unique_embeddings_for_scatter.data_ptr<float>();
-        //   uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
-          
-        //   int should_be_masked = 0;
-        //   int actually_masked = 0;
-        //   int total_checked = std::min(10L, total_unique_embs);
-          
-        //   for(int j = 0; j < total_unique_embs; j++) {
-        //     uint64_t score = score_ptr[j];
-        //     if(score > frequency_threshold) continue;
-        //     bool should_mask = (score < frequency_threshold);
-        //     if (should_mask) should_be_masked++;
-            
-        //     int zero_count = 0;
-        //     for (int i = dim - mask_dims; i < dim; i++) {
-        //       float value = data_ptr[j * dim + i];
-        //       if (abs(value) < 1e-6) {
-        //         zero_count++;
-        //       }
-        //     }
-        //     bool is_masked = (zero_count == mask_dims);
-        //     if (is_masked) actually_masked++;
-            
-        //     printf("Embedding %d: score=%lu, should_mask=%s, is_masked=%s, last %d values=[", 
-        //            j, score, should_mask?"YES":"NO", is_masked?"YES":"NO", mask_dims);
-        //     for (int i = dim - mask_dims; i < dim; i++) {
-        //       printf("%.3f ", data_ptr[j * dim + i]);
-        //     }
-        //     printf("]\n");
-        //   }
-          
-        //   printf("Summary: checked %d embeddings, %d should be masked, %d actually masked\n", 
-        //          total_checked, should_be_masked, actually_masked);
-        // }
-       
-               // printf("Checked first %d embeddings: %d are properly masked (last %d dims are zero)\n", 
-        //        total_unique_embs, masked_embeddings, mask_dims);
      }
    printf("========================\n");
-   // ========== END DEBUG ==========
+#endif // NDEBUG
 
-  // 调用scatter_fused kernel将unique_embs根据reverse_idx散列到output_embs中
-  // 这一步将去重后的embeddings重新分布到原始的位置，完成最终的lookup操作
   dyn_emb::scatter_fused(unique_embeddings_for_scatter.data_ptr(),    // 源：unique后的embeddings
                          output_embs.data_ptr(),    // 目标：最终输出的embeddings
                          reverse_idx.data_ptr(),    // 索引：如何将unique结果映射回原位置

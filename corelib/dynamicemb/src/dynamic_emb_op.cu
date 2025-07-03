@@ -34,6 +34,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cstdlib>
 #include <cstdint>
+#include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <torch/torch.h>
 #include <cooperative_groups.h>
@@ -562,65 +564,70 @@ if (frequency_threshold > 0 && mask_dims > 0) {
       scalartype_to_datatype(convertTypeMetaToScalarType(output_embs.dtype()));
   auto offset_type =
       scalartype_to_datatype(convertTypeMetaToScalarType(reverse_idx.dtype()));
-
-// #ifndef NDEBUG
 #ifdef DEBUG
-   printf("=== MASKING DEBUG INFO ===\n");
-   printf("Frequency threshold: %d, Mask dims: %d\n", frequency_threshold, mask_dims);
-   printf("Total unique embeddings: %ld, Embedding dim: %d\n", total_unique_embs, dim);
-   
-   bool same_storage = unique_embeddings_for_scatter.data_ptr() == unique_embs.data_ptr();
-   printf("unique_embeddings_for_scatter and unique_embs point to same memory: %s\n", 
-          same_storage ? "YES" : "NO");
-   
-   if (!same_storage) {
-     printf("Different tensors detected - masking may have been applied!\n");
-   } else {
-     printf("Same tensor - no masking applied\n");
-   }
-     if (frequency_threshold > 0 && mask_dims > 0) {
-        printf("Tensor shape: [%ld, %ld]\n", total_unique_embs, (int64_t)dim);
+
+    if (frequency_threshold > 0 && mask_dims > 0) {
+      
+      at::Tensor h_unique_embs = unique_embs.cpu();
+      at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
+      at::Tensor h_unique_output_scores = unique_output_scores.cpu();
+      int masked_embeddings = 0;
+      float* data_ptr = h_unique_embs.data_ptr<float>();
+      uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
+      for(int j = 0; j < total_unique_embs; j++) {
+        uint64_t score = score_ptr[j];
+        if(score >= frequency_threshold) continue;
+        for(int i = dim - mask_dims; i < dim; i++) {
+          data_ptr[j * dim + i] = 0.0;
+        }
+      }
+      int count = 0;
+      float* data_ptr_for_scatter = h_unique_embeddings_for_scatter.data_ptr<float>();
+              bool masking_correct = true;
+        for(int j = 0; j < total_unique_embs; j++) {
+         for(int i = dim - mask_dims; i < dim; i++) {
+           if(data_ptr_for_scatter[j * dim + i] != data_ptr[j * dim + i]) {
+            //  printf("Masking error at embedding %d, dim %d: expected %.6f, got %.6f\n", 
+            //         j, i, data_ptr[j * dim + i], data_ptr_for_scatter[j * dim + i]);
+             masking_correct = false;
+           }
+         }
+        }
         
-        at::Tensor h_unique_embs = unique_embs.cpu();
-        at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
-        at::Tensor h_unique_output_scores = unique_output_scores.cpu();
-        int masked_embeddings = 0;
-        float* data_ptr = h_unique_embs.data_ptr<float>();
-        uint64_t* score_ptr = h_unique_output_scores.data_ptr<uint64_t>();
-        for(int j = 0; j < total_unique_embs; j++) {
-          uint64_t score = score_ptr[j];
-          if(score > frequency_threshold) continue;
-          for(int i = dim - mask_dims; i < dim; i++) {
-            data_ptr[j * dim + i] = 0.0;
+        if (!masking_correct) {
+          std::stringstream error_msg;
+          error_msg << "Frequency masking validation failed:\n"
+                   << "  Frequency threshold: " << frequency_threshold 
+                   << ", Mask dims: " << mask_dims << "\n"
+                   << "  Total unique embeddings: " << total_unique_embs 
+                   << ", Embedding dim: " << dim << "\n";
+          
+          bool same_storage = unique_embeddings_for_scatter.data_ptr() == unique_embs.data_ptr();
+          error_msg << "  Memory layout: " << (same_storage ? "same tensor" : "different tensors") << "\n";
+          
+          if (!same_storage) {
+            error_msg << "  Note: Different tensors detected - masking may have been applied\n";
+          } else {
+            error_msg << "  Note: Same tensor detected - no masking applied\n";
           }
+          
+          std::cerr << error_msg.str() << std::endl;
+          
+          throw std::runtime_error(error_msg.str());
         }
-        int count = 0;
-        float* data_ptr_for_scatter = h_unique_embeddings_for_scatter.data_ptr<float>();
-        for(int j = 0; j < total_unique_embs; j++) {
-          for(int i = 0; i < dim; i++) {
-            if(data_ptr_for_scatter[j * dim + i] == data_ptr[j * dim + i])
-              count++;
-          }
-        }
-        if(count == total_unique_embs * dim) {
-          printf("Masking is correct\n");
-        } else {
-          printf("Masking is incorrect\n");
-        }
-     }
-   printf("========================\n");
+    }
 #endif // NDEBUG
 
-  dyn_emb::scatter_fused(unique_embeddings_for_scatter.data_ptr(),    // 源：unique后的embeddings
-                         output_embs.data_ptr(),    // 目标：最终输出的embeddings
-                         reverse_idx.data_ptr(),    // 索引：如何将unique结果映射回原位置
-                         indices_shape,             // 总的indices数量
-                         dim,                       // embedding维度
-                         src_type,                  // 源数据类型
-                         dst_type,                  // 目标数据类型
-                         offset_type,               // offset数据类型
-                         device_num_sms,            // GPU的SM数量
-                         stream);                   // CUDA stream
+  dyn_emb::scatter_fused(unique_embeddings_for_scatter.data_ptr(),    
+                         output_embs.data_ptr(),    
+                         reverse_idx.data_ptr(),    
+                         indices_shape,             
+                         dim,                       
+                         src_type,                  
+                         dst_type,                  
+                         offset_type,               
+                         device_num_sms,            
+                         stream);                  
 }
 
 void lookup_forward_dense(

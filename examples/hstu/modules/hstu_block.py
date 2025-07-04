@@ -22,9 +22,7 @@ from torchrec.sparse.jagged_tensor import JaggedTensor
 try:
     from ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
     HSTU_CUDA_OPS = True
-    print("HSTU CUDA Ops is enabled")
 except ImportError:
-    print("HSTU CUDA Ops is disabled")
     from ops.jagged_tensor_op import concat_2D_jagged_tensors
     HSTU_CUDA_OPS = False
 

@@ -13,7 +13,11 @@ The project includes:
 
 We provide [dockerfile](./docker/Dockerfile) for users to build environment. 
 ```
-docker build -f docker/Dockerfile -t recsys-examples:latest .
+docker build -f docker/Dockerfile --platform linux/amd64 -t recsys-examples:latest .
+```
+If you want to build image for Grace, you can use 
+```
+docker build -f docker/Dockerfile --platform linux/arm64 -t recsys-examples:latest .
 ```
 You can also set your own base image with args `--build-arg <BASE_IMAGE>`.
 
@@ -33,6 +37,13 @@ If you fail to install the megatron-core package, usually due to the python vers
 ```bash
 git clone -b core_r0.9.0 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
 pip install -e ./megatron-lm
+```
+
+We provide our custom HSTU CUDA operators for enhanced performance. You need to install these operators using the following command:
+
+```bash
+cd /workspace/recsys-examples/examples/hstu && \
+python setup.py install
 ```
 
 # Get Started

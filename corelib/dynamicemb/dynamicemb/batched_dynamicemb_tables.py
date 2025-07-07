@@ -275,6 +275,9 @@ class BatchedDynamicEmbeddingTables(nn.Module):
         # Frequency masking parameters
         frequency_threshold: int = 0,  # Frequency threshold for masking
         mask_dims: int = 0,  # Number of dimensions to mask
+        # TO align with FBGEMM TBE
+        *args,
+        **kwargs,
     ) -> None:
         super().__init__()
         assert len(table_options) >= 1

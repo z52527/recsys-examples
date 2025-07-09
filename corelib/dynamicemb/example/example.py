@@ -50,7 +50,16 @@ from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 backend = "nccl"
 dist.init_process_group(backend=backend)
-local_rank = dist.get_rank()  # for one node
+
+# Fix local_rank calculation for multi-node 
+if "LOCAL_RANK" in os.environ:
+    local_rank = int(os.environ["LOCAL_RANK"])
+elif "SLURM_LOCALID" in os.environ:
+    local_rank = int(os.environ["SLURM_LOCALID"])
+else:
+    # Fallback: calculate from global rank and GPU count
+    local_rank = dist.get_rank() % torch.cuda.device_count()
+
 world_size = dist.get_world_size()
 torch.cuda.set_device(local_rank)
 device = torch.device(f"cuda:{local_rank}")
@@ -580,10 +589,12 @@ def train(args):
     train_dataset = MovieLensDataset(args.data_path, split="train")
     test_dataset = MovieLensDataset(args.data_path, split="test")
     train_sampler = DistributedSampler(
-        train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
+        # train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
+        train_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=True
     )
     test_sampler = DistributedSampler(
-        test_dataset, num_replicas=world_size, rank=local_rank, shuffle=False
+        # test_dataset, num_replicas=world_size, rank=local_rank, shuffle=False
+        test_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=False
     )
 
     train_loader = DataLoader(
@@ -619,6 +630,7 @@ def train(args):
 def dump(args):
     os.makedirs(args.save_dir, exist_ok=True)
     train_dataset = MovieLensDataset(args.data_path, split="train")
+    #todo: confirm the sampler is correct when rank = local_rank
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
     )
@@ -648,7 +660,7 @@ def dump(args):
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             },
-            os.path.join(args.save_dir, f"model_epoch_{epoch+1}_rank{local_rank}.pt"),
+            os.path.join(args.save_dir, f"model_epoch_{epoch+1}_rank{dist.get_rank()}.pt"),
         )
     # rank0 will gether embedding from other ranks, so no need to identify rank info.
     DynamicEmbDump(os.path.join(args.save_dir, "dynamicemb"), model, optim=True)
@@ -657,6 +669,7 @@ def dump(args):
 def load(args):
     os.makedirs(args.save_dir, exist_ok=True)
     test_dataset = MovieLensDataset(args.data_path, split="test")
+    #todo: confirm the sampler is correct when rank = local_rank
     test_sampler = DistributedSampler(
         test_dataset, num_replicas=world_size, rank=local_rank, shuffle=False
     )
@@ -678,7 +691,7 @@ def load(args):
 
     # load
     checkpoint = torch.load(
-        os.path.join(args.save_dir, f"model_epoch_{args.epochs}_rank{local_rank}.pt"),
+        os.path.join(args.save_dir, f"model_epoch_{args.epochs}_rank{dist.get_rank()}.pt"),
         weights_only=True,
     )
     # Must set strict to False, as there is no embedding's weight in model.state_dict()
@@ -691,14 +704,19 @@ def load(args):
     test_one_epoch(model, test_loader, criterion, 0, 1)
 
     dist.barrier(device_ids=[local_rank])
-    if local_rank == 0:
-        shutil.rmtree(args.save_dir)
+    # Only global rank 0 should clean up, not local rank 0 on each node
+    if dist.get_rank() == 0:
+        try:
+            shutil.rmtree(args.save_dir)
+        except Exception as e:
+            print(f"Warning: Failed to remove {args.save_dir}: {e}")
     dist.barrier(device_ids=[local_rank])
 
 
 def inc_dump(args):
     os.makedirs(args.save_dir, exist_ok=True)
     train_dataset = MovieLensDataset(args.data_path, split="train")
+    #todo: confirm the sampler is correct when rank = local_rank
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
     )

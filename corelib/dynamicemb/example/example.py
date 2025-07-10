@@ -32,7 +32,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchrec import DataType
-from torchrec.distributed.comm import get_local_size
+from torchrec.distributed.comm import get_local_rank, get_local_size
 from torchrec.distributed.fbgemm_qcomm_codec import (
     CommType,
     QCommsConfig,
@@ -51,19 +51,22 @@ from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 backend = "nccl"
 dist.init_process_group(backend=backend)
 
-# Fix local_rank calculation for multi-node 
-if "LOCAL_RANK" in os.environ:
-    local_rank = int(os.environ["LOCAL_RANK"])
-elif "SLURM_LOCALID" in os.environ:
-    local_rank = int(os.environ["SLURM_LOCALID"])
-else:
-    # Fallback: calculate from global rank and GPU count
-    local_rank = dist.get_rank() % torch.cuda.device_count()
+# Set LOCAL_WORLD_SIZE if not available for proper topology configuration
+if "LOCAL_WORLD_SIZE" not in os.environ:
+    os.environ["LOCAL_WORLD_SIZE"] = str(torch.cuda.device_count())
 
+# Set LOCAL_RANK if not available (for consistency)
+if "LOCAL_RANK" not in os.environ:
+    os.environ["LOCAL_RANK"] = str(get_local_rank())
+
+# Set RANK if not available
+if "RANK" not in os.environ:
+    os.environ["RANK"] = str(dist.get_rank())
+
+local_rank = get_local_rank()
 world_size = dist.get_world_size()
 torch.cuda.set_device(local_rank)
 device = torch.device(f"cuda:{local_rank}")
-
 # print with rank info
 original_print = builtins.print
 
@@ -76,7 +79,7 @@ builtins.print = rank_print
 
 
 def download_movielens(data_dir="./ml-1m"):
-    if local_rank == 0:
+    if dist.get_rank() == 0:  # Use global rank for multi-node consistency
         os.makedirs(data_dir, exist_ok=True)
         if os.path.exists(os.path.join(data_dir, "ratings.dat")):
             print(f"MovieLens in {data_dir}")
@@ -589,11 +592,9 @@ def train(args):
     train_dataset = MovieLensDataset(args.data_path, split="train")
     test_dataset = MovieLensDataset(args.data_path, split="test")
     train_sampler = DistributedSampler(
-        # train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
         train_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=True
     )
     test_sampler = DistributedSampler(
-        # test_dataset, num_replicas=world_size, rank=local_rank, shuffle=False
         test_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=False
     )
 
@@ -630,9 +631,9 @@ def train(args):
 def dump(args):
     os.makedirs(args.save_dir, exist_ok=True)
     train_dataset = MovieLensDataset(args.data_path, split="train")
-    #todo: confirm the sampler is correct when rank = local_rank
+    # Use global rank for proper data distribution across all processes
     train_sampler = DistributedSampler(
-        train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
+        train_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=True
     )
 
     train_loader = DataLoader(
@@ -669,9 +670,9 @@ def dump(args):
 def load(args):
     os.makedirs(args.save_dir, exist_ok=True)
     test_dataset = MovieLensDataset(args.data_path, split="test")
-    #todo: confirm the sampler is correct when rank = local_rank
+    # Use global rank for proper data distribution across all processes
     test_sampler = DistributedSampler(
-        test_dataset, num_replicas=world_size, rank=local_rank, shuffle=False
+        test_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=False
     )
 
     test_loader = DataLoader(
@@ -716,9 +717,9 @@ def load(args):
 def inc_dump(args):
     os.makedirs(args.save_dir, exist_ok=True)
     train_dataset = MovieLensDataset(args.data_path, split="train")
-    #todo: confirm the sampler is correct when rank = local_rank
+    # Use global rank for proper data distribution across all processes
     train_sampler = DistributedSampler(
-        train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True
+        train_dataset, num_replicas=world_size, rank=dist.get_rank(), shuffle=True
     )
 
     train_loader = DataLoader(
@@ -780,7 +781,7 @@ def main():
     args = parse_args()
     torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
-    if local_rank == 0:
+    if dist.get_rank() == 0:  # Use global rank for multi-node consistency
         download_movielens(args.data_path)
     dist.barrier(device_ids=[local_rank])
     if args.train:

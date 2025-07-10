@@ -661,7 +661,9 @@ def dump(args):
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             },
-            os.path.join(args.save_dir, f"model_epoch_{epoch+1}_rank{dist.get_rank()}.pt"),
+            os.path.join(
+                args.save_dir, f"model_epoch_{epoch+1}_rank{dist.get_rank()}.pt"
+            ),
         )
     # rank0 will gether embedding from other ranks, so no need to identify rank info.
     DynamicEmbDump(os.path.join(args.save_dir, "dynamicemb"), model, optim=True)
@@ -692,7 +694,9 @@ def load(args):
 
     # load
     checkpoint = torch.load(
-        os.path.join(args.save_dir, f"model_epoch_{args.epochs}_rank{dist.get_rank()}.pt"),
+        os.path.join(
+            args.save_dir, f"model_epoch_{args.epochs}_rank{dist.get_rank()}.pt"
+        ),
         weights_only=True,
     )
     # Must set strict to False, as there is no embedding's weight in model.state_dict()

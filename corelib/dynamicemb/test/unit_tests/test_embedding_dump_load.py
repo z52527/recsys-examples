@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-import os
 import random
 import shutil
 import sys
@@ -218,7 +217,7 @@ def run(args):
     dist.init_process_group(backend=backend)
 
     local_rank = get_local_rank()
-    world_size = dist.get_world_size()  
+    world_size = dist.get_world_size()
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
@@ -409,12 +408,12 @@ def run(args):
             shutil.rmtree("debug_weight")
         except Exception as e:
             print(f"Warning: Failed to remove debug_weight: {e}")
-        
+
         try:
             shutil.rmtree("debug_weight_t0")
         except Exception as e:
             print(f"Warning: Failed to remove debug_weight_t0: {e}")
-        
+
         try:
             shutil.rmtree("debug_weight_t1")
         except Exception as e:

@@ -544,7 +544,7 @@ void lookup_forward_dense(
   }
   
 at::Tensor unique_embeddings_for_scatter;
-if (frequency_threshold > 0 && mask_dims > 0) {
+if (tables[0]->evict_strategy() == EvictStrategy::kLfu && frequency_threshold > 0 && mask_dims > 0) {
   unique_embeddings_for_scatter = unique_embs.clone();
   auto score_type = scalartype_to_datatype(convertTypeMetaToScalarType(unique_output_scores.dtype()));
   
@@ -567,7 +567,7 @@ if (frequency_threshold > 0 && mask_dims > 0) {
 #ifdef DEBUG
 
     if (frequency_threshold > 0 && mask_dims > 0) {
-      
+      printf("Masking enabled\n");
       at::Tensor h_unique_embs = unique_embs.cpu();
       at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
       at::Tensor h_unique_output_scores = unique_output_scores.cpu();
@@ -587,9 +587,9 @@ if (frequency_threshold > 0 && mask_dims > 0) {
         for(int j = 0; j < total_unique_embs; j++) {
          for(int i = dim - mask_dims; i < dim; i++) {
            if(data_ptr_for_scatter[j * dim + i] != data_ptr[j * dim + i]) {
-            //  printf("Masking error at embedding %d, dim %d: expected %.6f, got %.6f\n", 
-            //         j, i, data_ptr[j * dim + i], data_ptr_for_scatter[j * dim + i]);
-             masking_correct = false;
+             printf("Masking error at embedding %d, dim %d: expected %.6f, got %.6f\n", 
+                    j, i, data_ptr[j * dim + i], data_ptr_for_scatter[j * dim + i]);
+             masking_correct = false; 
            }
          }
         }
@@ -1122,8 +1122,8 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("d_unique_nums"), py::arg("h_unique_offsets"),
         py::arg("d_unique_offsets"), py::arg("unique_embs"),
         py::arg("output_embs"), py::arg("device_num_sms"),
-        py::arg("unique_op"), py::arg("frequency_threshold") = 0, 
-        py::arg("mask_dims") = 0);
+        py::arg("unique_op"), py::arg("frequency_threshold"), 
+        py::arg("mask_dims"));
 
   m.def("lookup_forward_dense",
         (void (*)(std::vector<std::shared_ptr<dyn_emb::DynamicVariableBase>>,

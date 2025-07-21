@@ -391,7 +391,8 @@ def get_planner(device, eb_configs, batch_size):
                 initializer_args=DynamicEmbInitializerArgs(
                     mode=DynamicEmbInitializerMode.NORMAL
                 ),
-                score_strategy=DynamicEmbScoreStrategy.STEP,
+                # score_strategy=DynamicEmbScoreStrategy.TIMESTAMP,
+                score_strategy=DynamicEmbScoreStrategy.LFU, #if you want set frequency_threshold and mask_dims
             ),
         )
 

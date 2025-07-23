@@ -275,8 +275,8 @@ void mask_embeddings_by_frequency(void *embeddings_ptr, void *scores_ptr,
                                   int frequency_threshold, int mask_dims,
                                   DataType emb_type, DataType score_type,
                                   int device_num_sms, cudaStream_t stream) {
-  if (frequency_threshold <= 0 || mask_dims <= 0) {
-    return;  // No masking needed
+  if (frequency_threshold <= 0 || mask_dims <= 0 || num_embeddings <= 0) {
+    return;  // No masking needed or no embeddings to process
   }
 
   int num_warps_needed = num_embeddings; // each warp processes one embedding

@@ -567,7 +567,7 @@ if (tables[0]->evict_strategy() == EvictStrategy::kLfu && frequency_threshold > 
 #ifdef DEBUG
 
     if (frequency_threshold > 0 && mask_dims > 0) {
-      printf("Masking enabled\n");
+      // printf("Masking enabled\n");
       at::Tensor h_unique_embs = unique_embs.cpu();
       at::Tensor h_unique_embeddings_for_scatter = unique_embeddings_for_scatter.cpu();
       at::Tensor h_unique_output_scores = unique_output_scores.cpu();

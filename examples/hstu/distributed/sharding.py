@@ -20,6 +20,9 @@ import torch
 import torch.distributed as dist
 import torchrec
 from configs.task_config import OptimizerParam
+
+# import our own finalize model grads
+from distributed.finalize_model_grads import finalize_model_grads
 from dynamicemb import DynamicEmbTableOptions
 from dynamicemb.planner import DynamicEmbeddingEnumerator
 from dynamicemb.planner import (
@@ -31,12 +34,9 @@ from dynamicemb.shard import (
     DynamicEmbeddingCollectionSharder,
 )
 from fbgemm_gpu.split_embedding_configs import EmbOptimType, SparseType
-from megatron.core import parallel_state, tensor_parallel
+from megatron.core import tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.distributed import (
-    DistributedDataParallelConfig,
-    finalize_model_grads,
-)
+from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.module import Float16Module
@@ -82,15 +82,27 @@ TORCHREC_TYPES: Set[Type[Union[EmbeddingBagCollection, EmbeddingCollection]]] = 
 }
 
 DATA_PARALLEL_EMBEDDING_MODULE_NAME = "_data_parallel_embedding_collection"
+from megatron.core import parallel_state
 
 
 def apply_megatron_ddp(
-    dmp: DistributedModelParallel,
+    model: Union[DistributedModelParallel, torch.nn.Module],
     config: TransformerConfig,
     dense_optimizer_param: OptimizerParam,
     device: torch.device,
 ):
-    model = dmp._dmp_wrapped_module
+    """
+    Apply megatron DDP to the model.
+    If the original model is a DistributedModelParallel, the model._dmp_wrapped_module will be wrapped by DDP.
+    Otherwise the original model will be wrapped by DDP.
+
+    The original model is returned.
+    """
+    original_model = model
+    if isinstance(model, DistributedModelParallel):
+        model = original_model._dmp_wrapped_module
+    else:
+        model = original_model
     model = model.to(device)
     if config.fp16 or config.bf16:
         model = Float16Module(config, model)
@@ -102,21 +114,31 @@ def apply_megatron_ddp(
         check_for_nan_in_grad=False,
         bucket_size=True,
     )
-    dmp._dmp_wrapped_module = DDP(
-        config,
-        ddp_config,
-        model,
-    )
+    # MCORE DDP does not broadcast parameters implicitly
+    if isinstance(original_model, DistributedModelParallel):
+        original_model._dmp_wrapped_module = DDP(
+            config,
+            ddp_config,
+            model,
+        )
+    else:
+        original_model = DDP(
+            config,
+            ddp_config,
+            model,
+        )
 
+    # only broadcast parameters within DataParallel group, TP group weights are initialized with the same rng states!
     def broadcast_params_for_non_model_parallel_embedding_modules():
-        for p in dmp._dmp_wrapped_module.parameters():
+        data_parallel_group = parallel_state.get_data_parallel_group(
+            with_context_parallel=True
+        )
+        for p in model.parameters():
             if not isinstance(p, TableBatchedEmbeddingSlice):
                 dist.broadcast(
                     p.data,
-                    src=0,
-                    group=parallel_state.get_data_parallel_group(
-                        with_context_parallel=True
-                    ),
+                    src=torch.distributed.get_global_rank(data_parallel_group, 0),
+                    group=data_parallel_group,
                 )
 
     broadcast_params_for_non_model_parallel_embedding_modules()
@@ -137,11 +159,17 @@ def apply_megatron_ddp(
         params_dtype=param_dtype,
         bf16=config.bf16,
         fp16=config.fp16,
+        weight_decay=dense_optimizer_param.weight_decay,
     )
     dense_optimizer = get_megatron_optimizer(
-        dense_optimizer_config, [dmp._dmp_wrapped_module]
+        dense_optimizer_config,
+        [
+            original_model._dmp_wrapped_module
+            if isinstance(original_model, DistributedModelParallel)
+            else original_model
+        ],
     )
-    return dmp, dense_optimizer
+    return original_model, dense_optimizer
 
 
 # refer to https://github.com/pytorch/torchrec/blob/76a0826c6aec07c347f492aed2d4adf25cbdc3d9/torchrec/distributed/embedding_types.py#L75-L91
@@ -362,7 +390,7 @@ def apply_dmp(
         data_parallel_sharding_plans.append(
             plan.plan.pop(data_parallel_embedding_module_name, None)
         )
-    # Shard model
+    # Shard model, the seed is forked to ensure different random state across all ranks
     with tensor_parallel.get_cuda_rng_tracker().fork("sharded-embedding-group-seed"):
         model = DistributedModelParallel(
             module=model,

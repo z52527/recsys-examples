@@ -81,6 +81,7 @@ class PagedHSTUInferLayer(torch.nn.Module):
         for param in self._linear_uvqk.parameters():
             param.requires_grad = False
             param.copy_(torch.empty_like(param).uniform_(-0.5, 0.5))
+        self._linear_uvqk_weight = self._linear_uvqk.weight.T.contiguous()
 
         # input norm
         if config.learnable_input_layernorm:
@@ -257,7 +258,13 @@ class PagedHSTUInferLayer(torch.nn.Module):
             eps=self._eps,
         )
 
-        self.uvqk_buffer_[:num_tokens, ...] = F.silu(self._linear_uvqk(normed_input))
+        torch.addmm(
+            self._linear_uvqk.bias,
+            normed_input,
+            self._linear_uvqk_weight,
+            out=self.uvqk_buffer_[:num_tokens, ...],
+        )
+        F.silu(self.uvqk_buffer_[:num_tokens, ...], inplace=True)
         (user, value, query, key) = torch.split(
             self.uvqk_buffer_[:num_tokens, ...],
             self._split_arg_list,

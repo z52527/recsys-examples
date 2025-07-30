@@ -130,7 +130,7 @@ def benchmark_model(
         hstu_config=hstu_config,
         kvcache_config=kv_cache_config,
         task_config=task_config,
-        use_cudagraph=True,
+        use_cudagraph=use_cudagraph,
         cudagraph_configs=_hstu_cudagraph_configs,
     )
     if dtype == torch.bfloat16:
@@ -335,7 +335,68 @@ def run_single_bench(
 
         print("time(ms)", ts_start.elapsed_time(ts_end) / num_iterations)
     else:
-        pass
+        total_tokens = batch_size * (new_history_length + num_targets)
+        for _, jd_metadata, kvcache_metadata in input_list:
+            kvcache_metadata
+            kvcache_metadata.onload_history_kv_buffer = (
+                model._kvcache_metadata.onload_history_kv_buffer[:]
+            )
+            kvcache_metadata.onload_history_kv_events = (
+                model._kvcache_metadata.onload_history_kv_events[:]
+            )
+            kvcache_metadata.kv_cache_table = model._kvcache_metadata.kv_cache_table[:]
+
+        ts_start, ts_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+            enable_timing=True
+        )
+        torch.cuda.synchronize()
+        for i in range(num_warumps):
+            hidden_states, jd_metadata, kvcache_metadata = input_list[
+                i % num_input_sets
+            ]
+            model._hstu_block.predict(
+                batch_size,
+                total_tokens,
+                hidden_states,
+                jd_metadata,
+                kvcache_metadata,
+            )
+        torch.cuda.synchronize()
+
+        ts_start.record()
+        for i in range(num_iterations):
+            hidden_states, jd_metadata, kvcache_metadata = input_list[
+                i % num_input_sets
+            ]
+            model._hstu_block.predict(
+                batch_size,
+                total_tokens,
+                hidden_states,
+                jd_metadata,
+                kvcache_metadata,
+            )
+        ts_end.record()
+        torch.cuda.synchronize()
+        time1 = ts_start.elapsed_time(ts_end)
+        if time1 < 1000:
+            num_iterations = num_iterations * math.ceil(1000 / time1)
+            torch.cuda.synchronize()
+            ts_start.record()
+            for i in range(num_iterations):
+                hidden_states, jd_metadata, kvcache_metadata = input_list[
+                    i % num_input_sets
+                ]
+                model._hstu_block.predict(
+                    batch_size,
+                    total_tokens,
+                    hidden_states,
+                    jd_metadata,
+                    kvcache_metadata,
+                )
+            ts_end.record()
+            torch.cuda.synchronize()
+
+        print("time(ms)", ts_start.elapsed_time(ts_end) / num_iterations)
 
 
 def run_benchmark():
@@ -412,7 +473,7 @@ def run_benchmark():
                 total_history_length,
                 new_history_length,
                 num_targets,
-                True,
+                kwargs["use_cudagraph"],
             )
             print()
 

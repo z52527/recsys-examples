@@ -210,6 +210,10 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
 
                 new_offsets = torch.empty_like(offsets, device=self._device)
                 new_lengths = torch.empty_like(lengths, device=self._device)
+                
+                # we only need to pass the output frequency counters to the dedup_input_indices function here
+                frequency_counters = torch.empty_like(indices_input, device=self._device, dtype=torch.uint64)
+
                 dedup_input_indices(
                     indices_input,
                     offsets,
@@ -227,6 +231,7 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                     new_lengths,
                     self._device_num_sms,
                     self._unique_op,
+                    frequency_counters
                 )
                 unique_num = h_unique_offsets[-1].item()
                 unique_idx = torch.empty(

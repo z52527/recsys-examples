@@ -72,7 +72,7 @@ void bind_unique_op(py::module &m) {
             at::Tensor frequency_counters_tensor = d_frequency_counters.has_value() ? d_frequency_counters.value() : at::Tensor();
             at::Tensor input_frequencies_tensor = d_input_frequencies.has_value() ? d_input_frequencies.value() : at::Tensor();
 
-            self.unique(d_key, len, d_output_index, d_unique_key,
+              self.unique(d_key, len, d_output_index, d_unique_key,
                         d_output_counter, cuda_stream, offset_tensor,
                         frequency_counters_tensor, input_frequencies_tensor);
           },

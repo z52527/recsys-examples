@@ -689,7 +689,11 @@ void dedup_input_indices(
     const at::Tensor h_unique_offsets, const at::Tensor d_unique_offsets,
     std::vector<at::Tensor> unique_idx, const at::Tensor new_offsets,
     const at::Tensor new_lengths, int device_num_sms,
-    std::shared_ptr<dyn_emb::UniqueOpBase> unique_op) {
+    std::shared_ptr<dyn_emb::UniqueOpBase> unique_op,
+    const c10::optional<at::Tensor> &frequency_counters = c10::nullopt,
+    const c10::optional<at::Tensor> &input_frequencies = c10::nullopt
+    ) {
+      
 
   if (!offsets.is_cuda() || !indices.is_cuda()) {
     throw std::runtime_error(
@@ -756,9 +760,14 @@ void dedup_input_indices(
       at::Tensor tmp_d_unique_num = create_sub_tensor(d_unique_nums, i);
       at::Tensor previous_d_unique_num = create_sub_tensor(d_unique_offsets, i);
 
+      at::Tensor tmp_frequency_counters = frequency_counters.has_value() 
+          ? create_sub_tensor(frequency_counters.value(), indices_begin)
+          : at::Tensor();
+      // For first stage deduplication, we don't have input frequencies (set to empty tensor)
+      // The unique operation will default each key's frequency to 1
       unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
                         unique_idx[i], tmp_d_unique_num, stream,
-                        previous_d_unique_num);
+                        previous_d_unique_num, tmp_frequency_counters);
       dyn_emb::add_offset(d_unique_nums.data_ptr(), d_unique_offsets.data_ptr(),
                           i, unique_num_type, unique_offset_type, stream);
     }
@@ -1164,7 +1173,9 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("h_unique_nums"), py::arg("d_unique_nums"),
         py::arg("h_unique_offsets"), py::arg("d_unique_offsets"),
         py::arg("unique_idx"), py::arg("new_offsets"), py::arg("new_lengths"),
-        py::arg("device_num_sms"), py::arg("unique_op"));
+        py::arg("device_num_sms"), py::arg("unique_op"),
+        py::arg("frequency_counters") = c10::nullopt,
+        py::arg("input_frequencies") = c10::nullopt);
 
   m.def("reduce_grads", &reduce_grads,
     "reduce grads", py::arg("indices"), py::arg("grads"), py::arg("segment_range"), py::arg("h_segment_range")

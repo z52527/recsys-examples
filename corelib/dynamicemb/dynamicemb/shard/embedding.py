@@ -50,6 +50,21 @@ from ..planner.rw_sharding import RwSequenceDynamicEmbeddingSharding
 from ..unique_op import UniqueOp
 
 
+class DynamicEmbeddingCollectionContext(EmbeddingCollectionContext):
+    """Extended EmbeddingCollectionContext that includes frequency_counters for LFU strategy."""
+    
+    def __init__(
+        self,
+        sharding_contexts: Optional[List[SequenceShardingContext]] = None,
+        input_features: Optional[List[KeyedJaggedTensor]] = None,
+        reverse_indices: Optional[List[torch.Tensor]] = None,
+        seq_vbe_ctx: Optional[List] = None,
+        frequency_counters: Optional[List[torch.Tensor]] = None,
+    ) -> None:
+        super().__init__(sharding_contexts, input_features, reverse_indices, seq_vbe_ctx)
+        self.frequency_counters: List[torch.Tensor] = frequency_counters or []
+
+
 class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
     supported_compute_kernels: List[str] = [
         kernel.value for kernel in EmbeddingComputeKernel
@@ -143,7 +158,7 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
 
     def _dedup_indices(
         self,
-        ctx: EmbeddingCollectionContext,
+        ctx: DynamicEmbeddingCollectionContext,
         input_feature_splits: List[KeyedJaggedTensor],
     ) -> List[KeyedJaggedTensor]:
         with record_function("## dedup_ec_indices ##"):
@@ -212,6 +227,8 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                 new_lengths = torch.empty_like(lengths, device=self._device)
                 
                 # we only need to pass the output frequency counters to the dedup_input_indices function here
+                # TODO: Add strategy check for frequency_counters(ONLY LFU need frequency_counters)
+                # For now, we always create frequency_counters but only use them if LFU strategy is enabled
                 frequency_counters = torch.empty_like(indices_input, device=self._device, dtype=torch.uint64)
 
                 dedup_input_indices(
@@ -264,12 +281,13 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
 
                 ctx.input_features.append(input_feature)
                 ctx.reverse_indices.append(reverse_idx)
+                ctx.frequency_counters.append(frequency_counters) # TODO: check if this is correct
                 features_by_shards.append(dedup_features)
         return features_by_shards
 
     def input_dist(
         self,
-        ctx: EmbeddingCollectionContext,
+        ctx: DynamicEmbeddingCollectionContext,
         features: KeyedJaggedTensor,
     ) -> Awaitable[Awaitable[KJTList]]:
         if self._has_uninitialized_input_dist:
@@ -291,7 +309,14 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                 features_by_shards = self._dedup_indices(ctx, features_by_shards)
 
             awaitables = []
-            for input_dist, features in zip(self._input_dists, features_by_shards):
+            for i, (input_dist, features) in enumerate(zip(self._input_dists, features_by_shards)):
+                # Attach frequency counters as weights if available and LFU strategy is used
+                if len(ctx.frequency_counters) > i:
+                    frequency_counters = ctx.frequency_counters[i]
+                    # Convert frequency counters to float for weights and create new KJT
+                    # Use the simple approach: just set _weights directly
+                    features._weights = frequency_counters.float()
+                
                 awaitables.append(input_dist(features))
                 ctx.sharding_contexts.append(
                     SequenceShardingContext(
@@ -306,6 +331,9 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
             if unpadded_features is not None:
                 self._compute_sequence_vbe_context(ctx, unpadded_features)
         return KJTListSplitsAwaitable(awaitables, ctx)
+
+    def create_context(self) -> DynamicEmbeddingCollectionContext:
+        return DynamicEmbeddingCollectionContext(sharding_contexts=[])
 
 
 class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):

@@ -154,7 +154,7 @@ def bucketize_kjt_before_all2all(
             # duplicate keys will be resolved by AllToAll
             keys=_fx_wrap_gen_list_n_times(kjt.keys(), num_buckets),
             values=bucketized_indices,
-            weights=pos if bucketize_pos else bucketized_weights,
+            weights=_determine_output_weights(kjt, pos, bucketize_pos, bucketized_weights),
             lengths=bucketized_lengths.view(-1),
             offsets=None,
             stride=_fx_wrap_stride(kjt),
@@ -165,6 +165,35 @@ def bucketize_kjt_before_all2all(
         ),
         unbucketize_permute,
     )
+
+
+def _determine_output_weights(kjt, pos, bucketize_pos, bucketized_weights):
+    """
+    Determine which weights to return: pos or bucketized_weights.
+    
+    If the input weights appear to be frequency counters (float values that were
+    converted from uint64), preserve them instead of overriding with pos.
+    """
+    if not bucketize_pos:
+        return bucketized_weights
+    
+    # Check if input weights might be frequency counters
+    # Heuristic: if we have weights and they're all integers when converted back,
+    # they might be frequency counters that should be preserved
+    if (kjt.weights_or_none() is not None and 
+        bucketized_weights is not None):
+        # Check if the bucketized weights look like frequency counters
+        # (they should be non-negative and reasonably small integers)
+        weights_as_int = bucketized_weights.long()
+        weights_back_to_float = weights_as_int.float()
+        
+        # If the weights are all integers and non-negative, likely frequency counters
+        if torch.allclose(bucketized_weights, weights_back_to_float, atol=1e-6) and torch.all(bucketized_weights >= 0):
+            # These look like frequency counters, preserve them
+            return bucketized_weights
+    
+    # Default behavior: use pos if bucketize_pos is True
+    return pos if bucketize_pos else bucketized_weights
 
 
 class RwSparseFeaturesDist(BaseSparseFeaturesDist[KeyedJaggedTensor]):

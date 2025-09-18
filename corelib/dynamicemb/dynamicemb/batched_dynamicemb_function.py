@@ -327,9 +327,11 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
         
         # Process frequency counters for LFU strategy
         if frequency_counters is not None:
-            # Convert frequency counters back to uint64 for LFU processing
-            frequency_counts_uint64 = frequency_counters.long()
+            # Convert frequency counters to uint64 for LFU processing (CounterType requirement)
+            frequency_counts_uint64 = frequency_counters.to(torch.uint64)
             print(f"[DEBUG] Received frequency counters in lookup: {frequency_counts_uint64[:10]}...")  # Debug info
+            print(f"[DEBUG] frequency_counts_uint64 dtype: {frequency_counts_uint64.dtype}, device: {frequency_counts_uint64.device}")
+            print(f"[DEBUG] indices dtype: {indices.dtype}, device: {indices.device}")
             
             # TODO: Use frequency_counts_uint64 for LFU strategy
 
@@ -392,6 +394,7 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
                 output_embs,
                 device_num_sms,
                 unique_op,
+                frequency_counts_uint64,
             )
             if use_index_dedup:
                 unique_idx_forback = torch.empty(

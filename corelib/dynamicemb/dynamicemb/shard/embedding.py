@@ -313,9 +313,13 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                 # Attach frequency counters as weights if available and LFU strategy is used
                 if len(ctx.frequency_counters) > i:
                     frequency_counters = ctx.frequency_counters[i]
+                    print(f"[DEBUG-1] Setting weights from frequency_counters, shape: {frequency_counters.shape}, first 5: {frequency_counters[:5]}")
                     # Convert frequency counters to float for weights and create new KJT
                     # Use the simple approach: just set _weights directly
                     features._weights = frequency_counters.float()
+                    print(f"[DEBUG-2] After setting _weights, weights: {features.weights_or_none()[:5] if features.weights_or_none() is not None else 'None'}")
+                else:
+                    print(f"[DEBUG-3] No frequency_counters for shard {i}, ctx.frequency_counters length: {len(ctx.frequency_counters)}")
                 
                 awaitables.append(input_dist(features))
                 ctx.sharding_contexts.append(

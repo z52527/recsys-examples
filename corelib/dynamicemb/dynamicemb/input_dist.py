@@ -174,6 +174,8 @@ def _determine_output_weights(kjt, pos, bucketize_pos, bucketized_weights):
     If the input weights appear to be frequency counters (float values that were
     converted from uint64), preserve them instead of overriding with pos.
     """
+    print(f"[DEBUG-4] _determine_output_weights: bucketize_pos={bucketize_pos}, has_input_weights={kjt.weights_or_none() is not None}, has_bucketized_weights={bucketized_weights is not None}")
+    
     if not bucketize_pos:
         return bucketized_weights
     
@@ -190,10 +192,15 @@ def _determine_output_weights(kjt, pos, bucketize_pos, bucketized_weights):
         # If the weights are all integers and non-negative, likely frequency counters
         if torch.allclose(bucketized_weights, weights_back_to_float, atol=1e-6) and torch.all(bucketized_weights >= 0):
             # These look like frequency counters, preserve them
+            print(f"[DEBUG-5] Preserving frequency counters, first 5: {bucketized_weights[:5]}")
             return bucketized_weights
+        else:
+            print(f"[DEBUG-6] Weights don't look like frequency counters, using pos")
     
     # Default behavior: use pos if bucketize_pos is True
-    return pos if bucketize_pos else bucketized_weights
+    result = pos if bucketize_pos else bucketized_weights
+    print(f"[DEBUG-7] Returning {'pos' if bucketize_pos else 'bucketized_weights'}, first 5: {result[:5] if result is not None else 'None'}")
+    return result
 
 
 class RwSparseFeaturesDist(BaseSparseFeaturesDist[KeyedJaggedTensor]):

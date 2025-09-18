@@ -64,6 +64,7 @@ class DynamicEmbeddingBagFunction(torch.autograd.Function):
         optimizer: BaseDynamicEmbeddingOptimizer,
         training: bool,
         eval_initializers: List[DynamicEmbInitializerArgs],
+        frequency_counters: Optional[torch.Tensor] = None,  # Add frequency counters parameter
         *args,
     ):
         # TODO: remove unnecessary params.
@@ -80,6 +81,15 @@ class DynamicEmbeddingBagFunction(torch.autograd.Function):
         feature_batch_size = offsets.shape[0] - 1
         batch_size = feature_batch_size // feature_num
         assert feature_batch_size % feature_num == 0
+        
+        # Process frequency counters for LFU strategy
+        if frequency_counters is not None:
+            # Convert frequency counters back to uint64 for LFU processing
+            frequency_counts_uint64 = frequency_counters.long()
+            print(f"[DEBUG] Received frequency counters in EmbBag lookup: {frequency_counts_uint64[:10]}...")  # Debug info
+            
+            # TODO: Use frequency_counts_uint64 for LFU strategy in pooled embeddings
+        
         # The offsets is on device in torchrec, however, the unique_op and lookup_op are done table by table.
         # So we need to know one index belong to which table, to let op know the boundary.
         # Therefore, copy offsets to cpu is necessary, otherwise, many things will be coupled together.
@@ -279,7 +289,7 @@ class DynamicEmbeddingBagFunction(torch.autograd.Function):
 
         optimizer.update(tables, unique_indices_list, unique_grads_per_table)
 
-        return (None,) * 19
+        return (None,) * 20
 
 
 class DynamicEmbeddingFunction(torch.autograd.Function):
@@ -304,6 +314,7 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
         optimizer: BaseDynamicEmbeddingOptimizer,
         training: bool,
         eval_initializers: List[DynamicEmbInitializerArgs],
+        frequency_counters: Optional[torch.Tensor] = None,  # Add frequency counters parameter
         *args,
     ):
         # TODO:need check dimension is right
@@ -313,6 +324,14 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
         feature_batch_size = offsets.shape[0] - 1
         batch_size = feature_batch_size // feature_num
         assert feature_batch_size % feature_num == 0
+        
+        # Process frequency counters for LFU strategy
+        if frequency_counters is not None:
+            # Convert frequency counters back to uint64 for LFU processing
+            frequency_counts_uint64 = frequency_counters.long()
+            print(f"[DEBUG] Received frequency counters in lookup: {frequency_counts_uint64[:10]}...")  # Debug info
+            
+            # TODO: Use frequency_counts_uint64 for LFU strategy
 
         if training:
             d_unique_offsets = torch.zeros(
@@ -481,7 +500,7 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
 
         # optimizer: update tables.
         optimizer.update(tables, unique_indices_list, unique_grads_list)
-        return (None,) * 19
+        return (None,) * 20
 
 
 def dynamicemb_prefetch(

@@ -229,7 +229,7 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                 # we only need to pass the output frequency counters to the dedup_input_indices function here
                 # TODO: Add strategy check for frequency_counters(ONLY LFU need frequency_counters)
                 # For now, we always create frequency_counters but only use them if LFU strategy is enabled
-                frequency_counters = torch.empty_like(indices_input, device=self._device, dtype=torch.uint64)
+                frequency_counters = torch.zeros_like(indices_input, device=self._device, dtype=torch.uint64)
 
                 dedup_input_indices(
                     indices_input,

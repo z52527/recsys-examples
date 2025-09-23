@@ -481,7 +481,7 @@ void lookup_forward_dense(
   for (int i = 0; i < table_num; ++i) {
     tmp_unique_indices[i] = at::empty_like(indices);
   }
-  at::Tensor accumulated_frequency_output = at::empty_like(frequency_counts_uint64, at::TensorOptions().dtype(at::kUInt64).device(indices.device()));  // 与输入相同大小
+  at::Tensor accumulated_frequency_output = at::zeros_like(frequency_counts_uint64);  // 初始化为0，与输入相同大小和类型
 
   for (int i = 0; i < table_num; ++i) {
     int64_t indices_begin = h_table_offsets[i];

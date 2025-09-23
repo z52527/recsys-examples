@@ -165,7 +165,7 @@ __global__ void get_insert_kernel(
           target_val_pos = result_val;
           
           if (d_frequency_counters != nullptr) {
-            d_frequency_counters[result_val] = input_freq;
+            atomicCAS(&d_frequency_counters[result_val], 0, input_freq);
           }
           break;
         } else if (target_key == old_key) {

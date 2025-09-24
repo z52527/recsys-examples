@@ -13,11 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
+from enum import Enum, unique
 from typing import List, Optional
 
 import torch
 
 from .hstu_config import HSTUPreprocessingConfig, PositionEncodingConfig
+
+
+@unique
+class EmbeddingBackend(Enum):
+    """
+    Enum class representing different embedding backends (for inference).
+
+    Attributes:
+      TORCHREC: Represents the TorchRec backend.
+      DYNAMICEMB: Represents the DynamicEmb backend.
+      NVEMB: Represents the NV-Embeddings backend.
+    """
+
+    TORCHREC = "TorchRec"
+    DYNAMICEMB = "DynamicEmb"
+    NVEMB = "NVEmb"
 
 
 @dataclass
@@ -141,6 +158,7 @@ class InferenceHSTUConfig:
         is_causal (bool):Whether the attention is causal.
         target_group_size (int):  The size of the sub-candidate group where causal attention is applied only within a sub-group (usually in the case of ranking).
         position_encoding_config (PositionEncodingConfig, optional): Position embedding config.
+        contextual_max_seqlen (int): The (maximum) length of contextual features.
     """
 
     hidden_size: int
@@ -157,6 +175,7 @@ class InferenceHSTUConfig:
     target_group_size: int = 1
     position_encoding_config: Optional[PositionEncodingConfig] = None
     hstu_preprocessing_config: Optional[HSTUPreprocessingConfig] = None
+    contextual_max_seqlen: int = 0
 
     def __post_init__(self):
         assert self.is_causal
@@ -175,6 +194,7 @@ def get_inference_hstu_config(
     is_causal: bool = True,
     target_group_size: int = 1,
     position_encoding_config: Optional[PositionEncodingConfig] = None,
+    contextual_max_seqlen: int = 0,
 ) -> InferenceHSTUConfig:
     """
     Create the HSTU configuration.
@@ -191,6 +211,7 @@ def get_inference_hstu_config(
         is_causal (bool, optional): Whether the attention is causal. Defaults to False.
         target_group_size (int, optional): The size of the sub-candidate group where causal attention is applied only within a sub-group (usually in the case of ranking). Defaults to 1.
         position_encoding_config (Optional[PositionEncodingConfig], optional): Position embedding config. Defaults to None.
+        contextual_max_seqlen (int, optional): The (maximum) length of contextual features.
     Returns:
         HSTUConfig: The HSTU configuration object.
     """
@@ -209,6 +230,7 @@ def get_inference_hstu_config(
         is_causal=is_causal,
         target_group_size=target_group_size,
         position_encoding_config=position_encoding_config,
+        contextual_max_seqlen=contextual_max_seqlen,
     )
 
 

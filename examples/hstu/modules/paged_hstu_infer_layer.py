@@ -208,19 +208,18 @@ class PagedHSTUInferLayer(torch.nn.Module):
             kv_cache_metadata.total_history_offsets[: batch_size + 1],
             self._max_seqlen,
             self._max_seqlen,
-            num_contexts=None,
+            num_contexts=jd.contextual_seqlen,
             num_targets=jd.num_candidates,
             target_group_size=1,
             window_size=(-1, 0),
             alpha=self._alpha,
             rab=None,
             has_drab=False,
-            is_delta_q=True,
             kv_cache=kv_cache_table,
             page_offsets=kv_cache_metadata.kv_indptr,
             page_ids=kv_cache_metadata.kv_indices,
             last_page_lens=kv_cache_metadata.kv_last_page_len,
-            seq_offsets_t=jd.num_candidates_offsets,
+            cu_seqlens_t=jd.num_candidates_offsets,
         )
 
         jagged_attn_output = jagged_attn_output.view(
@@ -322,19 +321,20 @@ class PagedHSTUInferLayer(torch.nn.Module):
             kv_cache_metadata.total_history_offsets[: batch_size + 1],
             self._max_seqlen,
             self._max_seqlen,
-            num_contexts=None,
+            num_contexts=jd.contextual_seqlen[:batch_size]
+            if jd.contextual_seqlen is not None
+            else None,
             num_targets=jd.num_candidates[:batch_size],
             target_group_size=1,
             window_size=(-1, 0),
             alpha=self._alpha,
             rab=None,
             has_drab=False,
-            is_delta_q=True,
             kv_cache=kv_cache_table,
             page_offsets=kv_cache_metadata.kv_indptr,
             page_ids=kv_cache_metadata.kv_indices,
             last_page_lens=kv_cache_metadata.kv_last_page_len,
-            seq_offsets_t=jd.num_candidates_offsets[: batch_size + 1],
+            cu_seqlens_t=jd.num_candidates_offsets[: batch_size + 1],
         )
 
         jagged_attn_output = jagged_attn_output.view(

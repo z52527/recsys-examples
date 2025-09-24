@@ -239,11 +239,12 @@ class HSTUBlockPreprocessor(torch.nn.Module):
                 num_position_buckets=config.position_encoding_config.num_position_buckets,
                 num_time_buckets=config.position_encoding_config.num_time_buckets,
                 embedding_dim=config.hidden_size,
-                is_inference=False,
+                is_inference=is_inference,
                 use_time_encoding=config.position_encoding_config.use_time_encoding,
                 training_dtype=self._training_dtype,
             )
         self._is_inference = is_inference
+        self._dropout_ratio = 0.0
         if not self._is_inference:
             assert isinstance(
                 config, HSTUConfig
@@ -252,7 +253,10 @@ class HSTUBlockPreprocessor(torch.nn.Module):
 
     @output_nvtx_hook(nvtx_tag="HSTUBlock preprocess", hook_key_or_attr_name="values")
     def forward(
-        self, embeddings: Dict[str, JaggedTensor], batch: RankingBatch
+        self,
+        embeddings: Dict[str, JaggedTensor],
+        batch: RankingBatch,
+        seq_start_position: torch.Tensor = None,
     ) -> JaggedData:
         """
         Preprocesses the embeddings for use in the HSTU architecture.
@@ -289,6 +293,7 @@ class HSTUBlockPreprocessor(torch.nn.Module):
                 seq_timestamps=None,
                 seq_embeddings=jd.values,
                 num_targets=jd.num_candidates,
+                seq_start_position=seq_start_position,
             )
 
         jd.values = torch.nn.functional.dropout(

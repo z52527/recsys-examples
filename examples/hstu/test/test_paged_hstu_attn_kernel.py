@@ -425,7 +425,6 @@ def test_paged_hstu_attn_kernel(
             alpha=1.0 / (head_dim**0.5),
             rab=None,
             has_drab=False,
-            is_delta_q=True,
             kv_cache=kvcache_table,
             page_offsets=torch.tensor(
                 kv_raw_metadata[1], dtype=torch.int32, device=device
@@ -434,7 +433,7 @@ def test_paged_hstu_attn_kernel(
             last_page_lens=torch.tensor(
                 kv_raw_metadata[2], dtype=torch.int32, device=device
             ),
-            seq_offsets_t=num_candidates_offsets.cuda(),
+            cu_seqlens_t=num_candidates_offsets.cuda(),
         )
         torch.cuda.synchronize()
 

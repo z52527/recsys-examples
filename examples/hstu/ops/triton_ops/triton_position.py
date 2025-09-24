@@ -83,6 +83,7 @@ def _add_position_embeddings_kernel(
     AUTOTUNE_MAX_SEQ_LEN,
     D,
     scale,
+    ind_offsets,
     stride_jn,
     stride_dk,
     stride_on,
@@ -106,7 +107,13 @@ def _add_position_embeddings_kernel(
     if start_n >= seq_len:
         return
     offs_n = start_n + tl.arange(0, BLOCK_N)
-    clamped_offs_n = tl.where(offs_n >= max_ind, max_ind, offs_n)
+    if ind_offsets is None:
+        clamped_offs_n = tl.where(offs_n >= max_ind, max_ind, offs_n)
+    else:
+        ind_offset = tl.load(ind_offsets + off_b)
+        clamped_offs_n = tl.where(
+            offs_n + ind_offset >= max_ind, max_ind, offs_n + ind_offset
+        )
     offs_d = tl.arange(0, BLOCK_D)
     Jagged += seq_start.to(tl.int64) * stride_jn
     jagged_ptr_offsets = offs_n[:, None] * stride_jn + offs_d[None, :]
@@ -212,6 +219,7 @@ class _AddPositionEmbeddingsFunction(torch.autograd.Function):
         max_seq_len: int,
         dense: torch.Tensor,
         scale: float = 1.0,
+        ind_offsets: Optional[torch.Tensor] = None,
     ):
         jagged = switch_to_contiguous_if_needed(jagged)
         dense = switch_to_contiguous_if_needed(dense)
@@ -233,6 +241,7 @@ class _AddPositionEmbeddingsFunction(torch.autograd.Function):
             AUTOTUNE_MAX_SEQ_LEN=autotune_max_seq_len(max_seq_len),
             D=D,
             scale=scale,
+            ind_offsets=ind_offsets,
             stride_jn=jagged.stride(0),
             stride_dk=dense.stride(0),
             stride_on=out.stride(0),
@@ -245,13 +254,17 @@ class _AddPositionEmbeddingsFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.K = dense.size(0)
         ctx.BLOCK_D = BLOCK_D
+        ctx.no_ind_offsets = ind_offsets is None
         return out
 
     @staticmethod
     # pyre-ignore[14]
     def backward(
         ctx, d_out: torch.Tensor
-    ) -> Tuple[torch.Tensor, None, None, None, torch.Tensor, None]:
+    ) -> Tuple[torch.Tensor, None, None, None, torch.Tensor, None, None]:
+        assert (
+            ctx.no_ind_offsets
+        ), "No backward support for position encoder with incremental input"
         jagged_offsets, high_inds = ctx.saved_tensors
         d_dense = torch.empty((ctx.K, ctx.D), device=d_out.device, dtype=d_out.dtype)
         scale_jagged = ctx.scale != 1.0
@@ -274,7 +287,15 @@ class _AddPositionEmbeddingsFunction(torch.autograd.Function):
             BLOCK_D=BLOCK_D,
         )
         # pyre-ignore[61]
-        return d_jagged if scale_jagged else d_out, None, None, None, d_dense, None
+        return (
+            d_jagged if scale_jagged else d_out,
+            None,
+            None,
+            None,
+            d_dense,
+            None,
+            None,
+        )
 
 
 @triton_autotune(
@@ -639,9 +660,10 @@ def triton_add_position_embeddings(
     max_seq_len: int,
     dense: torch.Tensor,
     scale: float = 1.0,
+    ind_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return _AddPositionEmbeddingsFunction.apply(
-        jagged, jagged_offsets, high_inds, max_seq_len, dense, scale
+        jagged, jagged_offsets, high_inds, max_seq_len, dense, scale, ind_offsets
     )
 
 

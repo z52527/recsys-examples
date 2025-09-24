@@ -49,12 +49,14 @@ DISABLE_LOCAL = os.getenv("HSTU_DISABLE_LOCAL", "FALSE") == "TRUE"
 DISABLE_CAUSAL = os.getenv("HSTU_DISABLE_CAUSAL", "FALSE") == "TRUE"
 DISABLE_CONTEXT = os.getenv("HSTU_DISABLE_CONTEXT", "FALSE") == "TRUE"
 DISABLE_TARGET = os.getenv("HSTU_DISABLE_TARGET", "FALSE") == "TRUE"
-DISABLE_DELTA_Q = os.getenv("HSTU_DISABLE_DELTA_Q", "FALSE") == "TRUE"
+DISABLE_ARBITRARY = os.getenv("HSTU_DISABLE_ARBITRARY", "FALSE") == "TRUE"
+ARBITRARY_NFUNC = int(os.getenv("HSTU_ARBITRARY_NFUNC", "0"))
 DISABLE_RAB = os.getenv("HSTU_DISABLE_RAB", "FALSE") == "TRUE"
 DISABLE_DRAB = os.getenv("HSTU_DISABLE_DRAB", "FALSE") == "TRUE"
 DISABLE_BF16 = os.getenv("HSTU_DISABLE_BF16", "FALSE") == "TRUE"
 DISABLE_FP16 = os.getenv("HSTU_DISABLE_FP16", "FALSE") == "TRUE"
 DISABLE_FP8 = os.getenv("HSTU_DISABLE_FP8", "FALSE") == "TRUE"
+USE_E5M2_BWD = os.getenv("HSTU_USE_E5M2_BWD", "FALSE") == "TRUE"
 DISABLE_HDIM32 = os.getenv("HSTU_DISABLE_HDIM32", "FALSE") == "TRUE"
 DISABLE_HDIM64 = os.getenv("HSTU_DISABLE_HDIM64", "FALSE") == "TRUE"
 DISABLE_HDIM128 = os.getenv("HSTU_DISABLE_HDIM128", "FALSE") == "TRUE"
@@ -129,30 +131,6 @@ else:
     from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
 
-class NinjaBuildExtension(BuildExtension):
-    def __init__(self, *args, **kwargs) -> None:
-        # do not override env MAX_JOBS if already exists
-        if not os.environ.get("MAX_JOBS"):
-            import psutil
-
-            # calculate the maximum allowed NUM_JOBS based on cores
-            max_num_jobs_cores = max(1, os.cpu_count() // 2)
-
-            # calculate the maximum allowed NUM_JOBS based on free memory
-            free_memory_gb = psutil.virtual_memory().available / (
-                1024**3
-            )  # free memory in GB
-            max_num_jobs_memory = int(
-                free_memory_gb / 9
-            )  # each JOB peak memory cost is ~8-9GB when threads = 4
-
-            # pick lower value of jobs based on cores vs memory metric to minimize oom and swap usage during compilation
-            max_jobs = max(1, min(max_num_jobs_cores, max_num_jobs_memory))
-            os.environ["MAX_JOBS"] = str(max_jobs)
-
-        super().__init__(*args, **kwargs)
-
-
 def get_platform():
     """
     Returns the platform name as used in wheel filenames.
@@ -216,21 +194,18 @@ def generate_cuda_sources():
         else []
     )
     MASK = [""]
-    FP8_MASK = [""]
     if not DISABLE_LOCAL:
         MASK += ["_local"]
-        FP8_MASK += ["_local"]
-        MASK += ["_local_deltaq"] if not DISABLE_DELTA_Q else []
     if not DISABLE_CAUSAL:
         CAUSAL_MASK = ["_causal"]
-        FP8_MASK += ["_causal"]
         CONTEXT_MASK = [""] + (["_context"] if not DISABLE_CONTEXT else [])
         TARGET_MASK = [""] + (["_target"] if not DISABLE_TARGET else [])
         MASK += [
             f"{c}{x}{t}"
             for c, x, t in itertools.product(CAUSAL_MASK, CONTEXT_MASK, TARGET_MASK)
         ]
-        MASK += ["_causal_deltaq"] if not DISABLE_DELTA_Q else []
+    if not DISABLE_ARBITRARY:
+        MASK += ["_arbitrary"]
 
     dtype_to_str = {
         "bf16": "cutlass::bfloat16_t",
@@ -245,46 +220,58 @@ def generate_cuda_sources():
 
 #include "hstu_fwd_launch_template.h"
 
-template void run_hstu_fwd_<90, {}, {}, {}, {}, {}, {}, {}, {}>
+template void run_hstu_fwd_<90, {}, {}, {}, {}, {}, {}, {}, {}, {}>
                            (Hstu_fwd_params& params, cudaStream_t stream);
 
     """
     for hdim, dtype, rab, mask in itertools.product(
         HEAD_DIMENSIONS, DTYPE_16, RAB, MASK
     ):
-        file_name = f"instantiations/hstu_fwd_hdim{hdim}_{dtype}{rab}{mask}_sm90.cu"
-        with open(file_name, "w") as f:
-            f.write(
-                fwd_file_head.format(
-                    dtype_to_str[dtype],
-                    hdim,
-                    "true" if "_rab" in rab else "false",
-                    "true" if "local" in mask else "false",
-                    "true" if "causal" in mask else "false",
-                    "true" if "context" in mask else "false",
-                    "true" if "target" in mask else "false",
-                    "true" if "deltaq" in mask else "false",
-                )
-            )
-        sources_fwd.append(file_name)
-    if not DISABLE_FP8:
-        for hdim, rab, mask in itertools.product(HEAD_DIMENSIONS, RAB, FP8_MASK):
-            if hdim == 32:
-                continue
-            file_name = f"instantiations/hstu_fwd_hdim{hdim}_e4m3{rab}{mask}_sm90.cu"
+        file_name = (
+            f"instantiations/hstu_fwd_hdim{hdim}_{dtype}{rab}{mask}_fn{ARBITRARY_NFUNC}_sm90.cu"
+            if "arbitrary" in mask
+            else f"instantiations/hstu_fwd_hdim{hdim}_{dtype}{rab}{mask}_sm90.cu"
+        )
+        if not os.path.exists(file_name):
             with open(file_name, "w") as f:
                 f.write(
                     fwd_file_head.format(
-                        "cutlass::float_e4m3_t",
+                        dtype_to_str[dtype],
                         hdim,
                         "true" if "_rab" in rab else "false",
                         "true" if "local" in mask else "false",
                         "true" if "causal" in mask else "false",
-                        "false",  # context
-                        "false",  # target
-                        "false",
+                        "true" if "context" in mask else "false",
+                        "true" if "target" in mask else "false",
+                        "true" if "arbitrary" in mask else "false",
+                        str(ARBITRARY_NFUNC) if "arbitrary" in mask else "0",
                     )
-                )  # deltaq
+                )
+        sources_fwd.append(file_name)
+    if not DISABLE_FP8:
+        for hdim, rab, mask in itertools.product(HEAD_DIMENSIONS, RAB, MASK):
+            if hdim == 32:
+                continue
+            file_name = (
+                f"instantiations/hstu_fwd_hdim{hdim}_e4m3{rab}{mask}_fn{ARBITRARY_NFUNC}_sm90.cu"
+                if "arbitrary" in mask
+                else f"instantiations/hstu_fwd_hdim{hdim}_e4m3{rab}{mask}_sm90.cu"
+            )
+            if not os.path.exists(file_name):
+                with open(file_name, "w") as f:
+                    f.write(
+                        fwd_file_head.format(
+                            "cutlass::float_e4m3_t",
+                            hdim,
+                            "true" if "_rab" in rab else "false",
+                            "true" if "local" in mask else "false",
+                            "true" if "causal" in mask else "false",
+                            "true" if "context" in mask else "false",
+                            "true" if "target" in mask else "false",
+                            "true" if "arbitrary" in mask else "false",
+                            str(ARBITRARY_NFUNC) if "arbitrary" in mask else "0",
+                        )
+                    )
             sources_fwd.append(file_name)
 
     sources_bwd = []
@@ -295,7 +282,7 @@ template void run_hstu_fwd_<90, {}, {}, {}, {}, {}, {}, {}, {}>
 
 #include "hstu_bwd_launch_template.h"
 
-template void run_hstu_bwd_<90, {}, {}, {}, {}, {}, {}, {}, {}, {}>
+template void run_hstu_bwd_<90, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>
                            (Hstu_bwd_params& params, cudaStream_t stream);
 
     """
@@ -304,40 +291,84 @@ template void run_hstu_bwd_<90, {}, {}, {}, {}, {}, {}, {}, {}, {}>
             HEAD_DIMENSIONS, DTYPE_16, RAB_DRAB, MASK
         ):
             file_name = (
-                f"instantiations/hstu_bwd_hdim{hdim}_{dtype}{rab_drab}{mask}_sm90.cu"
+                f"instantiations/hstu_bwd_hdim{hdim}_{dtype}{rab_drab}{mask}_fn{ARBITRARY_NFUNC}_sm90.cu"
+                if "arbitrary" in mask
+                else f"instantiations/hstu_bwd_hdim{hdim}_{dtype}{rab_drab}{mask}_sm90.cu"
             )
-            with open(file_name, "w") as f:
-                f.write(
-                    bwd_file_head.format(
-                        dtype_to_str[dtype],
-                        hdim,
-                        "true" if "_rab" in rab_drab else "false",
-                        "true" if "drab" in rab_drab else "false",
-                        "true" if "local" in mask else "false",
-                        "true" if "causal" in mask else "false",
-                        "true" if "context" in mask else "false",
-                        "true" if "target" in mask else "false",
-                        "true" if "deltaq" in mask else "false",
+            if not os.path.exists(file_name):
+                with open(file_name, "w") as f:
+                    f.write(
+                        bwd_file_head.format(
+                            dtype_to_str[dtype],
+                            hdim,
+                            "true" if "_rab" in rab_drab else "false",
+                            "true" if "drab" in rab_drab else "false",
+                            "true" if "local" in mask else "false",
+                            "true" if "causal" in mask else "false",
+                            "true" if "context" in mask else "false",
+                            "true" if "target" in mask else "false",
+                            "true" if "arbitrary" in mask else "false",
+                            str(ARBITRARY_NFUNC) if "arbitrary" in mask else "0",
+                        )
                     )
-                )
             sources_bwd.append(file_name)
-        # if not DISABLE_FP8:
-        #     for hdim, rab_drab, mask in itertools.product(HEAD_DIMENSIONS, RAB_DRAB, FP8_MASK):
-        #         if hdim == 32:
-        #             continue
-        #         file_name = f"instantiations/hstu_bwd_hdim{hdim}_e4m3{rab_drab}{mask}_sm90.cu"
-        #         with open(file_name, "w") as f:
-        #             f.write(bwd_file_head.format("90",
-        #                                         "cutlass::float_e4m3_t",
-        #                                         hdim,
-        #                                         "true" if "_rab" in rab_drab else "false",
-        #                                         "false", # drab
-        #                                         "true" if "local" in mask else "false",
-        #                                         "true" if "causal" in mask else "false",
-        #                                         "false", # context
-        #                                         "false", # target
-        #                                         "false")) # deltaq
-        #         sources_bwd.append(file_name)
+        if not DISABLE_FP8 and not USE_E5M2_BWD:
+            for hdim, rab_drab, mask in itertools.product(
+                HEAD_DIMENSIONS, RAB_DRAB, MASK
+            ):
+                if hdim == 32:
+                    continue
+                file_name = (
+                    f"instantiations/hstu_bwd_hdim{hdim}_e4m3{rab_drab}{mask}_fn{ARBITRARY_NFUNC}_sm90.cu"
+                    if "arbitrary" in mask
+                    else f"instantiations/hstu_bwd_hdim{hdim}_e4m3{rab_drab}{mask}_sm90.cu"
+                )
+                if not os.path.exists(file_name):
+                    with open(file_name, "w") as f:
+                        f.write(
+                            bwd_file_head.format(
+                                "cutlass::float_e4m3_t",
+                                hdim,
+                                "true" if "_rab" in rab_drab else "false",
+                                "true" if "drab" in rab_drab else "false",
+                                "true" if "local" in mask else "false",
+                                "true" if "causal" in mask else "false",
+                                "true" if "context" in mask else "false",
+                                "true" if "target" in mask else "false",
+                                "true" if "arbitrary" in mask else "false",
+                                str(ARBITRARY_NFUNC) if "arbitrary" in mask else "0",
+                            )
+                        )
+                sources_bwd.append(file_name)
+
+        if not DISABLE_FP8 and USE_E5M2_BWD:
+            for hdim, rab_drab, mask in itertools.product(
+                HEAD_DIMENSIONS, RAB_DRAB, MASK
+            ):
+                if hdim == 32:
+                    continue
+                file_name = (
+                    f"instantiations/hstu_bwd_hdim{hdim}_e5m2{rab_drab}{mask}_fn{ARBITRARY_NFUNC}_sm90.cu"
+                    if "arbitrary" in mask
+                    else f"instantiations/hstu_bwd_hdim{hdim}_e5m2{rab_drab}{mask}_sm90.cu"
+                )
+                if not os.path.exists(file_name):
+                    with open(file_name, "w") as f:
+                        f.write(
+                            bwd_file_head.format(
+                                "cutlass::float_e5m2_t",
+                                hdim,
+                                "true" if "_rab" in rab_drab else "false",
+                                "true" if "drab" in rab_drab else "false",
+                                "true" if "local" in mask else "false",
+                                "true" if "causal" in mask else "false",
+                                "true" if "context" in mask else "false",
+                                "true" if "target" in mask else "false",
+                                "true" if "arbitrary" in mask else "false",
+                                str(ARBITRARY_NFUNC) if "arbitrary" in mask else "0",
+                            )
+                        )
+                sources_bwd.append(file_name)
 
     return sources_fwd + sources_bwd
 
@@ -382,12 +413,14 @@ if not SKIP_CUDA_BUILD:
         + (["-DHSTU_DISABLE_CAUSAL"] if DISABLE_CAUSAL else [])
         + (["-DHSTU_DISABLE_CONTEXT"] if DISABLE_CONTEXT else [])
         + (["-DHSTU_DISABLE_TARGET"] if DISABLE_TARGET else [])
-        + (["-DHSTU_DISABLE_DELTA_Q"] if DISABLE_DELTA_Q else [])
+        + (["-DHSTU_DISABLE_ARBITRARY"] if DISABLE_ARBITRARY else [])
+        + (["-DHSTU_ARBITRARY_NFUNC=" + str(ARBITRARY_NFUNC)])
         + (["-DHSTU_DISABLE_RAB"] if DISABLE_RAB else [])
         + (["-DHSTU_DISABLE_DRAB"] if DISABLE_DRAB else [])
         + (["-DHSTU_DISABLE_BF16"] if DISABLE_BF16 else [])
         + (["-DHSTU_DISABLE_FP16"] if DISABLE_FP16 else [])
         + (["-DHSTU_DISABLE_FP8"] if DISABLE_FP8 else [])
+        + (["-DHSTU_USE_E5M2_BWD"] if USE_E5M2_BWD else [])
         + (["-DHSTU_DISABLE_HDIM32"] if DISABLE_HDIM32 else [])
         + (["-DHSTU_DISABLE_HDIM64"] if DISABLE_HDIM64 else [])
         + (["-DHSTU_DISABLE_HDIM128"] if DISABLE_HDIM128 else [])
@@ -399,6 +432,8 @@ if not SKIP_CUDA_BUILD:
         raise ValueError(
             "At least one of DISABLE_BF16, DISABLE_FP16, or DISABLE_FP8 must be False"
         )
+    if DISABLE_FP8 and USE_E5M2_BWD:
+        raise ValueError("Cannot support e5m2 bwd with fp8 disabled")
     if DISABLE_HDIM32 and DISABLE_HDIM64 and DISABLE_HDIM128 and DISABLE_HDIM256:
         raise ValueError(
             "At least one of DISABLE_HDIM32, DISABLE_HDIM64, DISABLE_HDIM128, or DISABLE_HDIM256 must be False"
@@ -411,6 +446,8 @@ if not SKIP_CUDA_BUILD:
         raise ValueError("Cannot support target without causal")
     if DISABLE_CAUSAL and not DISABLE_CONTEXT:
         raise ValueError("Cannot support context without causal")
+    if not DISABLE_ARBITRARY and ARBITRARY_NFUNC % 2 == 0:
+        raise ValueError("ARBITRARY_NFUNC must be odd")
 
     torch_cpp_sources = ["hstu_api.cpp"]
     subprocess.run(["rm", "-rf", "instantiations/*"])
@@ -467,9 +504,33 @@ if not SKIP_CUDA_BUILD:
     )
 
 
+class NinjaBuildExtension(BuildExtension):
+    def __init__(self, *args, **kwargs) -> None:
+        # do not override env MAX_JOBS if already exists
+        if not os.environ.get("MAX_JOBS"):
+            import psutil
+
+            # calculate the maximum allowed NUM_JOBS based on cores
+            max_num_jobs_cores = max(1, os.cpu_count() // 2)
+
+            # calculate the maximum allowed NUM_JOBS based on free memory
+            free_memory_gb = psutil.virtual_memory().available / (
+                1024**3
+            )  # free memory in GB
+            max_num_jobs_memory = int(
+                free_memory_gb / 9
+            )  # each JOB peak memory cost is ~8-9GB when threads = 4
+
+            # pick lower value of jobs based on cores vs memory metric to minimize oom and swap usage during compilation
+            max_jobs = max(1, min(max_num_jobs_cores, max_num_jobs_memory))
+            os.environ["MAX_JOBS"] = str(max_jobs)
+
+        super().__init__(*args, **kwargs)
+
+
 setup(
     name=PACKAGE_NAME,
-    version="0.1.0" + "+cu" + str(bare_metal_version),
+    version="0.1.1" + "+cu" + str(bare_metal_version),
     packages=find_packages(
         exclude=(
             "build",

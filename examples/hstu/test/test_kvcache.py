@@ -84,10 +84,9 @@ def get_test_model(num_layers, blocks_in_primary_pool, page_size, offload_chunks
             use_dynamicemb=True,
         ),
     ]
-    num_tasks = 3
     task_config = RankingConfig(
         embedding_configs=emb_configs,
-        prediction_head_arch=[[128, 10, 1] for _ in range(num_tasks)],
+        prediction_head_arch=[128, 10, 1],
     )
 
     model = InferenceRankingGR(

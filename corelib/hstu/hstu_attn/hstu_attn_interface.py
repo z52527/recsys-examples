@@ -27,8 +27,8 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
         q,  # need grad
         k,  # need grad
         v,  # need grad
-        seq_offsets_q,
-        seq_offsets_k,
+        cu_seqlens_q,
+        cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
         num_contexts,
@@ -38,12 +38,12 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
         alpha=1.0,
         rab=None,  # need grad
         has_drab=False,
-        is_delta_q=False,
+        func=None,
         kv_cache=None,
         page_offsets=None,
         page_ids=None,
         last_page_lens=None,
-        seq_offsets_t=None,
+        cu_seqlens_t=None,
     ):
         assert q.dim() == 3, "q shape should be (L, num_heads, head_dim)"
         assert k.dim() == 3, "k shape should be (L, num_heads, head_dim)"
@@ -55,8 +55,8 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
                 q,
                 k,
                 v,
-                seq_offsets_q,
-                seq_offsets_k,
+                cu_seqlens_q,
+                cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 num_contexts,
@@ -66,12 +66,12 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
                 window_size[1],
                 alpha,
                 rab,
-                is_delta_q,
+                func,
                 kv_cache,
                 page_offsets,
                 page_ids,
                 last_page_lens,
-                seq_offsets_t,
+                cu_seqlens_t,
             )
         P = out[:, :, :head_dim].reshape(-1, num_heads * head_dim)
 
@@ -79,8 +79,8 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
             q,
             k,
             v,
-            seq_offsets_q,
-            seq_offsets_k,
+            cu_seqlens_q,
+            cu_seqlens_k,
             num_contexts,
             num_targets,
             rab_padded,
@@ -94,7 +94,7 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
         ctx.window_size_left = window_size[0]
         ctx.window_size_right = window_size[1]
         ctx.has_drab = has_drab
-        ctx.is_delta_q = is_delta_q
+        ctx.func = func
         return P.view(-1, num_heads, head_dim)
 
     @staticmethod
@@ -103,8 +103,8 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
             q,
             k,
             v,
-            seq_offsets_q,
-            seq_offsets_k,
+            cu_seqlens_q,
+            cu_seqlens_k,
             num_contexts,
             num_targets,
             rab_padded,
@@ -118,7 +118,7 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
         window_size_right = ctx.window_size_right
         alpha = ctx.alpha
         has_drab = ctx.has_drab
-        is_delta_q = ctx.is_delta_q
+        func = ctx.func
         with torch.cuda.nvtx.range("hstu_varlen_bwd_kernel"):
             dq, dk, dv, dRab = hstu_attn_cuda.varlen_bwd(
                 dout.view(-1, num_heads, head_dim),
@@ -128,8 +128,8 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
-                seq_offsets_q,
-                seq_offsets_k,
+                cu_seqlens_q,
+                cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 num_contexts,
@@ -140,7 +140,7 @@ class HstuAttnVarlenFunc(torch.autograd.Function):
                 alpha,
                 rab_padded,
                 has_drab,
-                is_delta_q,
+                func,
                 False,  # deterministic
             )
 
@@ -180,8 +180,8 @@ def hstu_attn_varlen_func(
     q,
     k,
     v,
-    seq_offsets_q,
-    seq_offsets_k,
+    cu_seqlens_q,
+    cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
     num_contexts=None,
@@ -191,21 +191,21 @@ def hstu_attn_varlen_func(
     alpha=1.0,
     rab=None,
     has_drab=False,
-    is_delta_q=False,
     kv_cache=None,
     page_offsets=None,
     page_ids=None,
     last_page_lens=None,
-    seq_offsets_t=None,
+    cu_seqlens_t=None,
+    func=None,
 ):
     """
     Arguments:
         q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
         k: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
         v: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
-        seq_offsets_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+        cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
            of the sequences in the batch, used to index into q.
-        seq_offsets_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+        cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
@@ -216,7 +216,6 @@ def hstu_attn_varlen_func(
         alpha: float. Scaling factor between add rab and silu.
         rab: (batch_size, max_seqlen_k, max_seqlen_k). Random access bias for the key.
         has_drab: bool. Whether to apply random access bias for the key.
-        is_delta_q: bool. Whether to apply delta query.
         kv_cache: (page_num, 2, page_size, nheads, headdim). Key and value paged cache.
         page_offsets: (batch_size + 1,). The cumulative sequence lengths of the page_ptr in the batch, used to index into kv_cache.
         page_ids: (page_offsets[-1],). The ids of the pages in the batch.
@@ -236,15 +235,9 @@ def hstu_attn_varlen_func(
         raise ValueError(
             "AssertError: target is True and causal is not True, this is undefined behavior"
         )
-    # if (num_contexts != None and is_delta_q is True) or (num_targets != None and is_delta_q is True):
-    #     raise ValueError("AssertError: delta_q is True, but num_contexts or num_targets is not None, this is undefined behavior")
     if num_targets is None and target_group_size < 1:
         raise ValueError(
             "AssertError: target_group_size should be greater than 0 when target is True"
-        )
-    if max_seqlen_q < max_seqlen_k and window_size != (-1, -1) and is_delta_q is False:
-        raise ValueError(
-            "AssertError: seq_len_q < seq_len_k, is_delta_q should be True, as is_delta_q represents mask behavior under the case"
         )
     if max_seqlen_q > max_seqlen_k:
         raise ValueError(
@@ -255,8 +248,8 @@ def hstu_attn_varlen_func(
         q,
         k,
         v,
-        seq_offsets_q,
-        seq_offsets_k,
+        cu_seqlens_q,
+        cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
         num_contexts,
@@ -266,12 +259,12 @@ def hstu_attn_varlen_func(
         alpha,
         rab,
         has_drab,
-        is_delta_q,
+        func,
         kv_cache,
         page_offsets,
         page_ids,
         last_page_lens,
-        seq_offsets_t,
+        cu_seqlens_t,
     )
 
 
@@ -280,8 +273,8 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
     def forward(
         ctx,
         qkv,
-        seq_offsets_q,
-        seq_offsets_k,
+        cu_seqlens_q,
+        cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
         num_contexts,
@@ -291,7 +284,7 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
         alpha=1.0,
         rab=None,  # need grad
         has_drab=False,
-        is_delta_q=False,
+        func=None,
     ):
         q = qkv[:, 0, :, :].detach()
         k = qkv[:, 1, :, :].detach()
@@ -301,8 +294,8 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
                 q,
                 k,
                 v,
-                seq_offsets_q,
-                seq_offsets_k,
+                cu_seqlens_q,
+                cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 num_contexts,
@@ -312,7 +305,7 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
                 window_size[1],
                 alpha,
                 rab,
-                is_delta_q,
+                func,
                 None,
                 None,
                 None,
@@ -327,8 +320,8 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
             q,
             k,
             v,
-            seq_offsets_q,
-            seq_offsets_k,
+            cu_seqlens_q,
+            cu_seqlens_k,
             num_contexts,
             num_targets,
             rab_padded,
@@ -342,7 +335,7 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
         ctx.window_size_left = window_size[0]
         ctx.window_size_right = window_size[1]
         ctx.has_drab = has_drab
-        ctx.is_delta_q = is_delta_q
+        ctx.func = func
         return P.view(-1, num_heads, head_dim)
 
     @staticmethod
@@ -351,8 +344,8 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
             q,
             k,
             v,
-            seq_offsets_q,
-            seq_offsets_k,
+            cu_seqlens_q,
+            cu_seqlens_k,
             num_contexts,
             num_targets,
             rab_padded,
@@ -366,7 +359,7 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
         window_size_right = ctx.window_size_right
         alpha = ctx.alpha
         has_drab = ctx.has_drab
-        is_delta_q = ctx.is_delta_q
+        func = ctx.func
         qkv_shape = (q.shape[0], 3, q.shape[1], q.shape[2])
         dqkv = torch.empty(qkv_shape, device=q.device, dtype=q.dtype)
         with torch.cuda.nvtx.range("hstu_varlen_bwd_kernel"):
@@ -378,8 +371,8 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
                 dqkv[:, 0, :, :],  # dq
                 dqkv[:, 1, :, :],  # dk
                 dqkv[:, 2, :, :],  # dv
-                seq_offsets_q,
-                seq_offsets_k,
+                cu_seqlens_q,
+                cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 num_contexts,
@@ -390,7 +383,7 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
                 alpha,
                 rab_padded,
                 has_drab,
-                is_delta_q,
+                func,
                 False,  # deterministic
             )
 
@@ -421,8 +414,8 @@ class HstuAttnQKVPackedFunc(torch.autograd.Function):
 
 def hstu_attn_qkvpacked_func(
     qkv,
-    seq_offsets_q,
-    seq_offsets_k,
+    cu_seqlens_q,
+    cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
     num_contexts=None,
@@ -432,14 +425,14 @@ def hstu_attn_qkvpacked_func(
     alpha=1.0,
     rab=None,
     has_drab=False,
-    is_delta_q=False,
+    func=None,
 ):
     """
     Arguments:
         qkv: (batch_size, seqlen, 3, nheads, headdim)
-        seq_offsets_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+        cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
            of the sequences in the batch, used to index into q.
-        seq_offsets_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+        cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
@@ -450,7 +443,6 @@ def hstu_attn_qkvpacked_func(
         alpha: float. Scaling factor between add rab and silu.
         rab: (batch_size, max_seqlen_k, max_seqlen_k). Random access bias for the key.
         has_drab: bool. Whether to apply random access bias for the key.
-        is_delta_q: bool. Whether to apply delta query.
     Return:
         out: (total, nheads, headdim).
     """
@@ -466,19 +458,9 @@ def hstu_attn_qkvpacked_func(
         raise ValueError(
             "AssertError: target is True and causal is not True, this is undefined behavior"
         )
-    if (num_contexts != None and is_delta_q is True) or (
-        num_targets != None and is_delta_q is True
-    ):
-        raise ValueError(
-            "AssertError: delta_q is True, but num_contexts or num_targets is not None, this is undefined behavior"
-        )
     if num_targets is None and target_group_size < 1:
         raise ValueError(
             "AssertError: target_group_size should be greater than 0 when target is True"
-        )
-    if max_seqlen_q < max_seqlen_k and window_size != (-1, -1) and is_delta_q is False:
-        raise ValueError(
-            "AssertError: seq_len_q < seq_len_k, is_delta_q should be True, as is_delta_q represents mask behavior under the case"
         )
     if max_seqlen_q > max_seqlen_k:
         raise ValueError(
@@ -487,8 +469,8 @@ def hstu_attn_qkvpacked_func(
 
     return HstuAttnQKVPackedFunc.apply(
         qkv,
-        seq_offsets_q,
-        seq_offsets_k,
+        cu_seqlens_q,
+        cu_seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
         num_contexts,
@@ -498,7 +480,7 @@ def hstu_attn_qkvpacked_func(
         alpha,
         rab,
         has_drab,
-        is_delta_q,
+        func,
     )
 
 

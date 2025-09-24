@@ -43,6 +43,11 @@ class HSTUGpuKVCacheManager:
                 self.max_seq_len, kv_cache_config.max_attention_window
             )
 
+        assert self.page_size == 32 or self.page_size == 64, (
+            f"Unsupported GPU KV-cache page size: {self.page_size}. "
+            "Current paged HSTU attention kernel only support page size = 32 or 64."
+        )
+
         max_pages_per_batch = math.ceil(
             self.max_batch_size * self.max_seq_len / self.page_size
         )
@@ -147,6 +152,9 @@ class HSTUGpuKVCacheManager:
     def evict(self, user_ids: torch.Tensor):
         for idx in range(len(user_ids)):
             self.impl.remove_sequence(user_ids[idx].item(), None)
+
+    def evict_all(self):
+        self.impl.evict_all_sequences()
 
     def get_user_kvdata_info(self, user_id: int) -> Tuple[int, int]:
         cached_start_pos = self.impl.get_cached_start_position(
@@ -317,7 +325,11 @@ class HSTUGpuKVCacheManager:
 
         user_ids_list = user_ids.tolist()
         total_history_lengths = torch.tensor(
-            [self.impl.get_num_tokens_cached(uid) for uid in user_ids_list],
+            [
+                self.impl.get_num_tokens_cached(uid)
+                + self.impl.get_cached_start_position(uid)
+                for uid in user_ids_list
+            ],
             dtype=torch.int32,
         )
         kv_page_ids = [
@@ -350,7 +362,9 @@ class HSTUGpuKVCacheManager:
     ) -> "KVCacheMetadata":
         batch_size = total_history_lengths.shape[0]
 
-        new_history_offsets = torch.zeros((batch_size + 1,), dtype=torch.int32)
+        new_history_offsets = torch.zeros(
+            (batch_size + 1,), dtype=torch.int32, device=new_history_lengths.device
+        )
         torch.cumsum(new_history_lengths, 0, out=new_history_offsets[1:])
 
         new_history_token_nnz = new_history_offsets[-1].item()

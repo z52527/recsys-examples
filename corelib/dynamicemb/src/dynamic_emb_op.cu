@@ -237,7 +237,41 @@ void find_or_insert(std::shared_ptr<dyn_emb::DynamicVariableBase> table,
                               stream, unique_key, ignore_evict_strategy);
   }
 }
+void find_or_insert_scores(std::shared_ptr<dyn_emb::DynamicVariableBase> table,
+                  const size_t n,
+                  const at::Tensor keys,
+                  const at::Tensor values,
+                  const std::optional<at::Tensor> &scores = std::nullopt,
+                  bool unique_key = true,
+                  bool ignore_evict_strategy = false
+                  )
+{
+  if (not scores and (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu)) {
+    throw std::invalid_argument("Must specify the score when evict strategy is customized or LFU.");
+  }
+  if (n == 0) return;
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  at::Tensor new_tensor = at::empty({static_cast<int64_t>(n)},
+                                    at::TensorOptions().dtype(at::kLong).device(values.device()));
 
+  auto new_tensor_data_ptr = reinterpret_cast<void**>(new_tensor.data_ptr<int64_t>());
+
+  at::Tensor found_tensor = at::empty({static_cast<int64_t>(n)},
+                                      at::TensorOptions().dtype(at::kBool).device(keys.device()));
+
+  auto found_tensor_data_ptr = found_tensor.data_ptr<bool>();
+
+  if (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu) {
+
+      at::Tensor scores_tensor = scores.value();
+      table->find_or_insert(n, keys.data_ptr(), new_tensor_data_ptr, values.data_ptr(), found_tensor_data_ptr,
+                            scores_tensor.data_ptr(), stream, unique_key, ignore_evict_strategy);
+
+  } else {
+    table->find_or_insert(n, keys.data_ptr(), new_tensor_data_ptr, values.data_ptr(), found_tensor_data_ptr, nullptr,
+                          stream, unique_key, ignore_evict_strategy);
+  }
+}
 void find_or_insert_pointers(
   std::shared_ptr<dyn_emb::DynamicVariableBase> table,
   const size_t n,
@@ -543,9 +577,15 @@ void lookup_forward_dense(
     if (tmp_unique_num != 0) {
       at::Tensor tmp_unique_embs =
           create_sub_tensor(unique_embs, unique_embs_offset * dim);
-      auto score = std::make_optional<uint64_t>(py::cast<uint64_t>(scores[i]));
-      find_or_insert(tables[i], tmp_unique_num, tmp_unique_indices[i],
-                    tmp_unique_embs, score);
+      // auto score = std::make_optional<uint64_t>(py::cast<uint64_t>(scores[i]));
+      // find_or_insert(tables[i], tmp_unique_num, tmp_unique_indices[i],
+      //               tmp_unique_embs, score);
+      // 获取这个table对应的frequency output（按indices_begin切分的那部分）
+      int64_t indices_begin = h_table_offsets[i];
+      at::Tensor tmp_scores = create_sub_tensor(accumulated_frequency_output, indices_begin);
+      
+      find_or_insert_scores(tables[i], tmp_unique_num, tmp_unique_indices[i],
+                            tmp_unique_embs, tmp_scores);
       if (use_index_dedup) {
         void *dst_ptr = reinterpret_cast<char *>(unique_idx.data_ptr()) +
                         unique_embs_offset * unique_idx.element_size();
@@ -1049,6 +1089,12 @@ void bind_dyn_emb_op(py::module &m) {
         "Find or insert a key-value pair in the table", py::arg("table"),
         py::arg("n"), py::arg("keys"), py::arg("values"),
         py::arg("score") = py::none(), py::arg("unique_key") = true, 
+        py::arg("ignore_evict_strategy") = false);
+
+  m.def("find_or_insert_scores", &find_or_insert_scores,
+        "Find or insert a key-value pair in the table with scores tensor", py::arg("table"),
+        py::arg("n"), py::arg("keys"), py::arg("values"),
+        py::arg("scores") = py::none(), py::arg("unique_key") = true, 
         py::arg("ignore_evict_strategy") = false);
 
   m.def("find_or_insert_pointers", &find_or_insert_pointers,

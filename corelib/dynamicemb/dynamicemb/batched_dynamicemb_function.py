@@ -332,7 +332,6 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
             print(f"[DEBUG] Received frequency counters in lookup: {frequency_counts_uint64[:10]}...")  # Debug info
             print(f"[DEBUG] frequency_counts_uint64 dtype: {frequency_counts_uint64.dtype}, device: {frequency_counts_uint64.device}")
             print(f"[DEBUG] indices dtype: {indices.dtype}, device: {indices.device}")
-            
             # TODO: Use frequency_counts_uint64 for LFU strategy
 
         if training:

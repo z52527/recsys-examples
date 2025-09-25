@@ -515,7 +515,7 @@ void lookup_forward_dense(
   for (int i = 0; i < table_num; ++i) {
     tmp_unique_indices[i] = at::empty_like(indices);
   }
-  at::Tensor accumulated_frequency_output = at::zeros_like(frequency_counts_uint64);  // 初始化为0，与输入相同大小和类型
+  at::Tensor accumulated_frequency_output = at::zeros_like(indices, at::TensorOptions().dtype(at::kUInt64).device(indices.device()));  // 初始化为0，与输入相同大小和类型
 
   for (int i = 0; i < table_num; ++i) {
     int64_t indices_begin = h_table_offsets[i];
@@ -580,9 +580,12 @@ void lookup_forward_dense(
       // auto score = std::make_optional<uint64_t>(py::cast<uint64_t>(scores[i]));
       // find_or_insert(tables[i], tmp_unique_num, tmp_unique_indices[i],
       //               tmp_unique_embs, score);
-      // 获取这个table对应的frequency output（按indices_begin切分的那部分）
+      // unique操作将累加后的频率写回到accumulated_frequency_output中每个table对应的section
+      // 但是只有前tmp_unique_num个位置包含有效的累加频率值
+      //TODO: 确认slice消耗时间，不进行slice是否会越界。
       int64_t indices_begin = h_table_offsets[i];
-      at::Tensor tmp_scores = create_sub_tensor(accumulated_frequency_output, indices_begin);
+
+      at::Tensor tmp_scores = create_sub_tensor(accumulated_frequency_output, indices_begin).slice(0, 0, tmp_unique_num);
       
       find_or_insert_scores(tables[i], tmp_unique_num, tmp_unique_indices[i],
                             tmp_unique_embs, tmp_scores);

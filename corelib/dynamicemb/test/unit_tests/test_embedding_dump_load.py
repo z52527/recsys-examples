@@ -133,7 +133,7 @@ def apply_dmp(
     model: torch.nn.Module,
     optimizer_kwargs: Dict[str, Any],
     device: torch.device,
-    score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.STEP,
+    score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.LFU,
 ):
     eb_configs = []
     dynamicemb_options_dict = {}
@@ -176,7 +176,7 @@ def apply_dmp(
 
     sharder = DynamicEmbeddingCollectionSharder(
         fused_params=fused_params,
-        use_index_dedup=False,
+        use_index_dedup=True,
     )
     plan = planner.collective_plan(model, [sharder], dist.GroupMember.WORLD)
 

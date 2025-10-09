@@ -179,25 +179,17 @@ def _determine_output_weights(kjt, pos, bucketize_pos, bucketized_weights):
     if not bucketize_pos:
         return bucketized_weights
     
-    # Check if input weights might be frequency counters
-    # Heuristic: if we have weights and they're all integers when converted back,
-    # they might be frequency counters that should be preserved
     if (kjt.weights_or_none() is not None and 
         bucketized_weights is not None):
-        # Check if the bucketized weights look like frequency counters
-        # (they should be non-negative and reasonably small integers)
         weights_as_int = bucketized_weights.long()
         weights_back_to_float = weights_as_int.float()
         
-        # If the weights are all integers and non-negative, likely frequency counters
         if torch.allclose(bucketized_weights, weights_back_to_float, atol=1e-6) and torch.all(bucketized_weights >= 0):
-            # These look like frequency counters, preserve them
             print(f"[DEBUG-5] Preserving frequency counters, first 5: {bucketized_weights[:5]}")
             return bucketized_weights
         else:
             print(f"[DEBUG-6] Weights don't look like frequency counters, using pos")
     
-    # Default behavior: use pos if bucketize_pos is True
     result = pos if bucketize_pos else bucketized_weights
     print(f"[DEBUG-7] Returning {'pos' if bucketize_pos else 'bucketized_weights'}, first 5: {result[:5] if result is not None else 'None'}")
     return result

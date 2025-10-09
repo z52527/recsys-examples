@@ -45,7 +45,8 @@ from torchrec.distributed.types import (
 from torchrec.modules.embedding_modules import EmbeddingCollection
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
-from ..dynamicemb_config import DynamicEmbKernel
+from ..dynamicemb_config import DynamicEmbKernel, DynamicEmbScoreStrategy
+from ..planner.planner import DynamicEmbParameterSharding
 from ..planner.rw_sharding import RwSequenceDynamicEmbeddingSharding
 from ..unique_op import UniqueOp
 
@@ -69,6 +70,12 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
     supported_compute_kernels: List[str] = [
         kernel.value for kernel in EmbeddingComputeKernel
     ] + [DynamicEmbKernel]
+
+    def __init__(self, *args, score_strategy: Optional[DynamicEmbScoreStrategy] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Store the global score strategy
+        self._score_strategy = score_strategy
+        self._is_lfu_enabled = (score_strategy == DynamicEmbScoreStrategy.LFU) if score_strategy else False
 
     @classmethod
     def create_embedding_sharding(
@@ -118,6 +125,9 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
         ctx: Optional[EmbeddingCollectionContext] = None,
     ) -> None:
         super()._create_hash_size_info(feature_names)
+        
+        # _is_lfu_enabled is already set in __init__ from score_strategy parameter
+        
         if self._use_index_dedup:
             reserve_keys = torch.tensor(2, dtype=torch.int64, device=self._device)
             reserve_vals = torch.tensor(2, dtype=torch.uint64, device=self._device)
@@ -226,30 +236,51 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                 new_offsets = torch.empty_like(offsets, device=self._device)
                 new_lengths = torch.empty_like(lengths, device=self._device)
                 
-                # we only need to pass the output frequency counters to the dedup_input_indices function here
-                # TODO: Add strategy check for frequency_counters(ONLY LFU need frequency_counters)
-                # For now, we always create frequency_counters but only use them if LFU strategy is enabled
-                frequency_counters = torch.zeros_like(indices_input, device=self._device, dtype=torch.uint64)
+                # Only create frequency_counters if LFU strategy is enabled
+                # For non-LFU strategies, pass empty tensor (C++ extension will check size)
+                if self._is_lfu_enabled:
+                    frequency_counters = torch.zeros_like(indices_input, device=self._device, dtype=torch.uint64)
+                    dedup_input_indices(
+                        indices_input,
+                        offsets,
+                        h_table_offset,
+                        d_table_offset,
+                        table_num,
+                        local_batchsize,
+                        reverse_idx,
+                        h_unique_nums,
+                        d_unique_nums,
+                        h_unique_offsets,
+                        d_unique_offsets,
+                        unique_idx_list,
+                        new_offsets,
+                        new_lengths,
+                        self._device_num_sms,
+                        self._unique_op,
+                        frequency_counters
+                    )
+                else:
+                    # Empty tensor for non-LFU strategies
+                    dedup_input_indices(
+                        indices_input,
+                        offsets,
+                        h_table_offset,
+                        d_table_offset,
+                        table_num,
+                        local_batchsize,
+                        reverse_idx,
+                        h_unique_nums,
+                        d_unique_nums,
+                        h_unique_offsets,
+                        d_unique_offsets,
+                        unique_idx_list,
+                        new_offsets,
+                        new_lengths,
+                        self._device_num_sms,
+                        self._unique_op,
+                    )
 
-                dedup_input_indices(
-                    indices_input,
-                    offsets,
-                    h_table_offset,
-                    d_table_offset,
-                    table_num,
-                    local_batchsize,
-                    reverse_idx,
-                    h_unique_nums,
-                    d_unique_nums,
-                    h_unique_offsets,
-                    d_unique_offsets,
-                    unique_idx_list,
-                    new_offsets,
-                    new_lengths,
-                    self._device_num_sms,
-                    self._unique_op,
-                    frequency_counters
-                )
+
                 unique_num = h_unique_offsets[-1].item()
                 unique_idx = torch.empty(
                     unique_num, dtype=torch.int64, device=indices.device
@@ -281,7 +312,9 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
 
                 ctx.input_features.append(input_feature)
                 ctx.reverse_indices.append(reverse_idx)
-                ctx.frequency_counters.append(frequency_counters) # TODO: check if this is correct
+                # Only store frequency_counters if LFU is enabled
+                if self._is_lfu_enabled:
+                    ctx.frequency_counters.append(frequency_counters)
                 features_by_shards.append(dedup_features)
         return features_by_shards
 
@@ -310,8 +343,8 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
 
             awaitables = []
             for i, (input_dist, features) in enumerate(zip(self._input_dists, features_by_shards)):
-                # Attach frequency counters as weights if available and LFU strategy is used
-                if len(ctx.frequency_counters) > i:
+                # Attach frequency counters as weights if LFU strategy is enabled
+                if self._use_index_dedup and self._is_lfu_enabled and len(ctx.frequency_counters) > i:
                     frequency_counters = ctx.frequency_counters[i]
                     print(f"[DEBUG-1] Setting weights from frequency_counters, shape: {frequency_counters.shape}, first 5: {frequency_counters[:5]}")
                     # Convert frequency counters to float for weights and create new KJT
@@ -352,6 +385,11 @@ class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):
     The usage is completely consistent with TorchREC's EmbeddingCollectionSharder.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Global score strategy extracted from params during shard
+        self._global_score_strategy: Optional[DynamicEmbScoreStrategy] = None
+
     def shard(
         self,
         module: EmbeddingCollection,
@@ -360,6 +398,19 @@ class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):
         device: Optional[torch.device] = None,
         module_fqn: Optional[str] = None,
     ) -> ShardedEmbeddingCollection:
+        # Extract global score_strategy from params (only once, as it's a global configuration)
+        # Strategy is expected to be consistent across all tables
+        if self._global_score_strategy is None:
+            for param_name, param_sharding in params.items():
+                if isinstance(param_sharding, DynamicEmbParameterSharding):
+                    if (
+                        param_sharding.dynamicemb_options
+                        and param_sharding.dynamicemb_options.score_strategy is not None
+                    ):
+                        self._global_score_strategy = param_sharding.dynamicemb_options.score_strategy
+                        break
+        
+        # Pass score_strategy directly as a parameter to ShardedDynamicEmbeddingCollection
         return ShardedDynamicEmbeddingCollection(
             module,
             params,
@@ -368,4 +419,5 @@ class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):
             device,
             qcomm_codecs_registry=self.qcomm_codecs_registry,
             use_index_dedup=self._use_index_dedup,
+            score_strategy=self._global_score_strategy,  # Pass as direct parameter
         )

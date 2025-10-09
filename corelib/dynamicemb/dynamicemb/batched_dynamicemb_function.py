@@ -38,6 +38,7 @@ from dynamicemb_extensions import (
     lookup_forward_dense_eval,
     reduce_grads,
     segmented_unique,
+    EvictStrategy,
 )
 
 
@@ -324,15 +325,18 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
         feature_batch_size = offsets.shape[0] - 1
         batch_size = feature_batch_size // feature_num
         assert feature_batch_size % feature_num == 0
-        
+                # 检查是否启用 LFU 策略
+        is_lfu_enabled = False
+        if len(tables) > 0:
+            is_lfu_enabled = (tables[0].evict_strategy() == EvictStrategy.KLfu)
+            print(f"[DEBUG] is_lfu_enabled: {is_lfu_enabled}")
         # Process frequency counters for LFU strategy
-        if frequency_counters is not None:
+        if frequency_counters is not None and is_lfu_enabled:
             # Convert frequency counters to uint64 for LFU processing (CounterType requirement)
             frequency_counts_uint64 = frequency_counters.to(torch.uint64)
             print(f"[DEBUG] Received frequency counters in lookup: {frequency_counts_uint64[:10]}...")  # Debug info
             print(f"[DEBUG] frequency_counts_uint64 dtype: {frequency_counts_uint64.dtype}, device: {frequency_counts_uint64.device}")
             print(f"[DEBUG] indices dtype: {indices.dtype}, device: {indices.device}")
-            # TODO: Use frequency_counts_uint64 for LFU strategy
 
         if training:
             d_unique_offsets = torch.zeros(
@@ -372,29 +376,53 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
             unique_idx = torch.empty_like(indices, dtype=indices.dtype, device=device)
             h_unique_nums = torch.empty(table_num, dtype=torch.uint64, device="cpu")
             d_unique_nums = torch.empty(table_num, dtype=torch.uint64, device=device)
-            lookup_forward_dense(
-                tables,
-                indices,
-                offsets,
-                scores,
-                table_offsets_in_feature,
-                table_offsets,
-                table_num,
-                batch_size,
-                dim,
-                use_index_dedup,
-                unique_idx,
-                reverse_idx,
-                h_unique_nums,
-                d_unique_nums,
-                h_unique_offsets,
-                d_unique_offsets,
-                unique_embs,
-                output_embs,
-                device_num_sms,
-                unique_op,
-                frequency_counts_uint64,
-            )
+            if is_lfu_enabled:
+                lookup_forward_dense(
+                    tables,
+                    indices,
+                    offsets,
+                    scores,
+                    table_offsets_in_feature,
+                    table_offsets,
+                    table_num,
+                    batch_size,
+                    dim,
+                    use_index_dedup,
+                    unique_idx,
+                    reverse_idx,
+                    h_unique_nums,
+                    d_unique_nums,
+                    h_unique_offsets,
+                    d_unique_offsets,
+                    unique_embs,
+                    output_embs,
+                    device_num_sms,
+                    unique_op,
+                    frequency_counts_uint64,
+                )
+            else:
+                lookup_forward_dense(
+                    tables,
+                    indices,
+                    offsets,
+                    scores,
+                    table_offsets_in_feature,
+                    table_offsets,
+                    table_num,
+                    batch_size,
+                    dim,
+                    use_index_dedup,
+                    unique_idx,
+                    reverse_idx,
+                    h_unique_nums,
+                    d_unique_nums,
+                    h_unique_offsets,
+                    d_unique_offsets,
+                    unique_embs,
+                    output_embs,
+                    device_num_sms,
+                    unique_op,
+                )      
             if use_index_dedup:
                 unique_idx_forback = torch.empty(
                     h_unique_offsets[-1], dtype=indices.dtype, device=device

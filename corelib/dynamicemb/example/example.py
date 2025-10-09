@@ -391,7 +391,7 @@ def get_planner(device, eb_configs, batch_size):
                 initializer_args=DynamicEmbInitializerArgs(
                     mode=DynamicEmbInitializerMode.NORMAL
                 ),
-                score_strategy=DynamicEmbScoreStrategy.LFU,
+                score_strategy=DynamicEmbScoreStrategy.TIMESTAMP,
             ),
         )
 

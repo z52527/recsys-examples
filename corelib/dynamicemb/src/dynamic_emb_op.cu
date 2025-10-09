@@ -479,7 +479,7 @@ void lookup_forward_dense(
     const at::Tensor h_unique_offsets, const at::Tensor d_unique_offsets,
     const at::Tensor unique_embs, const at::Tensor output_embs,
     int device_num_sms, std::shared_ptr<dyn_emb::UniqueOpBase> unique_op,
-    const at::Tensor frequency_counts_uint64) {
+    const c10::optional<at::Tensor> frequency_counts_uint64 = c10::nullopt) {
 
   if (!offsets.is_cuda() || !indices.is_cuda()) {
     throw std::runtime_error(
@@ -515,7 +515,11 @@ void lookup_forward_dense(
   for (int i = 0; i < table_num; ++i) {
     tmp_unique_indices[i] = at::empty_like(indices);
   }
-  at::Tensor accumulated_frequency_output = at::zeros_like(indices, at::TensorOptions().dtype(at::kUInt64).device(indices.device()));  // 初始化为0，与输入相同大小和类型
+  at::Tensor accumulated_frequency_output
+  if (frequency_counts_uint64.has_value()) {
+    accumulated_frequency_output = at::zeros_like(indices, at::TensorOptions().dtype(at::kUInt64).device(indices.device()));  // 初始化为0，与输入相同大小和类型
+  }   
+
 
   for (int i = 0; i < table_num; ++i) {
     int64_t indices_begin = h_table_offsets[i];
@@ -535,28 +539,34 @@ void lookup_forward_dense(
       at::Tensor tmp_d_unique_num = create_sub_tensor(d_unique_nums, i);
 
       at::Tensor previous_d_unique_num = create_sub_tensor(d_unique_offsets, i);
-      //TODO: Only LFU needs frequency_counts_uint64
-      //input
-      at::Tensor tmp_frequency_counts_uint64 = create_sub_tensor(frequency_counts_uint64, indices_begin);
-      //output
-      at::Tensor tmp_frequency_output_counter = create_sub_tensor(accumulated_frequency_output, indices_begin);
-      unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
-                        tmp_unique_indices[i], tmp_d_unique_num, stream,
-                        previous_d_unique_num, tmp_frequency_output_counter, tmp_frequency_counts_uint64);
       
-      // unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
-      //                   tmp_unique_indices[i], tmp_d_unique_num, stream,
-      //                   previous_d_unique_num);            
+      at::Tensor tmp_frequency_counts_uint64;
+      at::Tensor tmp_frequency_output_counter;
+      
+      if (frequency_counts_uint64.has_value()) {
+          // LFU mode: use input frequency counts
+          tmp_frequency_counts_uint64 = create_sub_tensor(frequency_counts_uint64.value(), indices_begin);
+          tmp_frequency_output_counter = create_sub_tensor(accumulated_frequency_output, indices_begin);
+          unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
+                           tmp_unique_indices[i], tmp_d_unique_num, stream,
+                           previous_d_unique_num, tmp_frequency_output_counter, tmp_frequency_counts_uint64);
+      } else {
+          // Non-LFU mode: call unique without frequency counting
+          unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
+                           tmp_unique_indices[i], tmp_d_unique_num, stream,
+                           previous_d_unique_num);
+      }
+
       dyn_emb::add_offset(d_unique_nums.data_ptr(), d_unique_offsets.data_ptr(),
                           i, unique_num_type, unique_offset_type, stream);
     }
   }
-  // Copy first 5 elements to CPU for debug
-  at::Tensor debug_tensor = accumulated_frequency_output.slice(0, 0, 5).cpu();
-  auto debug_ptr = debug_tensor.data_ptr<uint64_t>();
-  printf("accumulated_frequency_output first 5: [%lu, %lu, %lu, %lu, %lu]\n",
-        (unsigned long)debug_ptr[0], (unsigned long)debug_ptr[1], (unsigned long)debug_ptr[2], 
-        (unsigned long)debug_ptr[3], (unsigned long)debug_ptr[4]);
+  // // Copy first 5 elements to CPU for debug
+  // at::Tensor debug_tensor = accumulated_frequency_output.slice(0, 0, 5).cpu();
+  // auto debug_ptr = debug_tensor.data_ptr<uint64_t>();
+  // printf("accumulated_frequency_output first 5: [%lu, %lu, %lu, %lu, %lu]\n",
+  //       (unsigned long)debug_ptr[0], (unsigned long)debug_ptr[1], (unsigned long)debug_ptr[2], 
+  //       (unsigned long)debug_ptr[3], (unsigned long)debug_ptr[4]);
   AT_CUDA_CHECK(
       cudaMemcpyAsync(h_unique_nums.data_ptr(), d_unique_nums.data_ptr(),
                       d_unique_nums.numel() * d_unique_nums.element_size(),
@@ -583,12 +593,19 @@ void lookup_forward_dense(
       // unique操作将累加后的频率写回到accumulated_frequency_output中每个table对应的section
       // 但是只有前tmp_unique_num个位置包含有效的累加频率值
       //TODO: 确认slice消耗时间，不进行slice是否会越界。
-      int64_t indices_begin = h_table_offsets[i];
+      if (frequency_counts_uint64.has_value()) {
+        int64_t indices_begin = h_table_offsets[i];
 
-      at::Tensor tmp_scores = create_sub_tensor(accumulated_frequency_output, indices_begin).slice(0, 0, tmp_unique_num);
-      
-      find_or_insert_scores(tables[i], tmp_unique_num, tmp_unique_indices[i],
-                            tmp_unique_embs, tmp_scores);
+        at::Tensor tmp_scores = create_sub_tensor(accumulated_frequency_output, indices_begin).slice(0, 0, tmp_unique_num);
+        
+        find_or_insert_scores(tables[i], tmp_unique_num, tmp_unique_indices[i],
+                              tmp_unique_embs, tmp_scores);
+      } else {
+        auto score = std::make_optional<uint64_t>(py::cast<uint64_t>(scores[i]));
+        find_or_insert(tables[i], tmp_unique_num, tmp_unique_indices[i],
+                    tmp_unique_embs, score);
+      }
+
       if (use_index_dedup) {
         void *dst_ptr = reinterpret_cast<char *>(unique_idx.data_ptr()) +
                         unique_embs_offset * unique_idx.element_size();
@@ -1211,7 +1228,7 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("d_unique_nums"), py::arg("h_unique_offsets"),
         py::arg("d_unique_offsets"), py::arg("unique_embs"),
         py::arg("output_embs"), py::arg("device_num_sms"),
-        py::arg("unique_op"), py::arg("frequency_counts_uint64"));
+        py::arg("unique_op"), py::arg("frequency_counts_uint64")= c10::nullopt);
 
   m.def("lookup_forward_dense_eval", &lookup_forward_dense_eval,
         "lookup forward dense eval for globally deduplicated keys", py::arg("tables"),

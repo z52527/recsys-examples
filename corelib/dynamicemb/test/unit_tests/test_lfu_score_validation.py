@@ -41,6 +41,7 @@ from test_embedding_dump_load import (
 )
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
+from dynamicemb.dump_load import export_keys_values
 
 def generate_deterministic_sparse_features_with_frequency_tracking(
     num_embedding_collections: int,
@@ -305,6 +306,75 @@ def load_table_keys_scores_only(
     return table_key_scores
 
 
+def local_DynamicEmbDump(
+    model: nn.Module,
+    table_names: Optional[Dict[str, List[str]]] = None,
+    optim: Optional[bool] = False,
+    pg: Optional[dist.ProcessGroup] = None,
+) -> Dict[str, Dict[int, int]]:
+    """
+    Load scores from dynamic embedding tables directly (without disk I/O).
+    
+    Returns:
+        Dict[table_name, Dict[key, score]]: Scores organized by table name
+    """
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    dist.barrier(group=pg, device_ids=[torch.cuda.current_device()])
+
+    # find embedding collections
+    collections_list: List[Tuple[str, str, nn.Module]] = find_sharded_modules(model, "")
+
+    rank = dist.get_rank(group=pg)
+    device = torch.device(f"cuda:{torch.cuda.current_device()}") if torch.cuda.is_available() else torch.device("cpu")
+    batch_size = 65536
+    all_table_scores = {}  # 按表名组织scores
+    
+    for _, current_collection in enumerate(collections_list):
+        (
+            current_collection_path,
+            current_collection_name,
+            current_collection_module,
+        ) = current_collection
+        current_dynamic_emb_module_list = get_dynamic_emb_module(
+            current_collection_module
+        )
+
+        for _, dynamic_emb_module in enumerate(current_dynamic_emb_module_list):
+            current_table_names = dynamic_emb_module.table_names
+            current_tables = dynamic_emb_module.tables
+
+            for dynamic_table_name, dynamic_table in zip(
+                current_table_names, current_tables
+            ):
+                if table_names is not None and dynamic_table_name not in set(
+                    table_names[current_collection_name]
+                ):
+                    continue
+                
+                # 初始化当前表的scores字典
+                table_key_scores = {}
+                
+                for keys, embeddings, opt_states, scores in export_keys_values(
+                   dynamic_table, device, batch_size
+                ):
+                    for key, score in zip(keys, scores):
+                        table_key_scores[int(key)] = int(score)
+                
+                # 按表名存储
+                all_table_scores[dynamic_table_name] = table_key_scores
+
+
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    dist.barrier(group=pg, device_ids=[torch.cuda.current_device()])
+
+    return all_table_scores
+
 def validate_lfu_scores(
     expected_frequencies: Dict[str, Dict[int, int]],
     actual_scores: Dict[str, Dict[int, int]],
@@ -468,6 +538,9 @@ def test_lfu_score_validation(
     print(f"\nLoading keys and scores from dump files...")
     actual_scores = load_dumped_keys_scores_only(save_path, model, optim=True)
 
+    score2 = local_DynamicEmbDump(model, optim=True)
+    assert score2 == actual_scores
+    
     print(f"\nActual scores:")
     for table_name, scores in actual_scores.items():
         print(f"  {table_name}: {len(scores)} keys")

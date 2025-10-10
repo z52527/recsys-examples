@@ -479,6 +479,7 @@ void lookup_forward_dense(
     const at::Tensor h_unique_offsets, const at::Tensor d_unique_offsets,
     const at::Tensor unique_embs, const at::Tensor output_embs,
     int device_num_sms, std::shared_ptr<dyn_emb::UniqueOpBase> unique_op,
+    const c10::optional<bool> is_lfu_enabled = false,
     const c10::optional<at::Tensor> frequency_counts_uint64 = c10::nullopt) {
 
   if (!offsets.is_cuda() || !indices.is_cuda()) {
@@ -516,7 +517,7 @@ void lookup_forward_dense(
     tmp_unique_indices[i] = at::empty_like(indices);
   }
   at::Tensor accumulated_frequency_output;
-  if (frequency_counts_uint64.has_value()) {
+  if (is_lfu_enabled.value()) {
     accumulated_frequency_output = at::zeros_like(indices, at::TensorOptions().dtype(at::kUInt64).device(indices.device()));  // 初始化为0，与输入相同大小和类型
   }   
 
@@ -550,6 +551,11 @@ void lookup_forward_dense(
           unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
                            tmp_unique_indices[i], tmp_d_unique_num, stream,
                            previous_d_unique_num, tmp_frequency_output_counter, tmp_frequency_counts_uint64);
+      } else if (is_lfu_enabled.value()) {
+        tmp_frequency_output_counter = create_sub_tensor(accumulated_frequency_output, indices_begin);
+        unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
+                         tmp_unique_indices[i], tmp_d_unique_num, stream,
+                         previous_d_unique_num, tmp_frequency_output_counter);
       } else {
           // Non-LFU mode: call unique without frequency counting
           unique_op->unique(tmp_indices, indices_length, tmp_reverse_idx,
@@ -1228,6 +1234,7 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("d_unique_nums"), py::arg("h_unique_offsets"),
         py::arg("d_unique_offsets"), py::arg("unique_embs"),
         py::arg("output_embs"), py::arg("device_num_sms"),
+        py::arg("is_lfu_enabled")=false,
         py::arg("unique_op"), py::arg("frequency_counts_uint64")= c10::nullopt);
 
   m.def("lookup_forward_dense_eval", &lookup_forward_dense_eval,

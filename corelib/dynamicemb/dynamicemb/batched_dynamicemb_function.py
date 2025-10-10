@@ -347,7 +347,8 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
                 f"[DEBUG] frequency_counts_uint64 dtype: {frequency_counts_uint64.dtype}, device: {frequency_counts_uint64.device}"
             )
             print(f"[DEBUG] indices dtype: {indices.dtype}, device: {indices.device}")
-
+        elif frequency_counters is None and is_lfu_enabled:
+            frequency_counts_uint64 = None
         if training:
             d_unique_offsets = torch.zeros(
                 table_num + 1, dtype=torch.uint64, device=device
@@ -408,6 +409,7 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
                     output_embs,
                     device_num_sms,
                     unique_op,
+                    is_lfu_enabled,
                     frequency_counts_uint64,
                 )
             else:

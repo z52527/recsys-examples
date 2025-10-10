@@ -134,6 +134,7 @@ def apply_dmp(
     optimizer_kwargs: Dict[str, Any],
     device: torch.device,
     score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.LFU,
+    use_index_dedup: bool = False,
 ):
     eb_configs = []
     dynamicemb_options_dict = {}
@@ -176,7 +177,7 @@ def apply_dmp(
 
     sharder = DynamicEmbeddingCollectionSharder(
         fused_params=fused_params,
-        use_index_dedup=True,
+        use_index_dedup=use_index_dedup,
     )
     plan = planner.collective_plan(model, [sharder], dist.GroupMember.WORLD)
 
@@ -196,6 +197,8 @@ def create_model(
     num_embeddings: List[int],
     embedding_dim: int,
     optimizer_kwargs: Dict[str, Any],
+    score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.LFU,
+    use_index_dedup: bool = False,
 ):
     ebc_list = []
     for embedding_collection_id in range(num_embedding_collections):
@@ -224,7 +227,7 @@ def create_model(
     )
 
     model = apply_dmp(
-        model, optimizer_kwargs, torch.device(f"cuda:{torch.cuda.current_device()}")
+        model, optimizer_kwargs, torch.device(f"cuda:{torch.cuda.current_device()}"), score_strategy=score_strategy, use_index_dedup=use_index_dedup
     )
     return model
 

@@ -369,6 +369,7 @@ class ShardedDynamicEmbeddingCollection(ShardedEmbeddingCollection):
                         f"[DEBUG-2] After setting _weights, weights: {features.weights_or_none()[:5] if features.weights_or_none() is not None else 'None'}"
                     )
                 else:
+                    features._weights = None
                     print(
                         f"[DEBUG-3] No frequency_counters for shard {i}, ctx.frequency_counters length: {len(ctx.frequency_counters)}"
                     )

@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from dynamicemb import DynamicEmbScoreStrategy, DynamicEmbTableOptions
 from dynamicemb.dump_load import (
     DynamicEmbDump,
     find_sharded_modules,
@@ -136,8 +137,13 @@ def load_dumped_keys_scores_only(
     Returns:
         Dict[table_name, Dict[key, score]]
     """
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    dist.barrier(group=pg, device_ids=[torch.cuda.current_device()])
+    
     if not os.path.exists(path):
         raise Exception("can't find path to load, path:", path)
+
 
     collections_list = find_sharded_modules(model, "")
     if len(collections_list) == 0:
@@ -187,7 +193,10 @@ def load_dumped_keys_scores_only(
                 print(
                     f"Loaded {len(table_scores)} key-score pairs for {dynamic_table_name}"
                 )
-
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    dist.barrier(group=pg, device_ids=[torch.cuda.current_device()])
+    
     return all_table_scores
 
 
@@ -455,6 +464,7 @@ def validate_lfu_scores(
     is_flag=True,
     help="Use dump files for validation instead of direct model access",
 )
+@click.option("--use-index-dedup", is_flag=True, help="Use index dedup")
 def test_lfu_score_validation(
     num_embedding_collections: int,
     num_embeddings: str,
@@ -467,12 +477,13 @@ def test_lfu_score_validation(
     tolerance: float,
     debug: bool,
     use_dump_validation: bool,
+    use_index_dedup: bool,
 ):
     """Test LFU score correctness by comparing with naive frequency counting."""
-    if dist.get_world_size() > 1:
-        raise ValueError(
-            "Multi-rank LFU testing not yet supported due to all-to-all complexity"
-        )
+    # if dist.get_world_size() > 1:
+    #     raise ValueError(
+    #         "Multi-rank LFU testing not yet supported due to all-to-all complexity"
+    #     )
 
     num_embeddings = [int(v) for v in num_embeddings.split(",")]
     multi_hot_sizes = [int(v) for v in multi_hot_sizes.split(",")]
@@ -490,7 +501,7 @@ def test_lfu_score_validation(
     print(f"  - Iterations: {num_iterations}")
     print(f"  - Tolerance: {tolerance}")
     print(f"  - Use dump validation: {use_dump_validation}")
-
+    print(f"  - Use index dedup: {use_index_dedup}")
     # Create model
     optimizer_kwargs = get_optimizer_kwargs(optimizer_type)
     model = create_model(
@@ -498,6 +509,8 @@ def test_lfu_score_validation(
         num_embeddings=num_embeddings,
         embedding_dim=embedding_dim,
         optimizer_kwargs=optimizer_kwargs,
+        score_strategy=DynamicEmbScoreStrategy.LFU,
+        use_index_dedup=use_index_dedup,
     )
 
     # Generate features with frequency tracking

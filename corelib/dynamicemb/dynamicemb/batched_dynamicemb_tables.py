@@ -657,10 +657,14 @@ class BatchedDynamicEmbeddingTables(nn.Module):
         batch_size_per_feature_per_rank: Optional[List[List[int]]] = None,
         total_unique_indices: Optional[int] = None,
     ) -> List[Tensor]:
-        print(f"[DEBUG-8] BatchedDynamicEmbeddingTables.forward: per_sample_weights is {'not None' if per_sample_weights is not None else 'None'}")
+        print(
+            f"[DEBUG-8] BatchedDynamicEmbeddingTables.forward: per_sample_weights is {'not None' if per_sample_weights is not None else 'None'}"
+        )
         if per_sample_weights is not None:
-            print(f"[DEBUG-9] per_sample_weights shape: {per_sample_weights.shape}, first 5: {per_sample_weights[:5]}")
-            
+            print(
+                f"[DEBUG-9] per_sample_weights shape: {per_sample_weights.shape}, first 5: {per_sample_weights[:5]}"
+            )
+
         if indices.dtype != self.index_type:
             indices = indices.to(self.index_type)
 

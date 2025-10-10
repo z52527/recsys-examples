@@ -27,6 +27,7 @@ from dynamicemb.optimizer import BaseDynamicEmbeddingOptimizer
 from dynamicemb.unique_op import UniqueOp
 from dynamicemb_extensions import (
     DynamicEmbTable,
+    EvictStrategy,
     find_and_initialize,
     find_or_insert,
     get_table_range,
@@ -38,7 +39,6 @@ from dynamicemb_extensions import (
     lookup_forward_dense_eval,
     reduce_grads,
     segmented_unique,
-    EvictStrategy,
 )
 
 
@@ -65,7 +65,9 @@ class DynamicEmbeddingBagFunction(torch.autograd.Function):
         optimizer: BaseDynamicEmbeddingOptimizer,
         training: bool,
         eval_initializers: List[DynamicEmbInitializerArgs],
-        frequency_counters: Optional[torch.Tensor] = None,  # Add frequency counters parameter
+        frequency_counters: Optional[
+            torch.Tensor
+        ] = None,  # Add frequency counters parameter
         *args,
     ):
         # TODO: remove unnecessary params.
@@ -82,15 +84,17 @@ class DynamicEmbeddingBagFunction(torch.autograd.Function):
         feature_batch_size = offsets.shape[0] - 1
         batch_size = feature_batch_size // feature_num
         assert feature_batch_size % feature_num == 0
-        
+
         # Process frequency counters for LFU strategy
         if frequency_counters is not None:
             # Convert frequency counters back to uint64 for LFU processing
             frequency_counts_uint64 = frequency_counters.long()
-            print(f"[DEBUG] Received frequency counters in EmbBag lookup: {frequency_counts_uint64[:10]}...")  # Debug info
-            
+            print(
+                f"[DEBUG] Received frequency counters in EmbBag lookup: {frequency_counts_uint64[:10]}..."
+            )  # Debug info
+
             # TODO: Use frequency_counts_uint64 for LFU strategy in pooled embeddings
-        
+
         # The offsets is on device in torchrec, however, the unique_op and lookup_op are done table by table.
         # So we need to know one index belong to which table, to let op know the boundary.
         # Therefore, copy offsets to cpu is necessary, otherwise, many things will be coupled together.
@@ -315,7 +319,9 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
         optimizer: BaseDynamicEmbeddingOptimizer,
         training: bool,
         eval_initializers: List[DynamicEmbInitializerArgs],
-        frequency_counters: Optional[torch.Tensor] = None,  # Add frequency counters parameter
+        frequency_counters: Optional[
+            torch.Tensor
+        ] = None,  # Add frequency counters parameter
         *args,
     ):
         # TODO:need check dimension is right
@@ -325,17 +331,21 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
         feature_batch_size = offsets.shape[0] - 1
         batch_size = feature_batch_size // feature_num
         assert feature_batch_size % feature_num == 0
-                # 检查是否启用 LFU 策略
+        # 检查是否启用 LFU 策略
         is_lfu_enabled = False
         if len(tables) > 0:
-            is_lfu_enabled = (tables[0].evict_strategy() == EvictStrategy.KLfu)
+            is_lfu_enabled = tables[0].evict_strategy() == EvictStrategy.KLfu
             print(f"[DEBUG] is_lfu_enabled: {is_lfu_enabled}")
         # Process frequency counters for LFU strategy
         if frequency_counters is not None and is_lfu_enabled:
             # Convert frequency counters to uint64 for LFU processing (CounterType requirement)
             frequency_counts_uint64 = frequency_counters.to(torch.uint64)
-            print(f"[DEBUG] Received frequency counters in lookup: {frequency_counts_uint64[:10]}...")  # Debug info
-            print(f"[DEBUG] frequency_counts_uint64 dtype: {frequency_counts_uint64.dtype}, device: {frequency_counts_uint64.device}")
+            print(
+                f"[DEBUG] Received frequency counters in lookup: {frequency_counts_uint64[:10]}..."
+            )  # Debug info
+            print(
+                f"[DEBUG] frequency_counts_uint64 dtype: {frequency_counts_uint64.dtype}, device: {frequency_counts_uint64.device}"
+            )
             print(f"[DEBUG] indices dtype: {indices.dtype}, device: {indices.device}")
 
         if training:
@@ -422,7 +432,7 @@ class DynamicEmbeddingFunction(torch.autograd.Function):
                     output_embs,
                     device_num_sms,
                     unique_op,
-                )      
+                )
             if use_index_dedup:
                 unique_idx_forback = torch.empty(
                     h_unique_offsets[-1], dtype=indices.dtype, device=device

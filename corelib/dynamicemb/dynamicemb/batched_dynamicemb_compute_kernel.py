@@ -511,11 +511,15 @@ class BatchedDynamicEmbedding(BaseBatchedEmbedding[torch.Tensor]):
 
     def purge(self) -> None:
         self._emb_module.reset_cache_states()
-    
+
     def forward(self, features) -> torch.Tensor:
-        print(f"[DEBUG-10] BatchedDynamicEmbedding.forward: features has weights: {features.weights_or_none() is not None}")
+        print(
+            f"[DEBUG-10] BatchedDynamicEmbedding.forward: features has weights: {features.weights_or_none() is not None}"
+        )
         if features.weights_or_none() is not None:
-            print(f"[DEBUG-11] KJT weights shape: {features.weights().shape}, first 5: {features.weights()[:5]}")
+            print(
+                f"[DEBUG-11] KJT weights shape: {features.weights().shape}, first 5: {features.weights()[:5]}"
+            )
         return self._emb_module(
             features.values(),
             features.offsets(),

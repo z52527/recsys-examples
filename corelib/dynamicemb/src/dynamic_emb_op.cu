@@ -1234,8 +1234,9 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("d_unique_nums"), py::arg("h_unique_offsets"),
         py::arg("d_unique_offsets"), py::arg("unique_embs"),
         py::arg("output_embs"), py::arg("device_num_sms"),
+        py::arg("unique_op"), 
         py::arg("is_lfu_enabled")=false,
-        py::arg("unique_op"), py::arg("frequency_counts_uint64")= c10::nullopt);
+        py::arg("frequency_counts_uint64")= c10::nullopt);
 
   m.def("lookup_forward_dense_eval", &lookup_forward_dense_eval,
         "lookup forward dense eval for globally deduplicated keys", py::arg("tables"),

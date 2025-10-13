@@ -409,10 +409,6 @@ class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):
     The usage is completely consistent with TorchREC's EmbeddingCollectionSharder.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Global score strategy extracted from params during shard
-        self._global_score_strategy: Optional[DynamicEmbScoreStrategy] = None
 
     def shard(
         self,
@@ -424,14 +420,15 @@ class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):
     ) -> ShardedEmbeddingCollection:
         # Extract global score_strategy from params (only once, as it's a global configuration)
         # Strategy is expected to be consistent across all tables
-        if self._global_score_strategy is None:
+        global_score_strategy = None
+        if global_score_strategy is None:
             for param_name, param_sharding in params.items():
                 if isinstance(param_sharding, DynamicEmbParameterSharding):
                     if (
                         param_sharding.dynamicemb_options
                         and param_sharding.dynamicemb_options.score_strategy is not None
                     ):
-                        self._global_score_strategy = (
+                        global_score_strategy = (
                             param_sharding.dynamicemb_options.score_strategy
                         )
                         break
@@ -445,5 +442,5 @@ class DynamicEmbeddingCollectionSharder(EmbeddingCollectionSharder):
             device,
             qcomm_codecs_registry=self.qcomm_codecs_registry,
             use_index_dedup=self._use_index_dedup,
-            score_strategy=self._global_score_strategy,  # Pass as direct parameter
+            score_strategy=global_score_strategy,  # Pass as direct parameter
         )

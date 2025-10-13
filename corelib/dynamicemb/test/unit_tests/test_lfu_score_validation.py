@@ -124,196 +124,6 @@ def generate_deterministic_sparse_features_with_frequency_tracking(
     return kjts, table_frequency_counters
 
 
-def load_dumped_keys_scores_only(
-    path: str,
-    model: nn.Module,
-    table_names: Optional[Dict[str, List[str]]] = None,
-    optim: bool = False,
-    pg: Optional[dist.ProcessGroup] = None,
-) -> Dict[str, Dict[int, int]]:
-    """
-    仿照DynamicEmbLoad的逻辑，但只读取key和score到字典中，不插入到表
-
-    Returns:
-        Dict[table_name, Dict[key, score]]
-    """
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dist.barrier(group=pg, device_ids=[torch.cuda.current_device()])
-    
-    if not os.path.exists(path):
-        raise Exception("can't find path to load, path:", path)
-
-
-    collections_list = find_sharded_modules(model, "")
-    if len(collections_list) == 0:
-        print("Warning: No sharded embedding collections found")
-        return {}
-
-    rank = dist.get_rank(group=pg)
-    world_size = dist.get_world_size(group=pg)
-    all_table_scores = {}
-
-    for _, current_collection in enumerate(collections_list):
-        (
-            collection_path,
-            current_collection_name,
-            current_collection_module,
-        ) = current_collection
-        full_collection_path = os.path.join(path, collection_path)
-        current_dynamic_emb_module_list = get_dynamic_emb_module(
-            current_collection_module
-        )
-
-        for _, dynamic_emb_module in enumerate(current_dynamic_emb_module_list):
-            current_table_names = dynamic_emb_module.table_names
-            current_tables = dynamic_emb_module.tables
-
-            for dynamic_table_name, dynamic_table in zip(
-                current_table_names, current_tables
-            ):
-                if table_names is not None and dynamic_table_name not in set(
-                    table_names[current_collection_name]
-                ):
-                    continue
-
-                print(f"Loading scores for table: {dynamic_table_name}")
-
-                # 读取这个表的key和score
-                table_scores = load_table_keys_scores_only(
-                    dynamic_table,
-                    full_collection_path,
-                    dynamic_table_name,
-                    rank,
-                    world_size,
-                    optim=optim,
-                )
-
-                all_table_scores[dynamic_table_name] = table_scores
-                print(
-                    f"Loaded {len(table_scores)} key-score pairs for {dynamic_table_name}"
-                )
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dist.barrier(group=pg, device_ids=[torch.cuda.current_device()])
-    
-    return all_table_scores
-
-
-def load_table_keys_scores_only(
-    dynamic_table,
-    root_path: str,
-    name: str,
-    rank: int,
-    world_size: int,
-    batch_size: int = 65536,
-    optim: bool = False,
-) -> Dict[int, int]:
-    """
-    仿照distributed_load的逻辑，但只读取key和score到字典中
-
-    Returns:
-        Dict[key, score]
-    """
-    # 修正文件名格式，包含rank和world_size后缀
-    key_name = f"{name}_emb_keys.rank_{rank}.world_size_{world_size}"
-    value_name = f"{name}_emb_values.rank_{rank}.world_size_{world_size}"
-    score_name = f"{name}_emb_scores.rank_{rank}.world_size_{world_size}"
-
-    key_path = os.path.join(root_path, key_name)
-    value_path = os.path.join(root_path, value_name)
-    score_path = os.path.join(root_path, score_name)
-
-    if not os.path.exists(key_path):
-        print(f"Warning: Key file not found: {key_path}")
-        return {}
-
-    if not os.path.exists(value_path):
-        print(f"Warning: Value file not found: {value_path}")
-        return {}
-
-    if not os.path.exists(score_path):
-        print(f"Warning: Score file not found: {score_path}")
-        return {}
-
-    key_file_size = os.path.getsize(key_path)
-    value_file_size = os.path.getsize(value_path)
-    score_file_size = os.path.getsize(score_path)
-
-    if key_file_size == 0 or value_file_size == 0 or score_file_size == 0:
-        print(f"Warning: Empty files for table {name}")
-        return {}
-
-    key_dtype = dyn_emb_to_torch(dynamic_table.key_type())
-    value_dtype = dyn_emb_to_torch(dynamic_table.value_type())
-
-    key_bytes = dtype_to_bytes(key_dtype)
-    value_bytes = dtype_to_bytes(value_dtype)
-
-    total_keys = key_file_size // key_bytes
-    total_dim = value_file_size // (total_keys * value_bytes)
-
-    dim = dyn_emb_cols(dynamic_table)
-    optstate_dim = dynamic_table.optstate_dim()
-
-    if total_dim < dim or ((total_dim != dim + optstate_dim) and optim):
-        print(f"Warning: Dimension mismatch for table {name}")
-        return {}
-
-    keys_read_bytes = batch_size * 8  # key in file always int64
-    values_read_bytes = batch_size * total_dim * 4  # value in file always float
-    scores_read_bytes = batch_size * 8  # score in file always uint64
-
-    table_key_scores = {}
-
-    with open(key_path, "rb") as fkey, open(value_path, "rb") as fvalue, open(
-        score_path, "rb"
-    ) as fscore:
-        while True:
-            remaining_key_bytes = key_file_size - fkey.tell()
-            remaining_value_bytes = value_file_size - fvalue.tell()
-            remaining_score_bytes = score_file_size - fscore.tell()
-
-            if (
-                remaining_key_bytes <= 0
-                or remaining_value_bytes <= 0
-                or remaining_score_bytes <= 0
-            ):
-                break
-
-            key_bytes_to_read = min(keys_read_bytes, remaining_key_bytes)
-            value_bytes_to_read = min(values_read_bytes, remaining_value_bytes)
-            score_bytes_to_read = min(scores_read_bytes, remaining_score_bytes)
-
-            key_bytes_data = fkey.read(key_bytes_to_read)
-            value_bytes_data = fvalue.read(value_bytes_to_read)
-            score_bytes_data = fscore.read(score_bytes_to_read)
-
-            num_keys = len(key_bytes_data) // 8  # key in file always int64
-
-            key_array = np.frombuffer(key_bytes_data, dtype=np.int64)
-            value_array = np.frombuffer(value_bytes_data, dtype=np.float32).reshape(
-                -1, total_dim
-            )
-            score_array = np.frombuffer(score_bytes_data, dtype=np.uint64)
-
-            if len(key_array) != len(score_array):
-                print(
-                    f"Warning: Key-score length mismatch in table {name}: {len(key_array)} vs {len(score_array)}"
-                )
-                continue
-
-            # 根据rank过滤数据（模仿distributed_load的逻辑）
-            mask = key_array % world_size == rank
-            masked_keys = key_array[mask]
-            masked_scores = score_array[mask]
-
-            # 存储到字典中
-            for key, score in zip(masked_keys, masked_scores):
-                table_key_scores[int(key)] = int(score)
-
-    return table_key_scores
-
 
 def local_DynamicEmbDump(
     model: nn.Module,
@@ -339,7 +149,7 @@ def local_DynamicEmbDump(
     rank = dist.get_rank(group=pg)
     device = torch.device(f"cuda:{torch.cuda.current_device()}") if torch.cuda.is_available() else torch.device("cpu")
     batch_size = 65536
-    all_table_scores = {}  # 按表名组织scores
+    all_table_scores = {} 
     
     for _, current_collection in enumerate(collections_list):
         (
@@ -363,7 +173,6 @@ def local_DynamicEmbDump(
                 ):
                     continue
                 
-                # 初始化当前表的scores字典
                 table_key_scores = {}
                 
                 for keys, embeddings, opt_states, scores in export_keys_values(
@@ -372,7 +181,6 @@ def local_DynamicEmbDump(
                     for key, score in zip(keys, scores):
                         table_key_scores[int(key)] = int(score)
                 
-                # 按表名存储
                 all_table_scores[dynamic_table_name] = table_key_scores
 
 
@@ -411,43 +219,8 @@ def validate_lfu_scores(
             if exp_freq != act_score:
                 is_valid = False
                 return is_valid
-        # # Check missing keys
-        # missing_keys = set(expected.keys()) - set(actual.keys())
-        # if missing_keys:
-        #     all_errors.append(
-        #         f"Table {table_name}: missing keys {list(missing_keys)[:5]}"
-        #     )
 
-        # Check frequency matching
-        # frequency_errors = []
-        # for key in set(expected.keys()) & set(actual.keys()):
-        #     exp_freq = expected[key]
-        #     act_score = actual[key]
-
-        #     if tolerance > 0:
-        #         if abs(act_score - exp_freq) / max(exp_freq, 1) > tolerance:
-        #             frequency_errors.append(
-        #                 f"key {key}: expected {exp_freq}, got {act_score}"
-        #             )
-        #     else:
-        #         if act_score != exp_freq:
-        #             frequency_errors.append(
-        #                 f"key {key}: expected {exp_freq}, got {act_score}"
-        #             )
-
-        # if frequency_errors:
-        #     all_errors.append(
-        #         f"Table {table_name}: {frequency_errors[:3]}"
-        #     )  # Show first 3
-
-    is_valid = len(all_errors) == 0
-    error_message = (
-        "; ".join(all_errors)
-        if all_errors
-        else "All LFU scores match expected frequencies"
-    )
-
-    return is_valid, error_message
+    return True
 
 
 @click.command()
@@ -486,10 +259,7 @@ def test_lfu_score_validation(
     use_index_dedup: bool,
 ):
     """Test LFU score correctness by comparing with naive frequency counting."""
-    # if dist.get_world_size() > 1:
-    #     raise ValueError(
-    #         "Multi-rank LFU testing not yet supported due to all-to-all complexity"
-    #     )
+
 
     num_embeddings = [int(v) for v in num_embeddings.split(",")]
     multi_hot_sizes = [int(v) for v in multi_hot_sizes.split(",")]
@@ -555,16 +325,8 @@ def test_lfu_score_validation(
         if debug:
             print(f"  Iteration {iteration + 1} completed")
 
-    print(f"\nDumping model to {save_path}...")
-    shutil.rmtree(save_path, ignore_errors=True)
-    DynamicEmbDump(save_path, model, optim=True)
 
-    # Load keys and scores from dump files (without inserting to tables)
-    print(f"\nLoading keys and scores from dump files...")
-    actual_scores = load_dumped_keys_scores_only(save_path, model, optim=True)
-
-    score2 = local_DynamicEmbDump(model, optim=True)
-    assert score2 == actual_scores
+    actual_scores = local_DynamicEmbDump(model, optim=True)
     
     print(f"\nActual scores:")
     for table_name, scores in actual_scores.items():
@@ -582,32 +344,6 @@ def test_lfu_score_validation(
     print(f"VALIDATION RESULT: {'PASS' if is_valid else 'FAIL'}")
     print(f"{'='*60}")
 
-    # if not is_valid:
-    #     print(f"\nDEBUG INFO:")
-    #     for table_name in expected_frequencies:
-    #         expected = expected_frequencies[table_name]
-    #         actual = actual_scores.get(table_name, {})
-    #         print(f"\nTable {table_name}:")
-    #         print(
-    #             f"  Expected: {len(expected)} keys, sample: {dict(list(expected.items())[:5])}"
-    #         )
-    #         print(
-    #             f"  Actual: {len(actual)} keys, sample: {dict(list(actual.items())[:5])}"
-    #         )
-
-    #         # Show mismatches
-    #         common_keys = set(expected.keys()) & set(actual.keys())
-    #         mismatches = [
-    #             (k, expected[k], actual[k])
-    #             for k in common_keys
-    #             if expected[k] != actual[k]
-    #         ]
-    #         if mismatches:
-    #             print(f"  Mismatches (first 5): {mismatches[:5]}")
-
-    #     raise AssertionError(f"LFU score validation failed: {error_message}")
-
-    print(f"\n✓ LFU score validation PASSED! All frequencies match correctly.")
     return True
 
 

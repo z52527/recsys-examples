@@ -377,7 +377,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                 inverse,
                 unique_indices_table_range,
                 h_unique_indices_table_range,
-                scores,
+                lfu_frequency_counts,
             ) = segmented_unique(indices, indices_table_range, unique_op, is_lfu_enabled, frequency_counts_uint64)
             # TODO: only return device unique_indices_table_range
             # h_unique_indices_table_range = unique_indices_table_range.cpu()
@@ -385,7 +385,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
             h_unique_indices_table_range = indices_table_range.cpu()
             unique_indices = indices
 
-        print(f"[DEBUG] scores: {scores[:10]}...")
+        print(f"[DEBUG] lfu_frequency_counts: {lfu_frequency_counts[:10]}...")
         unique_embs = torch.empty(
             unique_indices.shape[0], emb_dim, dtype=emb_dtype, device=indices.device
         )
@@ -405,7 +405,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                     initializers[i],
                     enable_prefetch,
                     training,
-                    scores,
+                    lfu_frequency_counts,
                 )
             else:
                 KeyValueTableFunction.lookup(
@@ -414,7 +414,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                     unique_embs_per_table,
                     initializers[i],
                     training,
-                    scores,
+                    lfu_frequency_counts,
                 )
 
         if training or caching:

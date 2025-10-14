@@ -403,8 +403,8 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
       dyn_emb::add_offset(d_unique_nums.data_ptr(), d_unique_indices_table_range.data_ptr(),
                           i, unique_num_type, unique_offset_type, stream);
     } else {
-      at::Tensor tmp_indices = keys.slice(0, indices_begin, num_total);
-      at::Tensor tmp_inverse_idx = inverse_idx.slice(0, indices_begin, num_total);
+      at::Tensor tmp_indices = keys.slice(0, indices_begin, indices_end);
+      at::Tensor tmp_inverse_idx = inverse_idx.slice(0, indices_begin, indices_end);
       at::Tensor tmp_d_unique_num = d_unique_nums.slice(0, i, table_num);
 
       // TODO: change tmp_unique_indices[i] to tmp_unique_indices_i to reduce gpu buffer cost
@@ -416,13 +416,13 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
       at::Tensor tmp_frequency_output_counter;
       if (frequency_counts_uint64.has_value()) {
         // LFU mode: use input frequency counts
-        tmp_frequency_counts_uint64 = frequency_counts_uint64.value().slice(0, indices_begin, num_total);
-        tmp_frequency_output_counter = accumulated_frequency_output.slice(0, indices_begin, num_total);
+        tmp_frequency_counts_uint64 = frequency_counts_uint64.value().slice(0, indices_begin, indices_end);
+        tmp_frequency_output_counter = accumulated_frequency_output.slice(0, indices_begin, indices_end);
         unique_op->unique(tmp_indices, indices_length, tmp_inverse_idx,
                          tmp_unique_indices[i], tmp_d_unique_num, stream,
                          previous_d_unique_num, tmp_frequency_output_counter, tmp_frequency_counts_uint64);
       } else if (is_lfu_enabled.value()) {
-        tmp_frequency_output_counter = accumulated_frequency_output.slice(0, indices_begin, num_total);
+        tmp_frequency_output_counter = accumulated_frequency_output.slice(0, indices_begin, indices_end);
         unique_op->unique(tmp_indices, indices_length, tmp_inverse_idx,
                        tmp_unique_indices[i], tmp_d_unique_num, stream,
                        previous_d_unique_num, tmp_frequency_output_counter);
@@ -468,7 +468,7 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
         int64_t indices_begin = h_segment_range[i].item<int64_t>();
         void *dst_ptr = reinterpret_cast<char *>(output_scores.data_ptr()) +
         unique_embs_offset * output_scores.element_size();
-        void *src_ptr = accumulated_frequency_output.slice(0, indices_begin, tmp_unique_num).data_ptr();
+        void *src_ptr = accumulated_frequency_output.slice(0, indices_begin, indices_begin + tmp_unique_num).data_ptr();
         size_t copy_size = tmp_unique_num * output_scores.element_size();
         AT_CUDA_CHECK(cudaMemcpyAsync(dst_ptr, src_ptr, copy_size,
                                       cudaMemcpyDeviceToDevice, stream));

@@ -593,6 +593,7 @@ class KeyValueTableFunction:
         unique_embs: torch.Tensor,
         initializer: Callable,
         training: bool,
+        scores: Optional[torch.Tensor] = None,
     ) -> None:
         assert unique_keys.dim() == 1
         h_num_toatl = unique_keys.numel()
@@ -688,6 +689,7 @@ class KeyValueTableCachingFunction:
         initializer: Callable,
         enable_prefetch: bool,
         training: bool,
+        scores: Optional[torch.Tensor] = None,
     ) -> None:
         assert unique_keys.dim() == 1
         unique_keys.numel()

@@ -24,6 +24,7 @@ from dynamicemb.dynamicemb_config import (
 from dynamicemb.initializer import BaseDynamicEmbInitializer
 from dynamicemb.key_value_table import (
     Cache,
+    KeyValueTable,
     KeyValueTableCachingFunction,
     KeyValueTableFunction,
     Storage,
@@ -32,6 +33,7 @@ from dynamicemb.optimizer import BaseDynamicEmbeddingOptimizer
 from dynamicemb.unique_op import UniqueOp
 from dynamicemb_extensions import (
     DynamicEmbTable,
+    EvictStrategy,
     find_and_initialize,
     find_or_insert,
     gather_embedding,
@@ -344,6 +346,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
         enable_prefetch: bool = False,
         input_dist_dedup: bool = False,
         training: bool = True,
+        frequency_counters: Optional[torch.Tensor] = None,
         *args,
     ):
         table_num = len(storages)
@@ -351,6 +354,21 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
         emb_dtype = storages[0].embedding_dtype()
         emb_dim = storages[0].embedding_dim()
         caching = caches[0] is not None
+
+        is_lfu_enabled = False
+        if(isinstance(storages[0], KeyValueTable)):
+            is_lfu_enabled = storages[0].evict_strategy() == EvictStrategy.KLfu
+            print(f"[DEBUG] is_lfu_enabled: {is_lfu_enabled}")
+        # Process frequency counters for LFU strategy
+
+        if frequency_counters is not None:
+            # Convert frequency counters back to uint64 for LFU processing
+            frequency_counts_uint64 = frequency_counters.long()
+            print(
+                f"[DEBUG] Received frequency counters in EmbBag lookup: {frequency_counts_uint64[:10]}..."
+            )  # Debug info
+
+            # TODO: Use frequency_counts_uint64 for LFU strategy in pooled embeddings
 
         indices_table_range = get_table_range(offsets, feature_offsets)
         if training or caching:
@@ -471,4 +489,4 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                     optimizer,
                 )
 
-        return (None,) * 13
+        return (None,) * 14

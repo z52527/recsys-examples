@@ -154,7 +154,9 @@ def bucketize_kjt_before_all2all(
             # duplicate keys will be resolved by AllToAll
             keys=_fx_wrap_gen_list_n_times(kjt.keys(), num_buckets),
             values=bucketized_indices,
-            weights=pos if bucketize_pos else bucketized_weights,
+            weights=_determine_output_weights(
+                kjt, pos, bucketize_pos, bucketized_weights
+            ),
             lengths=bucketized_lengths.view(-1),
             offsets=None,
             stride=_fx_wrap_stride(kjt),
@@ -165,6 +167,41 @@ def bucketize_kjt_before_all2all(
         ),
         unbucketize_permute,
     )
+
+
+def _determine_output_weights(kjt, pos, bucketize_pos, bucketized_weights):
+    """
+    Determine which weights to return: pos or bucketized_weights.
+
+    If the input weights appear to be frequency counters (float values that were
+    converted from uint64), preserve them instead of overriding with pos.
+    """
+    print(
+        f"[DEBUG-4] _determine_output_weights: bucketize_pos={bucketize_pos}, has_input_weights={kjt.weights_or_none() is not None}, has_bucketized_weights={bucketized_weights is not None}"
+    )
+
+    if not bucketize_pos:
+        return bucketized_weights
+
+    if kjt.weights_or_none() is not None and bucketized_weights is not None:
+        weights_as_int = bucketized_weights.long()
+        weights_back_to_float = weights_as_int.float()
+
+        if torch.allclose(
+            bucketized_weights, weights_back_to_float, atol=1e-6
+        ) and torch.all(bucketized_weights >= 0):
+            print(
+                f"[DEBUG-5] Preserving frequency counters, first 5: {bucketized_weights[:5]}"
+            )
+            return bucketized_weights
+        else:
+            print(f"[DEBUG-6] Weights don't look like frequency counters, using pos")
+
+    result = pos if bucketize_pos else bucketized_weights
+    print(
+        f"[DEBUG-7] Returning {'pos' if bucketize_pos else 'bucketized_weights'}, first 5: {result[:5] if result is not None else 'None'}"
+    )
+    return result
 
 
 class RwSparseFeaturesDist(BaseSparseFeaturesDist[KeyedJaggedTensor]):

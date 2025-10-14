@@ -349,8 +349,10 @@ at::Tensor get_table_range(at::Tensor offsets, at::Tensor feature_offsets) {
   return table_range;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_emb::UniqueOpBase> unique_op) {
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_emb::UniqueOpBase> unique_op,
+   const c10::optional<bool> is_lfu_enabled = false, 
+   const c10::optional<at::Tensor> frequency_counts_uint64 = c10::nullopt) {
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   int64_t num_total = keys.size(0);
@@ -371,6 +373,11 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
   for (int i = 0; i < table_num; ++i) {
     tmp_unique_indices[i] = at::empty_like(keys);
   }
+
+  at::Tensor accumulated_frequency_output;
+  if (is_lfu_enabled.value()) {
+    accumulated_frequency_output = at::zeros_like(keys, at::TensorOptions().dtype(at::kLong).device(keys.device()));  // 初始化为0，与输入相同大小和类型
+  }   
 
   at::Tensor d_unique_nums = at::empty(table_num, segment_range.options());
   at::Tensor d_unique_indices_table_range = at::zeros(table_num + 1, segment_range.options());
@@ -400,10 +407,32 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
       at::Tensor tmp_inverse_idx = inverse_idx.slice(0, indices_begin, num_total);
       at::Tensor tmp_d_unique_num = d_unique_nums.slice(0, i, table_num);
 
+      // TODO: change tmp_unique_indices[i] to tmp_unique_indices_i to reduce gpu buffer cost
+      // at::Tensor tmp_unique_indices_i = unique_indices.slice(0, indices_begin, num_total);
+
       at::Tensor previous_d_unique_num = d_unique_indices_table_range.slice(0, i, table_num + 1);
-      unique_op->unique(tmp_indices, indices_length, tmp_inverse_idx,
-                        tmp_unique_indices[i], tmp_d_unique_num, stream,
-                        previous_d_unique_num);
+
+      at::Tensor tmp_frequency_counts_uint64;
+      at::Tensor tmp_frequency_output_counter;
+      if (frequency_counts_uint64.has_value()) {
+        // LFU mode: use input frequency counts
+        tmp_frequency_counts_uint64 = frequency_counts_uint64.value().slice(0, indices_begin, num_total);
+        tmp_frequency_output_counter = accumulated_frequency_output.slice(0, indices_begin, num_total);
+        unique_op->unique(tmp_indices, indices_length, tmp_inverse_idx,
+                         tmp_unique_indices[i], tmp_d_unique_num, stream,
+                         previous_d_unique_num, tmp_frequency_output_counter, tmp_frequency_counts_uint64);
+      } else if (is_lfu_enabled.value()) {
+        tmp_frequency_output_counter = accumulated_frequency_output.slice(0, indices_begin, num_total);
+        unique_op->unique(tmp_indices, indices_length, tmp_inverse_idx,
+                       tmp_unique_indices[i], tmp_d_unique_num, stream,
+                       previous_d_unique_num, tmp_frequency_output_counter);
+      } else {
+        // Non-LFU mode: call unique without frequency counting
+        unique_op->unique(tmp_indices, indices_length, tmp_inverse_idx,
+                         tmp_unique_indices[i], tmp_d_unique_num, stream,
+                         previous_d_unique_num);
+      }
+
       dyn_emb::add_offset(d_unique_nums.data_ptr(), d_unique_indices_table_range.data_ptr(),
                           i, unique_num_type, unique_offset_type, stream);
     }
@@ -419,6 +448,12 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
   int64_t unique_embs_offset = 0;
   int64_t num_unique_total = h_unique_indices_table_range[table_num].item<int64_t>();
   at::Tensor unique_keys = at::empty(num_unique_total, keys.options());
+  at::Tensor output_scores;
+  if (num_unique_total == 0) {
+    output_scores = at::Tensor();
+  } else {
+    output_scores = at::empty(num_unique_total, keys.options());
+  }
   for (int i = 0; i < table_num; ++i) {
     int64_t tmp_unique_num = h_unique_indices_table_range[i+1].item<int64_t>() - h_unique_indices_table_range[i].item<int64_t>();
     if (tmp_unique_num != 0) {
@@ -429,10 +464,19 @@ segmented_unique(at::Tensor keys, at::Tensor segment_range, std::shared_ptr<dyn_
       AT_CUDA_CHECK(cudaMemcpyAsync(dst_ptr, src_ptr, copy_size,
                                     cudaMemcpyDeviceToDevice, stream));
 
+      if(is_lfu_enabled.value()) {
+        int64_t indices_begin = h_segment_range[i].item<int64_t>();
+        void *dst_ptr = reinterpret_cast<char *>(output_scores.data_ptr()) +
+        unique_embs_offset * output_scores.element_size();
+        void *src_ptr = accumulated_frequency_output.slice(0, indices_begin, tmp_unique_num).data_ptr();
+        size_t copy_size = tmp_unique_num * output_scores.element_size();
+        AT_CUDA_CHECK(cudaMemcpyAsync(dst_ptr, src_ptr, copy_size,
+                                      cudaMemcpyDeviceToDevice, stream));
+      }
     }
     unique_embs_offset += tmp_unique_num;
   }
-  return std::make_tuple(unique_keys, inverse_idx, d_unique_indices_table_range, h_unique_indices_table_range);
+  return std::make_tuple(unique_keys, inverse_idx, d_unique_indices_table_range, h_unique_indices_table_range, output_scores);
 }
 
 void select(at::Tensor flags, at::Tensor inputs, at::Tensor outputs, at::Tensor num_selected) {
@@ -475,7 +519,7 @@ void bind_index_calculation_op(py::module &m) {
 
   m.def("segmented_unique", &dyn_emb::segmented_unique,
     "Dose segmented unique operation on keys with segment_range, return tuple<unique_keys, inverse, unique_keys_table_range, h_unique_keys_table_range>",
-    py::arg("keys"), py::arg("segment_range"), py::arg("unique_op"));
+    py::arg("keys"), py::arg("segment_range"), py::arg("unique_op"), py::arg("is_lfu_enabled")=false, py::arg("frequency_counts_uint64")= c10::nullopt);
   
   m.def(
     "select", &dyn_emb::select,

@@ -159,7 +159,36 @@ void insert_and_evict(
       reinterpret_cast<uint64_t*>(d_evicted_counter.data_ptr()), stream, unique_key, ignore_evict_strategy);
   }
 }
+void insert_and_evict_with_scores(
+  std::shared_ptr<dyn_emb::DynamicVariableBase> table,
+  const size_t n,
+  const at::Tensor keys,
+  const at::Tensor values,
+  at::Tensor evicted_keys,
+  at::Tensor evicted_values,
+  at::Tensor evicted_score,
+  at::Tensor d_evicted_counter,
+  bool unique_key = true,
+  bool ignore_evict_strategy = false,
+  const std::optional<at::Tensor> scores = std::nullopt
+) {
 
+if (not scores.has_value() and (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu)) {
+  throw std::invalid_argument("Must specify the score when evict strategy is customized or LFU.");
+}
+auto stream = at::cuda::getCurrentCUDAStream().stream();
+if (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu) {
+  table->insert_and_evict(
+    n, keys.data_ptr(), values.data_ptr(), scores.value().data_ptr(),
+    evicted_keys.data_ptr(), evicted_values.data_ptr(), evicted_score.data_ptr(),
+    reinterpret_cast<uint64_t*>(d_evicted_counter.data_ptr()), stream, unique_key, ignore_evict_strategy);
+} else {
+  table->insert_and_evict(
+    n, keys.data_ptr(), values.data_ptr(), nullptr, 
+    evicted_keys.data_ptr(), evicted_values.data_ptr(), evicted_score.data_ptr(),
+    reinterpret_cast<uint64_t*>(d_evicted_counter.data_ptr()), stream, unique_key, ignore_evict_strategy);
+}
+}
 void accum_or_assign(std::shared_ptr<dyn_emb::DynamicVariableBase> table,
                      const size_t n, const at::Tensor keys,
                      const at::Tensor value_or_deltas,
@@ -882,7 +911,13 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("evicted_keys"), py::arg("evicted_values"),
         py::arg("evicted_score"), py::arg("d_evicted_counter"),
         py::arg("unique_key") = true, py::arg("ignore_evict_strategy") = false);
-
+  m.def("insert_and_evict_with_scores", &insert_and_evict_with_scores,
+          "Insert keys and values, evicting if necessary", py::arg("table"),
+          py::arg("n"), py::arg("keys"), py::arg("values"), 
+          py::arg("evicted_keys"), py::arg("evicted_values"),
+          py::arg("evicted_score"), py::arg("d_evicted_counter"),
+          py::arg("unique_key") = true, py::arg("ignore_evict_strategy") = false,
+          py::arg("scores") = py::none());
   m.def("accum_or_assign", &accum_or_assign,
         "Accumulate or assign values to the table", py::arg("table"),
         py::arg("n"), py::arg("keys"), py::arg("value_or_deltas"),

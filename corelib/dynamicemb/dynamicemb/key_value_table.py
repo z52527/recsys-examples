@@ -35,6 +35,7 @@ from dynamicemb_extensions import (
     find_pointers,
     find_pointers_with_scores,
     insert_and_evict,
+    insert_and_evict_with_scores,
     insert_or_assign,
     load_from_pointers,
     select,
@@ -185,6 +186,7 @@ class Cache(abc.ABC):
         self,
         keys: torch.Tensor,
         values: torch.Tensor,
+        scores: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         num_evicted: torch.Tensor
         evicted_keys: torch.Tensor
@@ -462,6 +464,7 @@ class KeyValueTable(Cache, Storage):
         self,
         keys: torch.Tensor,
         values: torch.Tensor,
+        scores: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = keys.numel()
         num_evicted: torch.Tensor = torch.zeros(1, dtype=torch.long, device=keys.device)
@@ -470,16 +473,16 @@ class KeyValueTable(Cache, Storage):
         evicted_scores: torch.Tensor = torch.empty(
             batch, dtype=torch.uint64, device=keys.device
         )
-        insert_and_evict(
+        insert_and_evict_with_scores(
             self.table,
             batch,
             keys,
             values,
-            self.score if self._use_score else None,
             evicted_keys,
             evicted_values,
             evicted_scores,
             num_evicted,
+            scores,
         )
         if self._record_cache_metrics:
             self._cache_metrics[2] = batch
@@ -575,11 +578,12 @@ def update_cache(
     storage: Storage,
     missing_keys: torch.Tensor,
     missing_values: torch.Tensor,
-    scores: Optional[torch.Tensor] = None,
+    missing_scores: Optional[torch.Tensor] = None,
 ):
     # need to update score.
     num_evicted, evicted_keys, evicted_values, evicted_scores = cache.insert_and_evict(
-        missing_keys, missing_values
+        missing_keys, missing_values,
+        missing_scores,
     )
     h_num_evicted = num_evicted.cpu().item()
     if h_num_evicted != 0:

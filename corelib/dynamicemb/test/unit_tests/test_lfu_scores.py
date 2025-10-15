@@ -217,6 +217,7 @@ def validate_lfu_scores(
             exp_freq = expected[key]
             act_score = actual[key]
             if exp_freq != act_score:
+                print(f"Key {key}: Expected frequency: {exp_freq}, Actual score: {act_score}")
                 is_valid = False
                 return is_valid
 
@@ -243,7 +244,6 @@ def validate_lfu_scores(
     is_flag=True,
     help="Use dump files for validation instead of direct model access",
 )
-@click.option("--use-index-dedup", default=True, help="Use index dedup")
 def test_lfu_score_validation(
     num_embedding_collections: int,
     num_embeddings: str,
@@ -256,7 +256,6 @@ def test_lfu_score_validation(
     tolerance: float,
     debug: bool,
     use_dump_validation: bool,
-    use_index_dedup: bool,
 ):
     """Test LFU score correctness by comparing with naive frequency counting."""
 
@@ -264,6 +263,8 @@ def test_lfu_score_validation(
     num_embeddings = [int(v) for v in num_embeddings.split(",")]
     multi_hot_sizes = [int(v) for v in multi_hot_sizes.split(",")]
 
+    use_index_dedup = True
+    
     for num_embedding, multi_hot_size in zip(num_embeddings, multi_hot_sizes):
         if batch_size * num_iterations * multi_hot_size > num_embedding:
             raise ValueError(

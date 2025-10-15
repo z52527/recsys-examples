@@ -377,7 +377,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                 inverse,
                 unique_indices_table_range,
                 h_unique_indices_table_range,
-                lfu_frequency_counts,
+                lfu_accumulated_frequency,
             ) = segmented_unique(indices, indices_table_range, unique_op, is_lfu_enabled, frequency_counts_uint64)
             # TODO: only return device unique_indices_table_range
             # h_unique_indices_table_range = unique_indices_table_range.cpu()
@@ -385,7 +385,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
             h_unique_indices_table_range = indices_table_range.cpu()
             unique_indices = indices
 
-        print(f"[DEBUG] lfu_frequency_counts: {lfu_frequency_counts[:10]}...")
+        print(f"[DEBUG] lfu_accumulated_frequency: {lfu_accumulated_frequency[:10]}...")
         unique_embs = torch.empty(
             unique_indices.shape[0], emb_dim, dtype=emb_dtype, device=indices.device
         )
@@ -395,6 +395,8 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
             end = h_unique_indices_table_range[i + 1]
             unique_indices_per_table = unique_indices[begin:end]
             unique_embs_per_table = unique_embs[begin:end, :]
+            # Slice lfu_accumulated_frequency to match the table
+            lfu_accumulated_frequency_per_table = lfu_accumulated_frequency[begin:end] if lfu_accumulated_frequency is not None and lfu_accumulated_frequency.numel() > 0 else None
 
             if caching:
                 KeyValueTableCachingFunction.lookup(
@@ -405,7 +407,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                     initializers[i],
                     enable_prefetch,
                     training,
-                    lfu_frequency_counts,
+                    lfu_accumulated_frequency_per_table,
                 )
             else:
                 KeyValueTableFunction.lookup(
@@ -414,7 +416,7 @@ class DynamicEmbeddingFunctionV2(torch.autograd.Function):
                     unique_embs_per_table,
                     initializers[i],
                     training,
-                    lfu_frequency_counts,
+                    lfu_accumulated_frequency_per_table,
                 )
 
         if training or caching:

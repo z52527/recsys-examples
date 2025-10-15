@@ -300,6 +300,34 @@ void find_pointers(
   }
 }
 
+void find_pointers_with_scores(
+  std::shared_ptr<dyn_emb::DynamicVariableBase> table,
+  const size_t n,
+  const at::Tensor keys,
+  at::Tensor values,
+  at::Tensor founds,
+  const std::optional<at::Tensor> &scores = std::nullopt
+) {
+
+  if (n == 0) return;
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto values_data_ptr = reinterpret_cast<void**>(values.data_ptr<int64_t>());
+  auto found_tensor_data_ptr = founds.data_ptr<bool>();
+
+  // update score.
+  if (scores.has_value()) {
+    if (table->evict_strategy() == EvictStrategy::kCustomized || table->evict_strategy() == EvictStrategy::kLfu) {
+      table->find_pointers(n, keys.data_ptr(), values_data_ptr, found_tensor_data_ptr, scores.value().data_ptr(), stream);
+    } 
+    else {
+      table->find_pointers(n, keys.data_ptr(), values_data_ptr, found_tensor_data_ptr, nullptr, stream);
+    }
+  } else {
+    std::shared_ptr<const dyn_emb::DynamicVariableBase> const_table = table;
+    const_table->find_pointers(n, keys.data_ptr(), values_data_ptr, found_tensor_data_ptr, nullptr, stream);
+  }
+}
+
 void assign(std::shared_ptr<dyn_emb::DynamicVariableBase> table, const size_t n,
             const at::Tensor keys, const at::Tensor values,
             const c10::optional<at::Tensor> &score = c10::nullopt,
@@ -885,6 +913,11 @@ void bind_dyn_emb_op(py::module &m) {
         py::arg("table"), py::arg("n"), py::arg("keys"), py::arg("values"), py::arg("founds"),
         py::arg("score") = py::none());
 
+  m.def("find_pointers_with_scores", &find_pointers_with_scores,
+        "Find a key-value pair in the table , and return every "
+        "value's ptr",
+        py::arg("table"), py::arg("n"), py::arg("keys"), py::arg("values"), py::arg("founds"),
+        py::arg("scores") = py::none());
   m.def("assign", &assign, "Assign values to the table based on keys",
         py::arg("table"), py::arg("n"), py::arg("keys"), py::arg("values"),
         py::arg("score") = c10::nullopt, py::arg("unique_key") = true);

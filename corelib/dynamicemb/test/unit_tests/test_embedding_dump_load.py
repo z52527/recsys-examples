@@ -135,6 +135,8 @@ def apply_dmp(
     device: torch.device,
     score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.LFU,
     use_index_dedup: bool = False,
+    caching: bool = False,
+    cache_capacity_ratio: float = 0.5,
 ):
     eb_configs = []
     dynamicemb_options_dict = {}
@@ -154,6 +156,9 @@ def apply_dmp(
                     embedding_type_bytes * dim * emb_num_embeddings_next_power_of_2
                 )
 
+                # Calculate cache capacity if caching is enabled
+                local_hbm = int(total_hbm_need * cache_capacity_ratio) if caching else 0
+
                 dynamicemb_options_dict[eb_config.name] = DynamicEmbTableOptions(
                     global_hbm_for_values=total_hbm_need,
                     score_strategy=score_strategy,
@@ -161,8 +166,10 @@ def apply_dmp(
                         mode=DynamicEmbInitializerMode.CONSTANT,
                         value=1e-1,
                     ),
-                    bucket_capacity=emb_num_embeddings_next_power_of_2,
+                    # bucket_capacity=emb_num_embeddings_next_power_of_2,
                     max_capacity=emb_num_embeddings_next_power_of_2,
+                    caching=caching,
+                    local_hbm_for_values=local_hbm if caching else 0,
                 )
     planner = get_planner(
         eb_configs,
@@ -199,6 +206,8 @@ def create_model(
     optimizer_kwargs: Dict[str, Any],
     score_strategy: DynamicEmbScoreStrategy = DynamicEmbScoreStrategy.LFU,
     use_index_dedup: bool = False,
+    caching: bool = False,
+    cache_capacity_ratio: float = 0.5,
 ):
     ebc_list = []
     for embedding_collection_id in range(num_embedding_collections):
@@ -227,7 +236,13 @@ def create_model(
     )
 
     model = apply_dmp(
-        model, optimizer_kwargs, torch.device(f"cuda:{torch.cuda.current_device()}"), score_strategy=score_strategy, use_index_dedup=use_index_dedup
+        model, 
+        optimizer_kwargs, 
+        torch.device(f"cuda:{torch.cuda.current_device()}"), 
+        score_strategy=score_strategy, 
+        use_index_dedup=use_index_dedup,
+        caching=caching,
+        cache_capacity_ratio=cache_capacity_ratio,
     )
     return model
 

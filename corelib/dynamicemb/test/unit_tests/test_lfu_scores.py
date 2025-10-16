@@ -53,9 +53,13 @@ def generate_deterministic_sparse_features_with_frequency_tracking(
     batch_size: int,
     num_iterations: int,
     seed: int = 42,
+    caching: bool = False,
 ) -> Tuple[List[KeyedJaggedTensor], Dict[str, Dict[int, int]]]:
     """
     Generate deterministic sparse features and track frequency for each embedding table.
+
+    Args:
+        caching: If True, generate more unique keys to trigger cache eviction
 
     Returns:
         kjts: List of KeyedJaggedTensor for each iteration
@@ -92,9 +96,13 @@ def generate_deterministic_sparse_features_with_frequency_tracking(
                         1, multi_hot_sizes[embedding_collection_id]
                     )  # At least 1
                     # Generate indices with smaller range to ensure duplicates
-                    max_key = min(
-                        num_embedding - 1, 100
-                    )  # Limit to first 100 keys for more duplicates
+                    if caching:
+                        # In caching mode, use wider range to trigger eviction
+                        # Use 80% of num_embedding to generate enough unique keys
+                        max_key = int(num_embedding * 0.8) - 1
+                    else:
+                        # In storage-only mode, limit to 100 keys for more duplicates
+                        max_key = min(num_embedding - 1, 100)
                     indices = [random.randint(0, max_key) for _ in range(hotness)]
 
                     # Track frequency for all generated indices
@@ -162,7 +170,11 @@ def local_DynamicEmbDump(
         )
 
         for _, dynamic_emb_module in enumerate(current_dynamic_emb_module_list):
+            dynamic_emb_module.flush()
             current_table_names = dynamic_emb_module.table_names
+            
+            # In cache mode, read from storage instead of cache
+            # Check if this module has separate cache and storage
             current_tables = dynamic_emb_module.tables
 
             for dynamic_table_name, dynamic_table in zip(
@@ -239,11 +251,8 @@ def validate_lfu_scores(
 @click.option("--num-iterations", type=int, default=3)
 @click.option("--tolerance", type=float, default=0.0)
 @click.option("--debug", is_flag=True, help="Enable debug output")
-@click.option(
-    "--use-dump-validation",
-    is_flag=True,
-    help="Use dump files for validation instead of direct model access",
-)
+@click.option("--caching", is_flag=True, help="Enable cache + storage architecture")
+@click.option("--cache-capacity-ratio", type=float, default=0.5, help="Cache capacity as ratio of storage capacity (only used when --caching is enabled)")
 def test_lfu_score_validation(
     num_embedding_collections: int,
     num_embeddings: str,
@@ -255,24 +264,34 @@ def test_lfu_score_validation(
     num_iterations: int,
     tolerance: float,
     debug: bool,
-    use_dump_validation: bool,
+    caching: bool,
+    cache_capacity_ratio: float,
 ):
-    """Test LFU score correctness by comparing with naive frequency counting."""
-
+    """Test LFU score correctness by comparing with naive frequency counting.
+    
+    This test supports two modes:
+    - Storage-only (default): Tests LFU scores in storage directly
+    - Cache + Storage (--caching): Tests LFU score propagation through cache to storage
+    """
 
     num_embeddings = [int(v) for v in num_embeddings.split(",")]
     multi_hot_sizes = [int(v) for v in multi_hot_sizes.split(",")]
-
     use_index_dedup = True
     
+    # Validate configuration
     for num_embedding, multi_hot_size in zip(num_embeddings, multi_hot_sizes):
         if batch_size * num_iterations * multi_hot_size > num_embedding:
             raise ValueError(
-                "batch_size * num_iterations * multi_hot_size > num_embedding, this may lead to eviction of dynamicemb and cause test fail"
+                "batch_size * num_iterations * multi_hot_size > num_embedding, "
+                "this may lead to eviction of dynamicemb and cause test fail"
             )
 
+    # Print test header
     print(f"\n{'='*60}")
-    print(f"LFU SCORE VALIDATION TEST")
+    if caching:
+        print(f"LFU SCORE VALIDATION TEST WITH CACHE")
+    else:
+        print(f"LFU SCORE VALIDATION TEST (STORAGE ONLY)")
     print(f"{'='*60}")
     print(f"Configuration:")
     print(f"  - Embedding collections: {num_embedding_collections}")
@@ -283,8 +302,13 @@ def test_lfu_score_validation(
     print(f"  - Batch size: {batch_size}")
     print(f"  - Iterations: {num_iterations}")
     print(f"  - Tolerance: {tolerance}")
-    print(f"  - Use dump validation: {use_dump_validation}")
     print(f"  - Use index dedup: {use_index_dedup}")
+    if caching:
+        print(f"  - Caching: ENABLED ✓")
+        print(f"  - Cache capacity ratio: {cache_capacity_ratio}")
+    else:
+        print(f"  - Caching: DISABLED")
+    
     # Create model
     optimizer_kwargs = get_optimizer_kwargs(optimizer_type)
     model = create_model(
@@ -294,6 +318,8 @@ def test_lfu_score_validation(
         optimizer_kwargs=optimizer_kwargs,
         score_strategy=DynamicEmbScoreStrategy.LFU,
         use_index_dedup=use_index_dedup,
+        caching=caching,
+        cache_capacity_ratio=cache_capacity_ratio if caching else 0.5,
     )
 
     # Generate features with frequency tracking
@@ -308,6 +334,7 @@ def test_lfu_score_validation(
         world_size=dist.get_world_size(),
         batch_size=batch_size,
         num_iterations=num_iterations,
+        caching=caching,
     )
 
     print(f"\nExpected frequencies:")
@@ -318,7 +345,11 @@ def test_lfu_score_validation(
         print(f"    Sample: {dict(list(freqs.items())[:10])}")
 
     # Run forward passes to populate frequency information
-    print(f"\nRunning {num_iterations} iterations...")
+    if caching:
+        print(f"\nRunning {num_iterations} iterations with cache enabled...")
+    else:
+        print(f"\nRunning {num_iterations} iterations...")
+    
     for iteration, kjt in enumerate(kjts):
         ret = model(kjt)
         loss = ret.sum() * dist.get_world_size()
@@ -326,14 +357,16 @@ def test_lfu_score_validation(
         if debug:
             print(f"  Iteration {iteration + 1} completed")
 
-
+    # Extract actual scores
     actual_scores = local_DynamicEmbDump(model, optim=True)
     
-    print(f"\nActual scores:")
+    print(f"\nActual scores{' (from storage after flush)' if caching else ''}:")
     for table_name, scores in actual_scores.items():
         print(f"  {table_name}: {len(scores)} keys")
         if len(scores) > 0:
             print(f"    Sample: {dict(list(scores.items())[:3])}")
+            if debug:
+                print(f"    All scores: {scores[:10]}")
 
     # Validate scores
     is_valid = validate_lfu_scores(
@@ -342,10 +375,18 @@ def test_lfu_score_validation(
 
     # Report results
     print(f"\n{'='*60}")
-    print(f"VALIDATION RESULT: {'PASS' if is_valid else 'FAIL'}")
+    if caching:
+        print(f"VALIDATION RESULT (WITH CACHE): {'PASS' if is_valid else 'FAIL'}")
+    else:
+        print(f"VALIDATION RESULT: {'PASS' if is_valid else 'FAIL'}")
     print(f"{'='*60}")
 
-    return True
+    if is_valid and caching:
+        print(f"✓ LFU scores correctly propagated through cache → storage")
+    elif not is_valid:
+        print(f"✗ LFU scores mismatch detected")
+
+    return is_valid
 
 
 if __name__ == "__main__":
@@ -353,6 +394,7 @@ if __name__ == "__main__":
     torch.cuda.set_device(LOCAL_RANK)
 
     dist.init_process_group(backend="nccl")
+    
     try:
         test_lfu_score_validation()
     finally:

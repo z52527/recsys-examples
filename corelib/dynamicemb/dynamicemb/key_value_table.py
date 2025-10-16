@@ -28,6 +28,7 @@ from dynamicemb.optimizer import BaseDynamicEmbeddingOptimizerV2
 from dynamicemb_extensions import (
     EvictStrategy,
     clear,
+    erase,
     count_matched,
     dyn_emb_rows,
     export_batch,
@@ -342,6 +343,9 @@ class KeyValueTable(Cache, Storage):
         else:
             scores = None
 
+        # TODO: erase 
+        erase(self.table, h_num_unique_keys, unique_keys)
+
         insert_or_assign(
             self.table, h_num_unique_keys, unique_keys, unique_values, scores
         )
@@ -482,7 +486,7 @@ class KeyValueTable(Cache, Storage):
             evicted_values,
             evicted_scores,
             num_evicted,
-            scores,
+            scores=scores,  # scores as keyword argument
         )
         if self._record_cache_metrics:
             self._cache_metrics[2] = batch
@@ -586,7 +590,9 @@ def update_cache(
         missing_scores,
     )
     h_num_evicted = num_evicted.cpu().item()
+    print(f"num_evicted: {h_num_evicted}")
     if h_num_evicted != 0:
+        print(f"evicted {h_num_evicted} keys from cache to storage")
         storage.insert(
             evicted_keys[:h_num_evicted],
             evicted_values[:h_num_evicted, :],

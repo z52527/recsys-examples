@@ -26,7 +26,7 @@ Architecture per layer (standard pre-norm GPT):
 
 Reference: examples/hstu/modules/native_hstu_layer.py
 """
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -34,6 +34,94 @@ import torch.nn.functional as F
 
 # flash_attn imports are deferred to runtime (inside functions / __init__)
 # so that the module can be imported even without flash_attn installed.
+
+# beam_decode_attn kernel import — deferred so module loads without the kernel.
+# Falls back to a pure-PyTorch reference implementation when the CuTe kernel
+# is not installed (requires ``quack`` / flash_attn CuTe DSL environment).
+_beam_decode_attn = None
+
+
+def _beam_decode_attn_reference(
+    q: torch.Tensor,
+    k_context: torch.Tensor,
+    v_context: torch.Tensor,
+    k_beam: torch.Tensor,
+    v_beam: torch.Tensor,
+    topk_indices: torch.Tensor,
+    decode_nums: int,
+    softmax_scale: Optional[float] = None,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Pure-PyTorch reference for beam_decode_attn (single-pass).
+
+    Shapes follow the CuTe kernel convention:
+        q:            [B, Sq, W, Hq, D]
+        k_context:    [B, Sk, Hkv, D]
+        v_context:    [B, Sk, Hkv, D]
+        k_beam:       [B, dn*W, Hkv, D]
+        v_beam:       same
+        topk_indices: [B, Sq, Hq, max_dn, W] int32
+    Returns:
+        out: [B, Sq, W, Hq, D]  (same dtype as q)
+        lse: None
+    """
+    import math
+
+    B, Sq, W, Hq, D = q.shape
+    Hkv = k_context.shape[2]
+    ngroups = Hq // Hkv
+    Sk = k_context.shape[1]
+
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(D)
+
+    q_f = q.float()
+    k_ctx_f = k_context.float()
+    v_ctx_f = v_context.float()
+    k_beam_f = k_beam.float()
+    v_beam_f = v_beam.float()
+
+    if ngroups > 1:
+        k_ctx_f = k_ctx_f.repeat_interleave(ngroups, dim=2)
+        v_ctx_f = v_ctx_f.repeat_interleave(ngroups, dim=2)
+        k_beam_f = k_beam_f.repeat_interleave(ngroups, dim=2)
+        v_beam_f = v_beam_f.repeat_interleave(ngroups, dim=2)
+
+    # Context KV → [B, 1, 1, Hq, Sk, D]
+    k_ctx_exp = k_ctx_f.permute(0, 2, 1, 3).unsqueeze(1).unsqueeze(2)
+    k_ctx_exp = k_ctx_exp.expand(B, Sq, W, Hq, Sk, D)
+    v_ctx_exp = v_ctx_f.permute(0, 2, 1, 3).unsqueeze(1).unsqueeze(2)
+    v_ctx_exp = v_ctx_exp.expand(B, Sq, W, Hq, Sk, D)
+
+    if decode_nums > 0:
+        idx = topk_indices[:, :, :, :decode_nums, :]  # [B, Sq, Hq, dn, W]
+        idx = idx.permute(0, 1, 4, 2, 3).contiguous()  # [B, Sq, W, Hq, dn]
+        b_idx = torch.arange(B, device=q.device)[:, None, None, None, None]
+        h_idx = torch.arange(Hq, device=q.device)[None, None, None, :, None]
+        k_beam_g = k_beam_f[b_idx, idx, h_idx]  # [B, Sq, W, Hq, dn, D]
+        v_beam_g = v_beam_f[b_idx, idx, h_idx]
+        k_all = torch.cat([k_ctx_exp, k_beam_g], dim=4)
+        v_all = torch.cat([v_ctx_exp, v_beam_g], dim=4)
+    else:
+        k_all = k_ctx_exp
+        v_all = v_ctx_exp
+
+    scores = torch.einsum("bqwhd,bqwhsd->bqwhs", q_f * softmax_scale, k_all)
+    attn = torch.softmax(scores, dim=-1)
+    out = torch.einsum("bqwhs,bqwhsd->bqwhd", attn, v_all)
+    return out.to(q.dtype), None
+
+
+def _get_beam_decode_attn():
+    global _beam_decode_attn
+    if _beam_decode_attn is None:
+        try:
+            from interface import beam_decode_attn
+
+            _beam_decode_attn = beam_decode_attn
+        except ImportError:
+            _beam_decode_attn = _beam_decode_attn_reference
+    return _beam_decode_attn
 
 
 def build_block_sparsity(
@@ -251,6 +339,175 @@ class JaggedGPTLayer(nn.Module):
 
         return hidden_states
 
+    def _qkv_projection(
+        self, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Shared pre-attention: LayerNorm → QKV projection.
+
+        Returns:
+            residual, q, k, v — each of q/k/v is [..., num_heads, head_dim].
+        """
+        residual = hidden_states
+        x = self.input_layernorm(hidden_states)
+        qkv = self.linear_qkv(x)
+        leading = qkv.shape[:-1]
+        qkv = qkv.view(*leading, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=-3)
+        return residual, q, k, v
+
+    def _post_attention(
+        self, residual: torch.Tensor, attn_out: torch.Tensor
+    ) -> torch.Tensor:
+        """Shared post-attention: output proj → residual → FFN."""
+        leading = attn_out.shape[:-2]
+        attn_out = attn_out.reshape(*leading, self.hidden_size)
+        attn_out = self.linear_proj(attn_out)
+        attn_out = self.attn_dropout(attn_out)
+        hidden_states = residual + attn_out
+
+        residual = hidden_states
+        x = self.pre_mlp_layernorm(hidden_states)
+        x = self.mlp_fc1(x)
+        x = self.activation_fn(x)
+        x = self.mlp_fc2(x)
+        x = self.mlp_dropout(x)
+        return residual + x
+
+    def prefill(
+        self,
+        hidden_states: torch.Tensor,
+        arbitrary_func: Optional[torch.Tensor] = None,
+        linear_k: Optional[object] = None,
+        linear_q: Optional[object] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass that also returns the K/V cache for this layer.
+
+        Uses jiayus's flash_attn for attention, consistent with the
+        JaggedTransformerBlock training path.
+
+        Args:
+            hidden_states: [batch, seqlen, hidden_size]
+
+        Returns:
+            hidden_states: [batch, seqlen, hidden_size]
+            (k_cache, v_cache): each [batch, seqlen, num_heads, head_dim]
+        """
+        residual, q, k, v = self._qkv_projection(hidden_states)
+
+        from flash_attn.cute.interface import flash_attn_func
+
+        input_dtype = q.dtype
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
+
+        k_cache = k.clone()
+        v_cache = v.clone()
+
+        if arbitrary_func is not None:
+            attn_out, _ = flash_attn_func(
+                q, k, v,
+                softmax_scale=self.head_dim ** (-0.5),
+                causal=False,
+                arbitrary=True,
+                linear_k_block_sparse_tensors=linear_k,
+                linear_q_block_sparse_tensors=linear_q,
+                aux_tensors=[arbitrary_func],
+            )
+        else:
+            attn_out, _ = flash_attn_func(
+                q, k, v,
+                softmax_scale=self.head_dim ** (-0.5),
+                causal=True,
+            )
+
+        if attn_out.dtype != input_dtype:
+            attn_out = attn_out.to(input_dtype)
+
+        hidden_states = self._post_attention(residual, attn_out)
+        return hidden_states, (k_cache, v_cache)
+
+    def decode_beam(
+        self,
+        hidden_states: torch.Tensor,
+        k_context: torch.Tensor,
+        v_context: torch.Tensor,
+        k_beam: Optional[torch.Tensor],
+        v_beam: Optional[torch.Tensor],
+        topk_indices: torch.Tensor,
+        decode_nums: int,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Decode step using beam_decode_attn kernel.
+
+        Args:
+            hidden_states: [batch, beam_width, hidden_size]
+            k_context: [batch, seqlen_context, num_heads, head_dim]
+            v_context: [batch, seqlen_context, num_heads, head_dim]
+            k_beam: [batch, prev_decode_nums * beam_width, num_heads, head_dim]
+                or None if no previous decode steps.
+            v_beam: same shape as k_beam, or None.
+            topk_indices: [batch, 1, num_heads, decode_nums, beam_width] int32
+            decode_nums: number of decode steps in beam KV (including self).
+
+        Returns:
+            hidden_states: [batch, beam_width, hidden_size]
+            (k_new, v_new): each [batch, beam_width, num_heads, head_dim]
+        """
+        residual, q, k, v = self._qkv_projection(hidden_states)
+        # q, k, v: [B, W, num_heads, head_dim]
+
+        if softmax_scale is None:
+            softmax_scale = self.head_dim ** (-0.5)
+
+        B, W = q.shape[0], q.shape[1]
+        k_new = k  # [B, W, num_heads, D]
+        v_new = v
+
+        # Append current step K/V to beam KV cache
+        input_dtype = q.dtype
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            q = q.bfloat16()
+            k_new = k_new.bfloat16()
+            v_new = v_new.bfloat16()
+            k_context = k_context.bfloat16()
+            v_context = v_context.bfloat16()
+
+        if k_beam is not None:
+            if k_beam.dtype not in (torch.float16, torch.bfloat16):
+                k_beam = k_beam.bfloat16()
+                v_beam = v_beam.bfloat16()
+            k_beam_full = torch.cat([k_beam, k_new], dim=1)
+            v_beam_full = torch.cat([v_beam, v_new], dim=1)
+        else:
+            k_beam_full = k_new
+            v_beam_full = v_new
+
+        # Reshape Q for beam_decode_attn: [B, 1, W, H, D]
+        q_5d = q.unsqueeze(1)
+
+        beam_decode_attn = _get_beam_decode_attn()
+        # Use 3-kernel backend to avoid fused kernel recompilation hang
+        # when decode_nums changes across beam search steps (SM90 issue).
+        attn_out, _ = beam_decode_attn(
+            q_5d,
+            k_context,
+            v_context,
+            k_beam_full,
+            v_beam_full,
+            topk_indices,
+            decode_nums,
+            softmax_scale=softmax_scale,
+            backend="3kernel",
+        )
+        # attn_out: [B, 1, W, H, D] → [B, W, H, D]
+        attn_out = attn_out.squeeze(1)
+
+        if attn_out.dtype != input_dtype:
+            attn_out = attn_out.to(input_dtype)
+
+        hidden_states = self._post_attention(residual, attn_out)
+        return hidden_states, (k_new, v_new)
+
 
 class JaggedFlashAttnBlock(nn.Module):
     """
@@ -338,6 +595,82 @@ class JaggedFlashAttnBlock(nn.Module):
 
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
+
+    def prefill(
+        self,
+        hidden_states: torch.Tensor,
+        arbitrary_func: Optional[torch.Tensor] = None,
+        seqlen: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+        """Forward through all layers, returning per-layer KV caches.
+
+        Args:
+            hidden_states: [batch, seqlen, hidden_size]
+
+        Returns:
+            hidden_states: [batch, seqlen, hidden_size]
+            kv_caches: list of (k, v) per layer, each [batch, seqlen, H, D]
+        """
+        if seqlen is None:
+            seqlen = hidden_states.shape[1]
+
+        linear_k, linear_q = None, None
+        if arbitrary_func is not None:
+            linear_k, linear_q = build_block_sparsity(
+                arbitrary_func, seqlen, seqlen, self.head_dim
+            )
+
+        kv_caches = []
+        for layer in self.layers:
+            hidden_states, kv = layer.prefill(
+                hidden_states,
+                arbitrary_func=arbitrary_func,
+                linear_k=linear_k,
+                linear_q=linear_q,
+            )
+            kv_caches.append(kv)
+
+        hidden_states = self.final_layernorm(hidden_states)
+        return hidden_states, kv_caches
+
+    def decode_beam(
+        self,
+        hidden_states: torch.Tensor,
+        context_kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        beam_kv_caches: List[Optional[Tuple[torch.Tensor, torch.Tensor]]],
+        topk_indices: torch.Tensor,
+        decode_nums: int,
+    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+        """Decode one beam search step through all layers.
+
+        Args:
+            hidden_states: [batch, beam_width, hidden_size]
+            context_kv_caches: per-layer (k, v) from prefill.
+            beam_kv_caches: per-layer (k_beam, v_beam) accumulated from
+                previous decode steps, or None for each layer if no
+                previous steps.
+            topk_indices: [B, 1, H, decode_nums, W] int32
+            decode_nums: total decode steps including self.
+
+        Returns:
+            hidden_states: [batch, beam_width, hidden_size]
+            new_beam_kvs: per-layer (k_new, v_new), each [B, W, H, D]
+        """
+        new_beam_kvs = []
+        for i, layer in enumerate(self.layers):
+            k_context, v_context = context_kv_caches[i]
+            k_beam = beam_kv_caches[i][0] if beam_kv_caches[i] is not None else None
+            v_beam = beam_kv_caches[i][1] if beam_kv_caches[i] is not None else None
+            hidden_states, kv_new = layer.decode_beam(
+                hidden_states,
+                k_context, v_context,
+                k_beam, v_beam,
+                topk_indices, decode_nums,
+            )
+            new_beam_kvs.append(kv_new)
+
+        hidden_states = self.final_layernorm(hidden_states)
+        return hidden_states, new_beam_kvs
 
 
 class JaggedTransformerBlock(nn.Module):

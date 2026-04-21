@@ -788,3 +788,181 @@ class SIDGRModel(MegatronModule):
         generated_sids = self.beam_search.get_sids()
         log_probs = self.beam_search.get_log_probs()
         return generated_sids, log_probs
+
+    def generate_beam_decode(
+        self,
+        batch: GPTSIDBatch,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generate using beam_decode_attn kernel with KV cache.
+
+        Architecture:
+          1. Prefill: run [history + BOS] through JaggedFlashAttnBlock,
+             cache per-layer context K/V.
+          2. Decode loop: for each hierarchy step, embed the newly selected
+             code, run through layers using beam_decode_attn (context KV
+             shared, beam KV per-beam via topk_indices), then MLP → logits
+             → beam_search.propagate.
+
+        The beam_decode_attn kernel separates context KV (shared across all
+        beams, from prefill) and beam KV (per-beam, accumulated from decode
+        steps), using topk_indices to encode the tree-structured ancestor
+        chain. This avoids re-processing the full sequence at each step.
+        """
+        # 0. Prepare history + BOS embeddings
+        (
+            history_embeddings,
+            input_offsets,
+            input_max_seqlen,
+        ) = self._prepare_embeddings(
+            batch, add_bos_to_history=False, is_generation=True
+        )
+        batch_size = batch.actual_batch_size
+        input_offsets = input_offsets[:batch_size + 1]
+
+        # Access the JaggedFlashAttnBlock
+        assert self.decoder.use_jagged_flash_attn, (
+            "generate_beam_decode requires use_jagged_flash_attn=True"
+        )
+        fa_block = self.decoder.decoder.block  # JaggedFlashAttnBlock
+
+        # Pad jagged history to dense [B, max_seqlen, D]
+        padded_history = (
+            torch.ops.fbgemm.jagged_to_padded_dense(
+                values=history_embeddings,
+                offsets=[input_offsets],
+                max_lengths=[input_max_seqlen],
+                padding_value=0.0,
+            )
+            .view(batch_size, input_max_seqlen, -1)
+            .to(self._training_dtype)
+        )
+
+        # 1. Prefill: run through all layers with causal attention, cache KV
+        prefill_output, context_kv_caches = fa_block.prefill(
+            padded_history, arbitrary_func=None, seqlen=input_max_seqlen
+        )
+        # Extract BOS hidden state (last valid position per sample)
+        # BOS is the last token in each sample's sequence
+        history_seqlens = torch.diff(input_offsets)  # [B]
+        bos_positions = (history_seqlens - 1).clamp(min=0)  # [B]
+        bos_hidden = prefill_output[
+            torch.arange(batch_size, device=prefill_output.device),
+            bos_positions,
+        ]  # [B, D]
+
+        # MLP → logits for step 0
+        self.beam_search.reset()
+        bos_hidden = bos_hidden.unsqueeze(1)  # [B, 1, D]
+        mlp = (
+            self._decoder_mlp[0]
+            if not self.share_lm_head_across_hierarchies
+            else self._decoder_mlp
+        )
+        tuple_or_tensor: Union[
+            Tuple[torch.Tensor, torch.Tensor], torch.Tensor
+        ] = mlp(bos_hidden)
+        candidates_logits = (
+            tuple_or_tensor[0]
+            if isinstance(tuple_or_tensor, tuple)
+            else tuple_or_tensor
+        )
+        probs_step0: torch.Tensor = torch.nn.functional.log_softmax(
+            candidates_logits.float(), dim=-1
+        )
+        self.beam_search.propagate(probs_step0)
+
+        # 2. Decode loop for remaining hierarchy steps
+        beam_width = self.beam_search.beam_widths[0]
+        num_heads = fa_block.layers[0].num_heads
+        num_layers = len(fa_block.layers)
+
+        # Per-layer accumulated beam KV: None initially
+        beam_kv_caches: List[Optional[Tuple[torch.Tensor, torch.Tensor]]] = [
+            None
+        ] * num_layers
+
+        for d in range(self._num_hierarchies - 1):
+            # d is the decode step (0-indexed)
+            # hierarchy_step = d + 1
+            hierarchy_step = d + 1
+
+            # Embed the codes selected at propagate step (d)
+            step_codes = self.beam_search.generated_sids[:, :, d]  # [B, W]
+            step_codes_flat = step_codes.reshape(-1)
+
+            codes_kjt = KeyedJaggedTensor.from_lengths_sync(
+                keys=[
+                    batch.candidate_feature_name,
+                    batch.history_feature_name,
+                ],
+                values=step_codes_flat,
+                lengths=torch.cat([
+                    torch.full(
+                        (batch_size,), beam_width,
+                        device=step_codes_flat.device, dtype=torch.long,
+                    ),
+                    torch.zeros(
+                        (batch_size,),
+                        device=step_codes_flat.device, dtype=torch.long,
+                    ),
+                ]),
+            )
+            code_embeddings = (
+                self._codebooks_collection(codes_kjt)[
+                    batch.candidate_feature_name
+                ]
+                .values()
+                .to(self._training_dtype)
+            )  # [B * W, D]
+            code_embeddings = code_embeddings.view(
+                batch_size, beam_width, self.embedding_dim
+            )
+
+            # Build topk_indices for this decode step
+            decode_nums = d + 1  # include self
+            topk_indices = self.beam_search.build_beam_topk_indices(
+                decode_step=d, num_heads=num_heads,
+            )
+
+            # Decode through all layers
+            hidden_states, new_beam_kvs = fa_block.decode_beam(
+                code_embeddings,
+                context_kv_caches,
+                beam_kv_caches,
+                topk_indices,
+                decode_nums,
+            )  # hidden_states: [B, W, D]
+
+            # Accumulate beam KV for next step
+            for l in range(num_layers):
+                k_new, v_new = new_beam_kvs[l]
+                if beam_kv_caches[l] is not None:
+                    k_prev, v_prev = beam_kv_caches[l]
+                    beam_kv_caches[l] = (
+                        torch.cat([k_prev, k_new], dim=1),
+                        torch.cat([v_prev, v_new], dim=1),
+                    )
+                else:
+                    beam_kv_caches[l] = (k_new, v_new)
+
+            # MLP → logits → beam_search.propagate
+            mlp = (
+                self._decoder_mlp[hierarchy_step]
+                if not self.share_lm_head_across_hierarchies
+                else self._decoder_mlp
+            )
+            tuple_or_tensor = mlp(hidden_states)
+            candidates_logits = (
+                tuple_or_tensor[0]
+                if isinstance(tuple_or_tensor, tuple)
+                else tuple_or_tensor
+            )
+            probs_this_step: torch.Tensor = torch.nn.functional.log_softmax(
+                candidates_logits.float(), dim=-1
+            )
+            self.beam_search.propagate(probs_this_step)
+
+        generated_sids = self.beam_search.get_sids()
+        log_probs = self.beam_search.get_log_probs()
+        return generated_sids, log_probs

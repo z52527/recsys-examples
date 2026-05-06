@@ -30,11 +30,18 @@ Example:
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
+import sys
 import time
 from typing import Callable, Dict, List
 
 import torch
+
+# Make tests/ importable so we can reuse the model factory
+_SID_GR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SID_GR_ROOT not in sys.path:
+    sys.path.insert(0, _SID_GR_ROOT)
 
 # Heavy imports — require the full Docker stack
 import commons.utils as init  # noqa: E402

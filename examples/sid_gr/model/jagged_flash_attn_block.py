@@ -124,6 +124,22 @@ def _get_beam_decode_attn():
     return _beam_decode_attn
 
 
+def _build_padded_context_kv(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seqused: torch.Tensor,
+    max_seqlen: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Identity pass-through for padded context K/V.
+
+    Padding-aware masking is handled by the kernel via the ``seqused_k``
+    argument (added in our local interface.py extension). This helper
+    exists for symmetry with the test-side construction and may grow
+    additional logic (e.g. reshape) in the future.
+    """
+    return k, v
+
+
 def build_block_sparsity(
     arbitrary_func: torch.Tensor,
     seqlen_q: int,
@@ -436,6 +452,8 @@ class JaggedGPTLayer(nn.Module):
         topk_indices: torch.Tensor,
         decode_nums: int,
         softmax_scale: Optional[float] = None,
+        seqused_k: Optional[torch.Tensor] = None,
+        backend: str = "3kernel",
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Decode step using beam_decode_attn kernel.
 
@@ -448,6 +466,11 @@ class JaggedGPTLayer(nn.Module):
             v_beam: same shape as k_beam, or None.
             topk_indices: [batch, 1, num_heads, decode_nums, beam_width] int32
             decode_nums: number of decode steps in beam KV (including self).
+            seqused_k: [batch] int32 valid context length per sample, or None.
+            backend: "3kernel" (default) or "dsl" (fused). The fused path is
+                currently unsafe across decode steps with varying decode_nums
+                due to a kernel cache key bug; "3kernel" is the reliable
+                default.
 
         Returns:
             hidden_states: [batch, beam_width, hidden_size]
@@ -463,19 +486,25 @@ class JaggedGPTLayer(nn.Module):
         k_new = k  # [B, W, num_heads, D]
         v_new = v
 
-        # Append current step K/V to beam KV cache
+        # The kernel requires fp16/bf16 for q, k, v. We assume the caller
+        # has already converted context_kv and beam_kv to a supported dtype
+        # (generate_beam_decode does this once after prefill). We only
+        # need to convert q/k_new/v_new if the layer was run in fp32
+        # (e.g. unit tests with fp32 weights).
         input_dtype = q.dtype
         if q.dtype not in (torch.float16, torch.bfloat16):
             q = q.bfloat16()
             k_new = k_new.bfloat16()
             v_new = v_new.bfloat16()
-            k_context = k_context.bfloat16()
-            v_context = v_context.bfloat16()
+        # Sanity: cached tensors must already be fp16/bf16.
+        assert k_context.dtype in (torch.float16, torch.bfloat16), (
+            f"k_context must be fp16/bf16, got {k_context.dtype}"
+        )
 
         if k_beam is not None:
-            if k_beam.dtype not in (torch.float16, torch.bfloat16):
-                k_beam = k_beam.bfloat16()
-                v_beam = v_beam.bfloat16()
+            assert k_beam.dtype in (torch.float16, torch.bfloat16), (
+                f"k_beam must be fp16/bf16, got {k_beam.dtype}"
+            )
             k_beam_full = torch.cat([k_beam, k_new], dim=1)
             v_beam_full = torch.cat([v_beam, v_new], dim=1)
         else:
@@ -486,8 +515,17 @@ class JaggedGPTLayer(nn.Module):
         q_5d = q.unsqueeze(1)
 
         beam_decode_attn = _get_beam_decode_attn()
-        # Use 3-kernel backend to avoid fused kernel recompilation hang
-        # when decode_nums changes across beam search steps (SM90 issue).
+        # FIXME(kernel): default backend="3kernel" because the fused/dsl
+        # path in gr-decode_atten/interface.py has a compile-cache key bug
+        # that deadlocks when decode_nums varies across calls. Once that's
+        # fixed upstream, "dsl" should be preferred on SM8x/SM90/SM120 for
+        # better performance.
+        kernel_kwargs = {}
+        if seqused_k is not None:
+            # seqused_k is part of our local interface.py extension and
+            # only valid with backend="3kernel". The PyTorch reference
+            # silently ignores it.
+            kernel_kwargs["seqused_k"] = seqused_k
         attn_out, _ = beam_decode_attn(
             q_5d,
             k_context,
@@ -497,7 +535,8 @@ class JaggedGPTLayer(nn.Module):
             topk_indices,
             decode_nums,
             softmax_scale=softmax_scale,
-            backend="3kernel",
+            backend=backend,
+            **kernel_kwargs,
         )
         # attn_out: [B, 1, W, H, D] → [B, W, H, D]
         attn_out = attn_out.squeeze(1)
@@ -640,6 +679,8 @@ class JaggedFlashAttnBlock(nn.Module):
         beam_kv_caches: List[Optional[Tuple[torch.Tensor, torch.Tensor]]],
         topk_indices: torch.Tensor,
         decode_nums: int,
+        seqused_k: Optional[torch.Tensor] = None,
+        backend: str = "3kernel",
     ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
         """Decode one beam search step through all layers.
 
@@ -651,6 +692,8 @@ class JaggedFlashAttnBlock(nn.Module):
                 previous steps.
             topk_indices: [B, 1, H, decode_nums, W] int32
             decode_nums: total decode steps including self.
+            seqused_k: [B] int32 valid context length per sample, or None.
+            backend: forwarded to the kernel; see JaggedGPTLayer.decode_beam.
 
         Returns:
             hidden_states: [batch, beam_width, hidden_size]
@@ -666,6 +709,8 @@ class JaggedFlashAttnBlock(nn.Module):
                 k_context, v_context,
                 k_beam, v_beam,
                 topk_indices, decode_nums,
+                seqused_k=seqused_k,
+                backend=backend,
             )
             new_beam_kvs.append(kv_new)
 

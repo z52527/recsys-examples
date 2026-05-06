@@ -22,6 +22,7 @@ def create_sid_gr_model_and_optimizer(
     optimizer_type_str: str = "adam",
     pipeline_type: str = "none",
     device: torch.device = None,
+    use_jagged_flash_attn: bool = False,
 ):
     decoder_config = get_gpt_config(
         hidden_size=hidden_size,
@@ -52,6 +53,7 @@ def create_sid_gr_model_and_optimizer(
         top_k_for_generation=10,
         eval_metrics=("HitRate@2", "NDCG@10"),
         share_lm_head_across_hierarchies=False,
+        use_jagged_flash_attn=use_jagged_flash_attn,
     )
 
     optimizer_param = OptimizerParam(

@@ -141,6 +141,18 @@ class SIDGRDecoder(MegatronModule):
                 spec=self.transformer_decoder_layer_spec,
             )
 
+    def get_jagged_flash_attn_block(self):
+        """Return the inner JaggedFlashAttnBlock used by generate_beam_decode.
+
+        Raises if this decoder was constructed without use_jagged_flash_attn.
+        """
+        if not self.use_jagged_flash_attn:
+            raise RuntimeError(
+                "get_jagged_flash_attn_block() requires use_jagged_flash_attn=True"
+            )
+        # self.decoder is a JaggedTransformerBlock wrapping a JaggedFlashAttnBlock
+        return self.decoder.block
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -792,6 +804,7 @@ class SIDGRModel(MegatronModule):
     def generate_beam_decode(
         self,
         batch: GPTSIDBatch,
+        backend: str = "3kernel",
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Generate using beam_decode_attn kernel with KV cache.
@@ -808,6 +821,11 @@ class SIDGRModel(MegatronModule):
         beams, from prefill) and beam KV (per-beam, accumulated from decode
         steps), using topk_indices to encode the tree-structured ancestor
         chain. This avoids re-processing the full sequence at each step.
+
+        Args:
+            batch: input batch.
+            backend: kernel backend ("3kernel" or "dsl"). Default "3kernel"
+                avoids a known fused-path JIT cache bug.
         """
         # 0. Prepare history + BOS embeddings
         (
@@ -820,11 +838,8 @@ class SIDGRModel(MegatronModule):
         batch_size = batch.actual_batch_size
         input_offsets = input_offsets[:batch_size + 1]
 
-        # Access the JaggedFlashAttnBlock
-        assert self.decoder.use_jagged_flash_attn, (
-            "generate_beam_decode requires use_jagged_flash_attn=True"
-        )
-        fa_block = self.decoder.decoder.block  # JaggedFlashAttnBlock
+        # Access the inner JaggedFlashAttnBlock through the decoder helper.
+        fa_block = self.decoder.get_jagged_flash_attn_block()
 
         # Pad jagged history to dense [B, max_seqlen, D]
         padded_history = (
@@ -846,6 +861,9 @@ class SIDGRModel(MegatronModule):
         # BOS is the last token in each sample's sequence
         history_seqlens = torch.diff(input_offsets)  # [B]
         bos_positions = (history_seqlens - 1).clamp(min=0)  # [B]
+        # seqused_k tells the kernel each sample's valid context length so
+        # padding K positions are masked out of K1 attention.
+        seqused_k = history_seqlens.to(torch.int32)
         bos_hidden = prefill_output[
             torch.arange(batch_size, device=prefill_output.device),
             bos_positions,
@@ -873,7 +891,6 @@ class SIDGRModel(MegatronModule):
         self.beam_search.propagate(probs_step0)
 
         # 2. Decode loop for remaining hierarchy steps
-        beam_width = self.beam_search.beam_widths[0]
         num_heads = fa_block.layers[0].num_heads
         num_layers = len(fa_block.layers)
 
@@ -883,12 +900,15 @@ class SIDGRModel(MegatronModule):
         ] * num_layers
 
         for d in range(self._num_hierarchies - 1):
-            # d is the decode step (0-indexed)
-            # hierarchy_step = d + 1
+            # d is the decode step (0-indexed); the codes we embed here
+            # were chosen by propagate(step=d).
             hierarchy_step = d + 1
 
-            # Embed the codes selected at propagate step (d)
-            step_codes = self.beam_search.generated_sids[:, :, d]  # [B, W]
+            # Use the actual top-k count from beam_search (may be less than
+            # the configured beam_width when topk is bounded by
+            # topk_previous_step * codebook_size).
+            step_codes = self.beam_search.generated_sids[:, :, d]  # [B, current_topk]
+            current_topk = step_codes.shape[1]
             step_codes_flat = step_codes.reshape(-1)
 
             codes_kjt = KeyedJaggedTensor.from_lengths_sync(
@@ -899,7 +919,7 @@ class SIDGRModel(MegatronModule):
                 values=step_codes_flat,
                 lengths=torch.cat([
                     torch.full(
-                        (batch_size,), beam_width,
+                        (batch_size,), current_topk,
                         device=step_codes_flat.device, dtype=torch.long,
                     ),
                     torch.zeros(
@@ -914,9 +934,9 @@ class SIDGRModel(MegatronModule):
                 ]
                 .values()
                 .to(self._training_dtype)
-            )  # [B * W, D]
+            )  # [B * current_topk, D]
             code_embeddings = code_embeddings.view(
-                batch_size, beam_width, self.embedding_dim
+                batch_size, current_topk, self.embedding_dim
             )
 
             # Build topk_indices for this decode step
@@ -932,6 +952,8 @@ class SIDGRModel(MegatronModule):
                 beam_kv_caches,
                 topk_indices,
                 decode_nums,
+                seqused_k=seqused_k,
+                backend=backend,
             )  # hidden_states: [B, W, D]
 
             # Accumulate beam KV for next step

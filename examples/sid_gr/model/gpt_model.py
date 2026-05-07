@@ -871,10 +871,41 @@ class SIDGRModel(MegatronModule):
         steps), using topk_indices to encode the tree-structured ancestor
         chain. This avoids re-processing the full sequence at each step.
 
+        Backend choice — what the kernels do:
+          K1 (Context Attention)   — Q × shared context KV via tensor cores.
+                                     Matches a regular FA forward; per-beam
+                                     queries see the full prefilled history.
+          K2 (Beam Sparse)         — Q × per-beam KV gathered via topk_indices,
+                                     CUDA-core FMA. Cheap because each beam
+                                     touches ≤ decode_nums entries.
+          K3 (Combine)             — log-sum-exp merge of K1 and K2 partials.
+
+          - ``backend="3kernel"`` runs K1+K2+K3 separately (more kernel
+            launches but stable JIT cache).
+          - ``backend="dsl"`` runs a single fused K1+K2 kernel (fewer launches)
+            then K3.
+
+        Per Jerry's guidance:
+          * SM80 / SM90 / SM120 (consumer & H100/H200): fused is faster at
+            small decode_nums.
+          * SM100 (B200): 3-kernel is faster (fused beam path is slower on
+            SM100 hardware).
+          Jerry's ``BeamDecodeAttn.forward`` auto-selects 3-kernel on SM100
+          regardless of the ``backend`` arg. On SM80/90/120, ``backend="dsl"``
+          would normally be optimal.
+
+        Why we currently force ``backend="3kernel"``:
+          The fused/dsl path in ``gr-decode_atten/interface.py`` has a
+          compile-cache key bug that causes a JIT-deadlock when
+          ``decode_nums`` varies across calls in the same process — exactly
+          the pattern beam search produces (decode_nums grows from 1 to
+          num_hierarchies-1). Once that bug is fixed upstream, this guard
+          should be relaxed so SM80/90/120 can use the fused path for the
+          perf win.
+
         Args:
             batch: input batch.
-            backend: kernel backend ("3kernel" or "dsl"). Default "3kernel"
-                avoids a known fused-path JIT cache bug.
+            backend: kernel backend, must be ``"3kernel"`` (see above).
             phase_times: optional dict; if given, populated with measured
                 phase latencies (in milliseconds) using cuda events:
                   - "prefill_ms": time spent in prefill (including embedding).

@@ -848,6 +848,7 @@ class SIDGRModel(MegatronModule):
         log_probs = self.beam_search.get_log_probs()
         return generated_sids, log_probs
 
+    @torch.no_grad
     def generate_beam_decode(
         self,
         batch: GPTSIDBatch,

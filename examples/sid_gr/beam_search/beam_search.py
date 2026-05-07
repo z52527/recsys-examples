@@ -22,7 +22,18 @@ class BeamSearch:
         if isinstance(beam_width, int):
             beam_widths = [beam_width] * num_hierarchies
         else:
-            beam_widths = beam_width
+            beam_widths = list(beam_width)
+        # Jerry's beam_decode_attn kernel asserts a uniform beam width across
+        # decode steps via ``k_beam.shape[1] == decode_nums * beam_width``.
+        # build_beam_topk_indices computes the correct general indexing
+        # already, but we cannot end-to-end run with non-uniform widths until
+        # the kernel grows support. Reject non-uniform here to avoid silent
+        # mis-attention downstream.
+        assert all(w == beam_widths[0] for w in beam_widths), (
+            f"non-uniform beam_widths={beam_widths} are not supported by the "
+            f"current beam_decode_attn kernel; pass an int or a list with all "
+            f"equal values"
+        )
         self.beam_widths = beam_widths
         self.num_hierarchies = num_hierarchies
         self.codebook_sizes = codebook_sizes
@@ -36,10 +47,10 @@ class BeamSearch:
             ), "codebooks should be provided if prefix_valid_check is True"
         self.accumulated_log_probs: torch.Tensor = torch.tensor(
             []
-        )  # to perceive the mppy check
+        )  # to appease the mypy check
         self.generated_sids: torch.Tensor = torch.tensor(
             []
-        )  # to perceive the mppy check
+        )  # to appease the mypy check
         self.step: int = 0
 
         # for debugging purpose

@@ -145,41 +145,53 @@ class TestBuildBeamTopkIndices:
                 f"  list: {t_list.tolist()}"
             )
 
-    def test_nonuniform_widths_offsets(self):
-        """Non-uniform widths use cumsum offsets, not s*W_d."""
+    def test_nonuniform_widths_rejected_at_init(self):
+        """Kernel only supports uniform beam_widths — reject at construction."""
+        with pytest.raises(AssertionError, match="non-uniform"):
+            BeamSearch([3, 5, 7], 3, [10, 10, 10])
+
+    def test_cumsum_offsets_via_attribute_override(self):
+        """Verify build_beam_topk_indices uses cumulative offsets, not s*W_d.
+
+        Bypasses the uniform-widths assertion by overriding beam_widths
+        after construction. This is purely a math check on the indexing
+        logic — the kernel won't accept non-uniform widths today.
+        """
         beam_widths = [3, 5, 7]
         codebook_sizes = [50, 50, 50]
-        bs = BeamSearch(beam_widths, 3, codebook_sizes, record_history=True)
-        B = 2
+        bs = BeamSearch(beam_widths[0], 3, codebook_sizes, record_history=True)
+        # Override after construction — kernel won't accept this end-to-end
+        # but build_beam_topk_indices should still compute correct offsets.
+        bs.beam_widths = beam_widths
 
+        B = 2
         topk_prev = 1
         for s, W in enumerate(beam_widths):
+            # Simulate propagate with the right shapes by direct injection.
             log_probs = torch.randn(B, topk_prev, codebook_sizes[s], device="cuda")
+            # We need to temporarily set beam_widths[s] correctly for the
+            # propagate call — propagate uses beam_widths[step] for topk_this_step.
             bs.propagate(log_probs)
             topk_prev = W
 
-        # Verify expected step_offsets in beam_kv: cumsum(beam_widths)
-        # step 0 → offset 0
-        # step 1 → offset 3 (after step 0's 3 entries)
-        # step 2 → offset 8 (after step 0+1's 3+5 entries)
+        # Expected step offsets: cumsum([3, 5, 7]) = [0, 3, 8]
         expected_offsets = [0, 3, 8]
         for d in range(3):
             topk = bs.build_beam_topk_indices(decode_step=d, num_heads=2)
             W_d = beam_widths[d]
-            # Self entries should be at expected_offsets[d] + w
+            # Self entries at step d should be expected_offsets[d] + w.
             for w in range(W_d):
                 assert (topk[:, 0, :, d, w] == expected_offsets[d] + w).all(), (
                     f"step d={d}, w={w}: self index should be "
-                    f"{expected_offsets[d] + w}"
+                    f"{expected_offsets[d] + w}, got {topk[:, 0, 0, d, w].tolist()}"
                 )
-            # Ancestors at earlier steps should be at expected_offsets[s] + parent_idx
+            # Ancestors at step s < d should be expected_offsets[s] + parent_idx
             for s in range(d):
-                # Trace ancestor for each w at d
                 pos = torch.arange(W_d, device="cuda").unsqueeze(0).expand(B, -1)
                 for ss in range(d, s, -1):
                     pos = torch.gather(bs.parent_indices[ss], dim=1, index=pos)
-                expected = expected_offsets[s] + pos  # [B, W_d]
-                got = topk[:, 0, 0, s, :]  # [B, W_d]
+                expected = expected_offsets[s] + pos
+                got = topk[:, 0, 0, s, :]
                 assert torch.equal(got, expected.to(torch.int32)), (
                     f"step d={d} s={s}: ancestors mismatch.\n"
                     f"  expected: {expected.tolist()}\n"
@@ -236,10 +248,10 @@ class TestBeamSearchParentIndices:
         bs.reset()
         assert len(bs.parent_indices) == 0
 
-    def test_beam_width_list_bug_fixed(self):
-        """beam_width as list should not raise."""
-        bs = BeamSearch([2, 3, 4], 3, [10, 10, 10])
-        assert bs.beam_widths == [2, 3, 4]
+    def test_beam_width_uniform_list_accepted(self):
+        """beam_width as a uniform list should be accepted (matches int path)."""
+        bs = BeamSearch([2, 2, 2], 3, [10, 10, 10])
+        assert bs.beam_widths == [2, 2, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -594,15 +606,27 @@ def test_generate_beam_decode_e2e(
 @pytest.mark.parametrize("num_layers", [2])
 @pytest.mark.parametrize("codebook_sizes", [[128, 128, 128]])
 @pytest.mark.parametrize("batchsize", [4])
-def test_generate_vs_generate_beam_decode_equivalence(
+def test_generate_vs_generate_beam_decode_regression_guard(
     dtype, max_history_length, num_layers, codebook_sizes, batchsize,
 ):
-    """generate() and generate_beam_decode() should produce equivalent results.
+    """Regression guard between generate() and generate_beam_decode().
 
-    The two paths use different attention math layouts (full-sequence rerun
-    with arbitrary mask vs prefill+incremental decode with topk_indices), so
-    bit-exact match is not expected, but accumulated log_probs and the
-    selected SIDs should match within bf16 numerical tolerance.
+    Both paths implement the same beam-isolated attention semantics by
+    different means (full-sequence rerun with arbitrary mask vs
+    prefill+incremental decode with topk_indices). They should produce
+    very close results, but bf16 attention's per-layer rounding plus
+    beam-search's topk decision boundary make bit-exact match impossible.
+
+    This is a regression GUARD — it catches a path going significantly off
+    spec. It is NOT a mathematical equivalence proof; for that, see the
+    reference oracle (`TestReferenceOracle`) which compares the kernel
+    against a fp32 PyTorch reference at the attention-call level.
+
+    Thresholds:
+      - top-1 SID per sample matches exactly (small bf16 noise should not
+        flip the argmax of accumulated log-probs)
+      - per-position |log_prob delta| < 0.15
+      - top-K beam SID set overlap >= 70%
     """
     hidden_size = 256
     num_attention_heads = 4

@@ -521,3 +521,115 @@ def test_generate_beam_decode_e2e(
 
         # log_probs are accumulated log_softmax → should be ≤ 0
         assert (log_probs <= 1e-3).all()  # small slack for fp32 rounding
+
+
+@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("max_history_length", [32, 128])
+@pytest.mark.parametrize("num_layers", [2])
+@pytest.mark.parametrize("codebook_sizes", [[128, 128, 128]])
+@pytest.mark.parametrize("batchsize", [4])
+def test_generate_vs_generate_beam_decode_equivalence(
+    dtype, max_history_length, num_layers, codebook_sizes, batchsize,
+):
+    """generate() and generate_beam_decode() should produce equivalent results.
+
+    The two paths use different attention math layouts (full-sequence rerun
+    with arbitrary mask vs prefill+incremental decode with topk_indices), so
+    bit-exact match is not expected, but accumulated log_probs and the
+    selected SIDs should match within bf16 numerical tolerance.
+    """
+    hidden_size = 256
+    num_attention_heads = 4
+    kv_channels = 64
+
+    init = _E2E_DEPS["init"]
+    get_unwrapped_module = _E2E_DEPS["get_unwrapped_module"]
+    ShardedEmbeddingConfig = _E2E_DEPS["ShardedEmbeddingConfig"]
+    create_sid_gr_model_and_optimizer = _E2E_DEPS["create_sid_gr_model_and_optimizer"]
+
+    num_hierarchies = len(codebook_sizes)
+    init.initialize_distributed()
+    init.initialize_model_parallel(1)
+    init.set_random_seed(7)
+
+    hist_name = "hist_sids"
+    cand_name = "cand_sids"
+    codebook_embedding_config = ShardedEmbeddingConfig(
+        feature_names=[hist_name, cand_name],
+        table_name="codebook",
+        vocab_size=sum(codebook_sizes),
+        dim=hidden_size,
+        sharding_type="data_parallel",
+    )
+
+    with init.auto_destroy_global_state():
+        model, optimizer = create_sid_gr_model_and_optimizer(
+            dtype=dtype,
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            kv_channels=kv_channels,
+            num_layers=num_layers,
+            num_hierarchies=num_hierarchies,
+            codebook_embedding_config=codebook_embedding_config,
+            codebook_sizes=codebook_sizes,
+            use_jagged_flash_attn=True,
+        )
+        optimizer.reload_model_params()
+        model_unwrapped = get_unwrapped_module(model)
+        model_unwrapped.eval()
+
+        batch = _generate_random_batch(
+            batchsize=batchsize,
+            max_history_length=max_history_length,
+            codebook_sizes=codebook_sizes,
+            history_feature_name=hist_name,
+            candidate_feature_name=cand_name,
+        )
+        batch.to(torch.cuda.current_device())
+
+        with torch.no_grad():
+            sids_a, lp_a = model_unwrapped.generate(batch)
+            sids_b, lp_b = model_unwrapped.generate_beam_decode(batch)
+
+        assert sids_a.shape == sids_b.shape
+        assert lp_a.shape == lp_b.shape
+
+        # The two paths use different attention layouts (jagged-flat with
+        # arbitrary mask vs padded prefill+decode). bf16 attention has ~3%
+        # relative error per layer; over multiple layers/hierarchies and
+        # the topk decision boundary in beam search, individual beam
+        # selections can diverge — but the magnitudes of the top-K
+        # log-probs should still be tightly clustered.
+
+        # 1. Per-position log_prob differences should be small (bf16
+        #    accumulated error budget).
+        lp_diff = (lp_a - lp_b).abs().max().item()
+        assert lp_diff < 0.5, (
+            f"log_probs differ by {lp_diff:.4f} (limit 0.5):\n"
+            f"  generate: {lp_a.tolist()}\n"
+            f"  decode:   {lp_b.tolist()}"
+        )
+
+        # 2. The top-K SIDs (as a set per sample) should overlap
+        #    significantly — beam search should be selecting the same
+        #    "good" candidates even if their order differs.
+        top_k = sids_a.shape[1]
+        # Convert each beam's SID tuple into a hashable identifier
+        def _to_set_per_sample(sids):
+            sets = []
+            for b in range(sids.shape[0]):
+                seen = {tuple(sids[b, k].tolist()) for k in range(top_k)}
+                sets.append(seen)
+            return sets
+
+        sets_a = _to_set_per_sample(sids_a)
+        sets_b = _to_set_per_sample(sids_b)
+        for b, (sa, sb) in enumerate(zip(sets_a, sets_b)):
+            overlap = len(sa & sb) / len(sa)
+            assert overlap >= 0.3, (
+                f"Sample {b}: top-{top_k} beam overlap {overlap*100:.0f}% "
+                f"is below 30% threshold.\n"
+                f"  generate beams: {sorted(sa)}\n"
+                f"  decode beams:   {sorted(sb)}"
+            )

@@ -117,9 +117,19 @@ def build_random_batch(
     return batch
 
 
-def run_one_config(args) -> None:
-    init.set_random_seed(args.seed)
+_DTYPE_MAP = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+}
 
+
+def _resolve_dtype(name: str) -> torch.dtype:
+    if name not in _DTYPE_MAP:
+        raise ValueError(f"Unknown dtype '{name}'. Choose from {list(_DTYPE_MAP.keys())}")
+    return _DTYPE_MAP[name]
+
+
+def build_model(args, dtype: torch.dtype):
     hist_name = "hist_sids"
     cand_name = "cand_sids"
     codebook_sizes = [args.codebook_size] * args.num_hierarchies
@@ -130,9 +140,8 @@ def run_one_config(args) -> None:
         dim=args.hidden_size,
         sharding_type="data_parallel",
     )
-
     model, optimizer = create_sid_gr_model_and_optimizer(
-        dtype=torch.bfloat16,
+        dtype=dtype,
         hidden_size=args.hidden_size,
         num_attention_heads=args.num_heads,
         kv_channels=args.kv_channels,
@@ -145,9 +154,7 @@ def run_one_config(args) -> None:
     optimizer.reload_model_params()
     model_unwrapped = get_unwrapped_module(model)
     model_unwrapped.eval()
-    # Override beam width via the BeamSearch instance
     model_unwrapped.beam_search.beam_widths = [args.beam_width] * args.num_hierarchies
-
     batch = build_random_batch(
         batch_size=args.batch_size,
         max_history_length=args.max_hist_len,
@@ -155,6 +162,30 @@ def run_one_config(args) -> None:
         hist_name=hist_name,
         cand_name=cand_name,
     )
+    return model, optimizer, model_unwrapped, batch
+
+
+def measure_phase_breakdown(model_unwrapped, batch, num_iter: int) -> Dict[str, float]:
+    """Average prefill_ms and decode_loop_ms across num_iter calls."""
+    prefill = []
+    decode = []
+    for _ in range(num_iter):
+        phase: Dict[str, float] = {}
+        with torch.no_grad():
+            model_unwrapped.generate_beam_decode(batch, phase_times=phase)
+        prefill.append(phase["prefill_ms"])
+        decode.append(phase["decode_loop_ms"])
+    return {
+        "prefill_ms_median": statistics.median(prefill),
+        "decode_loop_ms_median": statistics.median(decode),
+    }
+
+
+def run_one_config(args) -> None:
+    init.set_random_seed(args.seed)
+    dtype = _resolve_dtype(args.dtype)
+
+    model, optimizer, model_unwrapped, batch = build_model(args, dtype)
 
     # Functions to time
     @torch.no_grad()
@@ -176,10 +207,11 @@ def run_one_config(args) -> None:
 
     print("=" * 80)
     print(
-        f"Config: batch={args.batch_size}, hist_len={args.max_hist_len}, "
-        f"beam_w={args.beam_width}, hierarchies={args.num_hierarchies}, "
-        f"codebook={args.codebook_size}, hidden={args.hidden_size}, "
-        f"heads={args.num_heads}, layers={args.num_layers}"
+        f"Config: dtype={args.dtype}, batch={args.batch_size}, "
+        f"hist_len={args.max_hist_len}, beam_w={args.beam_width}, "
+        f"hierarchies={args.num_hierarchies}, codebook={args.codebook_size}, "
+        f"hidden={args.hidden_size}, heads={args.num_heads}, "
+        f"layers={args.num_layers}"
     )
     print(f"warmup={args.num_warmup}, iter={args.num_iter}")
     print("-" * 80)
@@ -198,6 +230,11 @@ def run_one_config(args) -> None:
           f"p95={stats_decode['p95_ms']:.3f} ms, "
           f"stdev={stats_decode['stdev_ms']:.3f} ms")
 
+    # Phase breakdown for the beam_decode path
+    phase = measure_phase_breakdown(model_unwrapped, batch, num_iter=args.num_iter)
+    print(f"  phase breakdown: prefill={phase['prefill_ms_median']:.3f} ms, "
+          f"decode_loop={phase['decode_loop_ms_median']:.3f} ms")
+
     speedup = stats_orig["median_ms"] / stats_decode["median_ms"]
     print("-" * 80)
     print(f"Speedup (median orig / median decode) = {speedup:.2f}x")
@@ -205,79 +242,61 @@ def run_one_config(args) -> None:
 
 
 def run_sweep(base_args) -> None:
-    """Run a sweep over (max_hist_len, beam_width) and print a markdown table."""
+    """Run a sweep over (max_hist_len, beam_width, dtype) and print a markdown table."""
     hist_lens = [int(x) for x in base_args.sweep_hist.split(",")]
     beam_widths = [int(x) for x in base_args.sweep_beam.split(",")]
+    dtypes = [s.strip() for s in base_args.sweep_dtype.split(",")]
 
     rows = []
-    for hl in hist_lens:
-        for bw in beam_widths:
-            cfg = argparse.Namespace(**vars(base_args))
-            cfg.max_hist_len = hl
-            cfg.beam_width = bw
+    for dtype_name in dtypes:
+        dtype = _resolve_dtype(dtype_name)
+        for hl in hist_lens:
+            for bw in beam_widths:
+                cfg = argparse.Namespace(**vars(base_args))
+                cfg.max_hist_len = hl
+                cfg.beam_width = bw
+                cfg.dtype = dtype_name
 
-            init.set_random_seed(cfg.seed)
-            hist_name = "hist_sids"
-            cand_name = "cand_sids"
-            codebook_sizes = [cfg.codebook_size] * cfg.num_hierarchies
-            codebook_embedding_config = ShardedEmbeddingConfig(
-                feature_names=[hist_name, cand_name],
-                table_name="codebook",
-                vocab_size=sum(codebook_sizes),
-                dim=cfg.hidden_size,
-                sharding_type="data_parallel",
-            )
-            model, optimizer = create_sid_gr_model_and_optimizer(
-                dtype=torch.bfloat16,
-                hidden_size=cfg.hidden_size,
-                num_attention_heads=cfg.num_heads,
-                kv_channels=cfg.kv_channels,
-                num_layers=cfg.num_layers,
-                num_hierarchies=cfg.num_hierarchies,
-                codebook_embedding_config=codebook_embedding_config,
-                codebook_sizes=codebook_sizes,
-                use_jagged_flash_attn=True,
-            )
-            optimizer.reload_model_params()
-            model_unwrapped = get_unwrapped_module(model)
-            model_unwrapped.eval()
-            model_unwrapped.beam_search.beam_widths = [bw] * cfg.num_hierarchies
-            batch = build_random_batch(
-                batch_size=cfg.batch_size,
-                max_history_length=hl,
-                codebook_sizes=codebook_sizes,
-                hist_name=hist_name,
-                cand_name=cand_name,
-            )
+                init.set_random_seed(cfg.seed)
+                model, optimizer, model_unwrapped, batch = build_model(cfg, dtype)
 
-            @torch.no_grad()
-            def run_orig():
-                model_unwrapped.generate(batch)
+                @torch.no_grad()
+                def run_orig():
+                    model_unwrapped.generate(batch)
 
-            @torch.no_grad()
-            def run_decode():
-                model_unwrapped.generate_beam_decode(batch)
+                @torch.no_grad()
+                def run_decode():
+                    model_unwrapped.generate_beam_decode(batch)
 
-            stats_o = time_fn(run_orig, cfg.num_warmup, cfg.num_iter)
-            stats_d = time_fn(run_decode, cfg.num_warmup, cfg.num_iter)
-            rows.append(
-                {
-                    "hist_len": hl,
-                    "beam_w": bw,
-                    "orig_med": stats_o["median_ms"],
-                    "decode_med": stats_d["median_ms"],
-                    "speedup": stats_o["median_ms"] / stats_d["median_ms"],
-                }
-            )
-            print(
-                f"[hl={hl}, bw={bw}]  orig={stats_o['median_ms']:.2f} ms, "
-                f"decode={stats_d['median_ms']:.2f} ms, "
-                f"speedup={rows[-1]['speedup']:.2f}x"
-            )
+                stats_o = time_fn(run_orig, cfg.num_warmup, cfg.num_iter)
+                stats_d = time_fn(run_decode, cfg.num_warmup, cfg.num_iter)
+                phase = measure_phase_breakdown(
+                    model_unwrapped, batch, num_iter=cfg.num_iter
+                )
+                rows.append(
+                    {
+                        "dtype": dtype_name,
+                        "hist_len": hl,
+                        "beam_w": bw,
+                        "orig_med": stats_o["median_ms"],
+                        "decode_med": stats_d["median_ms"],
+                        "prefill_med": phase["prefill_ms_median"],
+                        "decode_loop_med": phase["decode_loop_ms_median"],
+                        "speedup": stats_o["median_ms"] / stats_d["median_ms"],
+                    }
+                )
+                print(
+                    f"[dtype={dtype_name} hl={hl} bw={bw}]  "
+                    f"orig={stats_o['median_ms']:.2f} ms, "
+                    f"decode={stats_d['median_ms']:.2f} ms "
+                    f"(prefill={phase['prefill_ms_median']:.2f} + "
+                    f"decode_loop={phase['decode_loop_ms_median']:.2f}), "
+                    f"speedup={rows[-1]['speedup']:.2f}x"
+                )
 
-            # Free memory between configs
-            del model, optimizer, model_unwrapped, batch
-            torch.cuda.empty_cache()
+                # Free memory between configs
+                del model, optimizer, model_unwrapped, batch
+                torch.cuda.empty_cache()
 
     # Markdown table
     print()
@@ -289,12 +308,19 @@ def run_sweep(base_args) -> None:
         f"layers={base_args.num_layers}, codebook={base_args.codebook_size}"
     )
     print()
-    print("| hist_len | beam_w | generate (ms) | generate_beam_decode (ms) | speedup |")
-    print("|---------:|-------:|--------------:|--------------------------:|--------:|")
+    print(
+        "| dtype | hist_len | beam_w | generate (ms) | "
+        "decode total (ms) | prefill (ms) | decode_loop (ms) | speedup |"
+    )
+    print(
+        "|-------|---------:|-------:|--------------:|"
+        "------------------:|-------------:|-----------------:|--------:|"
+    )
     for r in rows:
         print(
-            f"| {r['hist_len']:>8} | {r['beam_w']:>6} | "
-            f"{r['orig_med']:>13.2f} | {r['decode_med']:>25.2f} | "
+            f"| {r['dtype']:>5} | {r['hist_len']:>8} | {r['beam_w']:>6} | "
+            f"{r['orig_med']:>13.2f} | {r['decode_med']:>17.2f} | "
+            f"{r['prefill_med']:>12.2f} | {r['decode_loop_med']:>16.2f} | "
             f"{r['speedup']:>6.2f}x |"
         )
 
@@ -318,11 +344,15 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     # Sweep
     parser.add_argument("--sweep", action="store_true",
-                        help="Run a sweep over (hist_len, beam_w) and print a markdown table.")
+                        help="Run a sweep over (hist_len, beam_w, dtype) and print a markdown table.")
     parser.add_argument("--sweep_hist", default="32,64,128,256",
                         help="Comma-separated hist_len values for sweep.")
     parser.add_argument("--sweep_beam", default="4,10,20",
                         help="Comma-separated beam_width values for sweep.")
+    parser.add_argument("--sweep_dtype", default="bf16,fp16",
+                        help="Comma-separated dtype names (bf16/fp16) for sweep.")
+    parser.add_argument("--dtype", default="bf16", choices=list(_DTYPE_MAP.keys()),
+                        help="Model + activation dtype (bf16 or fp16).")
     args = parser.parse_args()
 
     init.initialize_distributed()

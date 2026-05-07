@@ -805,6 +805,7 @@ class SIDGRModel(MegatronModule):
         self,
         batch: GPTSIDBatch,
         backend: str = "3kernel",
+        phase_times: Optional[Dict[str, float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Generate using beam_decode_attn kernel with KV cache.
@@ -826,7 +827,20 @@ class SIDGRModel(MegatronModule):
             batch: input batch.
             backend: kernel backend ("3kernel" or "dsl"). Default "3kernel"
                 avoids a known fused-path JIT cache bug.
+            phase_times: optional dict; if given, populated with measured
+                phase latencies (in milliseconds) using cuda events:
+                  - "prefill_ms": time spent in prefill (including embedding).
+                  - "decode_loop_ms": time spent in the decode loop.
+                Useful for benchmarking. Adds tiny overhead.
         """
+        # Optional phase timing via cuda events
+        record_times = phase_times is not None
+        if record_times:
+            ev_t0 = torch.cuda.Event(enable_timing=True)
+            ev_t1 = torch.cuda.Event(enable_timing=True)
+            ev_t2 = torch.cuda.Event(enable_timing=True)
+            ev_t0.record()
+
         # 0. Prepare history + BOS embeddings
         (
             history_embeddings,
@@ -889,6 +903,9 @@ class SIDGRModel(MegatronModule):
             candidates_logits.float(), dim=-1
         )
         self.beam_search.propagate(probs_step0)
+
+        if record_times:
+            ev_t1.record()
 
         # 2. Decode loop for remaining hierarchy steps
         num_heads = fa_block.layers[0].num_heads
@@ -984,6 +1001,12 @@ class SIDGRModel(MegatronModule):
                 candidates_logits.float(), dim=-1
             )
             self.beam_search.propagate(probs_this_step)
+
+        if record_times:
+            ev_t2.record()
+            torch.cuda.synchronize()
+            phase_times["prefill_ms"] = ev_t0.elapsed_time(ev_t1)
+            phase_times["decode_loop_ms"] = ev_t1.elapsed_time(ev_t2)
 
         generated_sids = self.beam_search.get_sids()
         log_probs = self.beam_search.get_log_probs()

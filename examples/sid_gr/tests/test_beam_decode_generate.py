@@ -145,10 +145,12 @@ class TestBuildBeamTopkIndices:
                 f"  list: {t_list.tolist()}"
             )
 
-    def test_nonuniform_widths_rejected_at_init(self):
-        """Kernel only supports uniform beam_widths — reject at construction."""
-        with pytest.raises(AssertionError, match="non-uniform"):
-            BeamSearch([3, 5, 7], 3, [10, 10, 10])
+    def test_nonuniform_widths_accepted_at_init(self):
+        """BeamSearch itself accepts non-uniform widths; the kernel-using
+        path (SIDGRModel.generate_beam_decode) is what enforces uniformity.
+        """
+        bs = BeamSearch([3, 5, 7], 3, [10, 10, 10])
+        assert bs.beam_widths == [3, 5, 7]
 
     def test_cumsum_offsets_via_attribute_override(self):
         """Verify build_beam_topk_indices uses cumulative offsets, not s*W_d.
@@ -804,15 +806,104 @@ class TestBeamIsolationMask:
                 )
 
 
-@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
-def test_generate_beam_perturbation_invariance():
-    """E2E: perturbing one beam's selected codes must not affect another beam's logits.
+def _arbitrary_func_to_dense_jagged(
+    af: torch.Tensor, total_tokens: int
+) -> torch.Tensor:
+    """Expand a flattened (B=1) arbitrary_func tensor to a dense
+    [total_tokens, total_tokens] bool mask using the interval semantics:
+        valid(q, k) = (k < F0[q]) OR (F1[q] <= k < F2[q]) OR ...
+    """
+    assert af.dim() == 4 and af.shape[0] == 1 and af.shape[1] == 1
+    n_func = af.shape[2]
+    device = af.device
+    mask = torch.zeros(total_tokens, total_tokens, dtype=torch.bool, device=device)
+    kv_idx = torch.arange(total_tokens, device=device)
+    af2d = af[0, 0, :, :total_tokens]  # [n_func, total_tokens]
+    for q in range(total_tokens):
+        f0 = af2d[0, q].item()
+        row = kv_idx < f0
+        for iv in range((n_func - 1) // 2):
+            f_start = af2d[2 * iv + 1, q].item()
+            f_end = af2d[2 * iv + 2, q].item()
+            row = row | ((kv_idx >= f_start) & (kv_idx < f_end))
+        mask[q] = row
+    return mask
 
-    Runs generate() through the first hierarchy step normally, then for the
-    SECOND step we manually swap one beam's selected code and verify the
-    other beams' candidate logits are unchanged. If beam isolation is broken,
-    swapping beam 0's code would propagate via attention into beam 1's
-    output.
+
+@pytest.mark.parametrize("history_seqlens", [[4, 4], [3, 5], [1, 6, 4]])
+@pytest.mark.parametrize("num_target_region", [0, 2, 3])
+@pytest.mark.parametrize("candidate_length", [1, 3])
+def test_jagged_target_aware_builder_matches_dense(
+    history_seqlens, num_target_region, candidate_length
+):
+    """Vectorised builder must produce the same flattened mask as the
+    dense path (padded_target_aware_causal_mask + dense_to_jagged).
+
+    Covers variable-length history, beam_width 0/2/3, candidate_length 1/3.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "model"))
+    try:
+        from attention_mask import (
+            build_jagged_target_aware_arbitrary_func,
+            dense_mask_to_jagged_arbitrary_func,
+            padded_target_aware_causal_mask,
+        )
+    finally:
+        sys.path.pop(0)
+
+    device = "cuda"
+    B = len(history_seqlens)
+    cl = candidate_length
+    W = num_target_region
+
+    # Per-sample concatenated layout: [hist_b, beam0(cl), ..., beam_{W-1}(cl)]
+    # Total per sample = hist_seqlen[b] + W * cl.
+    sample_lens = [hl + W * cl for hl in history_seqlens]
+    offsets = torch.tensor(
+        [0] + list(torch.tensor(sample_lens).cumsum(0).tolist()),
+        device=device, dtype=torch.long,
+    )
+    total_tokens = int(offsets[-1].item())
+    history_t = torch.tensor(history_seqlens, device=device, dtype=torch.long)
+
+    # Vectorised path
+    af_fast = build_jagged_target_aware_arbitrary_func(
+        history_seqlen=history_t,
+        num_target_region=W,
+        target_max_seqlen_per_region=cl,
+        offsets=offsets,
+        total_tokens=total_tokens,
+    )
+
+    # Reference: build dense mask, then convert via dense_to_jagged.
+    # padded_target_aware_causal_mask uses a uniform max_history_seqlen,
+    # so we pad each sample to max(history_seqlens) + W*cl.
+    max_hist = max(history_seqlens)
+    dense_mask = padded_target_aware_causal_mask(
+        history_t, max_hist, W, cl,
+    )
+    valid_dense = ~dense_mask  # [B, 1, max_hist+W*cl, max_hist+W*cl]
+    af_ref = dense_mask_to_jagged_arbitrary_func(
+        valid_dense, offsets, total_tokens,
+    )
+
+    fast_dense = _arbitrary_func_to_dense_jagged(af_fast, total_tokens)
+    ref_dense = _arbitrary_func_to_dense_jagged(af_ref, total_tokens)
+    assert torch.equal(fast_dense, ref_dense), (
+        f"vectorised builder mask differs from dense oracle.\n"
+        f"  diff at: {(fast_dense != ref_dense).nonzero(as_tuple=False).tolist()}"
+    )
+
+
+@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
+def test_generate_is_deterministic():
+    """generate() called twice on the same batch must produce identical SIDs.
+
+    A determinism prerequisite for any beam-level perturbation argument
+    (which would otherwise see noise from non-determinism). This is NOT
+    an actual perturbation invariance test — for that, see the
+    TestBeamIsolationMask geometric checks plus the equivalence-vs-decode
+    regression guard.
     """
     init = _E2E_DEPS["init"]
     get_unwrapped_module = _E2E_DEPS["get_unwrapped_module"]

@@ -523,8 +523,14 @@ class JaggedGPTLayer(nn.Module):
         kernel_kwargs = {}
         if seqused_k is not None:
             # seqused_k is part of our local interface.py extension and
-            # only valid with backend="3kernel". The PyTorch reference
-            # silently ignores it.
+            # only valid with backend="3kernel" — the fused/dsl path
+            # doesn't thread it through and pairing it with split-KV
+            # currently hangs. Reject up front rather than silently
+            # producing wrong results.
+            assert backend == "3kernel", (
+                f"seqused_k is only supported with backend='3kernel'; "
+                f"got backend={backend!r}"
+            )
             kernel_kwargs["seqused_k"] = seqused_k
         attn_out, _ = beam_decode_attn(
             q_5d,

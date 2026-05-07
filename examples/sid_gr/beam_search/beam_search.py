@@ -23,17 +23,10 @@ class BeamSearch:
             beam_widths = [beam_width] * num_hierarchies
         else:
             beam_widths = list(beam_width)
-        # Jerry's beam_decode_attn kernel asserts a uniform beam width across
-        # decode steps via ``k_beam.shape[1] == decode_nums * beam_width``.
-        # build_beam_topk_indices computes the correct general indexing
-        # already, but we cannot end-to-end run with non-uniform widths until
-        # the kernel grows support. Reject non-uniform here to avoid silent
-        # mis-attention downstream.
-        assert all(w == beam_widths[0] for w in beam_widths), (
-            f"non-uniform beam_widths={beam_widths} are not supported by the "
-            f"current beam_decode_attn kernel; pass an int or a list with all "
-            f"equal values"
-        )
+        # BeamSearch supports non-uniform beam widths in general; the
+        # uniform-only constraint belongs to consumers that hand off to
+        # Jerry's beam_decode_attn kernel (see SIDGRModel.generate_beam_decode),
+        # which asserts ``k_beam.shape[1] == decode_nums * beam_width``.
         self.beam_widths = beam_widths
         self.num_hierarchies = num_hierarchies
         self.codebook_sizes = codebook_sizes
@@ -174,20 +167,28 @@ class BeamSearch:
         KV entry each current beam should attend to at each previous step.
 
         beam_kv layout (general, possibly non-uniform widths):
-            beam_kv[B, sum(W_0..W_d), Hkv, D]
+            beam_kv[B, sum(actual_topk_0..d), Hkv, D]
             block s spans flat indices [step_offsets[s], step_offsets[s+1])
-            where step_offsets[s] = sum(beam_widths[:s]).
+            where step_offsets[s] = sum(actual_topk[:s]).
 
         For beam w at current decode step d:
           - at step d (self): index = step_offsets[d] + w
           - at step s < d: index = step_offsets[s] + ancestor_beam_at_step_s
             where ancestor is traced via parent_indices[s+1..d].
 
-        Note: Jerry's kernel currently asserts uniform beam_widths
-        (k_beam.shape[1] == decode_nums * beam_width). We compute the
-        correct general indexing here so the BeamSearch side is ready
-        if/when the kernel grows non-uniform support; the
-        ``__init__`` validates that beam_widths is uniform for now.
+        We use ``parent_indices[s].shape[1]`` — the actual topk count at
+        step s after ``propagate`` — rather than the configured
+        ``self.beam_widths[s]``. ``propagate`` clamps topk to
+        ``min(beam_widths[s], topk_previous_step * codebook_size_this_step)``,
+        so the actual count can be less than configured when the codebook
+        is small. Using the actual count keeps indexing consistent with
+        the beam_kv accumulation in ``generate_beam_decode``.
+
+        Note: Jerry's kernel asserts uniform widths via
+        ``k_beam.shape[1] == decode_nums * beam_width``. The
+        kernel-using path (``generate_beam_decode``) enforces uniformity
+        upstream; this function is correct in the general case so the
+        BeamSearch side is ready if/when the kernel grows support.
 
         Args:
             decode_step: current decode step (0-indexed). Must be < self.step.
@@ -197,15 +198,20 @@ class BeamSearch:
             topk_indices: [B, 1, num_heads, decode_step+1, W_d] int32
         """
         d = decode_step
-        W_d = self.beam_widths[d]
+        # Actual topk after propagate (may differ from configured beam_widths
+        # when codebook is smaller than configured beam_width).
+        W_d = self.parent_indices[d].shape[1]
         B = self.parent_indices[0].shape[0]
         device = self.parent_indices[0].device
         decode_nums = d + 1
 
-        # step_offsets[s] = first flat index of step s's block in beam_kv
+        # step_offsets[s] = first flat index of step s's block in beam_kv,
+        # using the ACTUAL topk count at each step (parent_indices.shape[1]).
         step_offsets = [0]
         for s in range(d):
-            step_offsets.append(step_offsets[-1] + self.beam_widths[s])
+            step_offsets.append(
+                step_offsets[-1] + self.parent_indices[s].shape[1]
+            )
         # step_offsets has length decode_nums (covers steps 0..d).
 
         # Trace ancestors backward from step d

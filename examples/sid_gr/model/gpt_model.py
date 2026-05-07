@@ -881,6 +881,29 @@ class SIDGRModel(MegatronModule):
                   - "decode_loop_ms": time spent in the decode loop.
                 Useful for benchmarking. Adds tiny overhead.
         """
+        # Kernel-side preconditions on BeamSearch configuration.
+        # Jerry's beam_decode_attn asserts uniform beam widths via
+        # k_beam.shape[1] == decode_nums * beam_width, and we accumulate
+        # beam_kv with a fixed stride per step. Reject non-uniform here.
+        beam_widths = self.beam_search.beam_widths
+        assert all(w == beam_widths[0] for w in beam_widths), (
+            f"generate_beam_decode requires uniform beam_widths across "
+            f"hierarchy steps for the beam_decode_attn kernel; got "
+            f"{beam_widths}"
+        )
+        # propagate() clamps actual topk to
+        # min(beam_widths[s], topk_previous_step * codebook_size_this_step).
+        # If any codebook_size < beam_width, propagate would shrink topk,
+        # making k_beam.shape[1] inconsistent with decode_nums * beam_width.
+        bw = beam_widths[0]
+        cs_min = min(self.codebook_sizes)
+        assert bw <= cs_min, (
+            f"generate_beam_decode requires beam_width ({bw}) <= "
+            f"min(codebook_sizes) ({cs_min}); otherwise propagate would "
+            f"shrink the actual topk and the kernel's "
+            f"k_beam.shape[1] == decode_nums * beam_width assertion fails"
+        )
+
         # Optional phase timing via cuda events
         record_times = phase_times is not None
         if record_times:

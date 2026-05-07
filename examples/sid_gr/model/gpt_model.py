@@ -37,7 +37,9 @@ from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
 
 from .attention_mask import (
     build_jagged_causal_arbitrary_func,
+    dense_mask_to_jagged_arbitrary_func,
     padded_causal_mask_with_optional_bos,
+    padded_target_aware_causal_mask,
 )
 from .jagged_flash_attn_block import JaggedTransformerBlock
 
@@ -583,7 +585,18 @@ class SIDGRModel(MegatronModule):
                 )
 
         if self.decoder.use_jagged_flash_attn:
-            assert arbitrary_func is not None
+            # If caller provided a dense mask but we're on the jagged FA
+            # path, convert it to a flattened (B=1) arbitrary_func.
+            if arbitrary_func is None:
+                assert attention_mask is not None, (
+                    "decoder_step: at least one of attention_mask / "
+                    "arbitrary_func must be set"
+                )
+                total_tokens = int(input_offsets[-1].item())
+                valid_mask = ~attention_mask
+                arbitrary_func = dense_mask_to_jagged_arbitrary_func(
+                    valid_mask, input_offsets, total_tokens
+                )
             return self.decoder(
                 hidden_states=input_hidden_states,
                 arbitrary_func=arbitrary_func,
@@ -757,13 +770,28 @@ class SIDGRModel(MegatronModule):
                     dtype=input_offsets.dtype,
                 )
 
-            # 2. decoder (mask built in decoder_step when not overridden)
+            # 2. Build the beam-isolating attention mask for this step.
+            # Each beam is its own "target region" of length candidate_length
+            # so beams don't see each other's tokens. At step 0 there are no
+            # generated codes yet (just history+BOS), so num_target_region=0.
+            # If the caller passed an explicit mask/arbitrary_func via the
+            # generate() args, honour it; otherwise build the proper one.
+            step_attention_mask = attention_mask
+            step_arbitrary_func = arbitrary_func
+            if step_attention_mask is None and step_arbitrary_func is None:
+                step_attention_mask = padded_target_aware_causal_mask(
+                    torch.diff(input_offsets),
+                    input_max_seqlen,
+                    0 if i == 0 else topk_prev_step,
+                    candidate_length,
+                )
+
             jagged_output_hidden_states = self.decoder_step(
                 cated_hidden_states,
                 cated_offsets,
                 cated_max_seqlen,
-                attention_mask=attention_mask,
-                arbitrary_func=arbitrary_func,
+                attention_mask=step_attention_mask,
+                arbitrary_func=step_arbitrary_func,
                 default_mask_add_bos_to_history=False,
             )
             # remove history[batchsize * topk_last_step * max(1,i), embedding_dim]

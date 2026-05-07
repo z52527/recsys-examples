@@ -515,13 +515,14 @@ class JaggedGPTLayer(nn.Module):
         q_5d = q.unsqueeze(1)
 
         beam_decode_attn = _get_beam_decode_attn()
-        # Backend rationale — see SIDGRModel.generate_beam_decode docstring.
+        # Backend rationale — see SIDGRModel.generate_beam_decode docstring
+        # and docs/dsl_backend_hang_bug_report.md.
         # Two implementations of the same math: pipelined ("3kernel") and
-        # fused ("dsl"). Fused would normally be preferred on SM80/90/120
-        # at small decode_nums; SM100 prefers the pipeline and the kernel
+        # fused ("dsl"). Fused is normally preferred on SM80/90/120 at
+        # small decode_nums; SM100 prefers the pipeline and the kernel
         # auto-routes there. We currently force "3kernel" because the
-        # fused path in this kernel build hangs on SM90 (observed
-        # empirically; root cause TBD).
+        # fused path hangs on SM90 whenever W % 8 != 0 (our default W=10
+        # falls into this set).
         kernel_kwargs = {}
         if seqused_k is not None:
             # seqused_k is part of our local interface.py extension and

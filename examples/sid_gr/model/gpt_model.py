@@ -37,6 +37,7 @@ from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
 
 from .attention_mask import (
     build_jagged_causal_arbitrary_func,
+    build_jagged_target_aware_arbitrary_func,
     dense_mask_to_jagged_arbitrary_func,
     padded_causal_mask_with_optional_bos,
     padded_target_aware_causal_mask,
@@ -779,12 +780,30 @@ class SIDGRModel(MegatronModule):
             step_attention_mask = attention_mask
             step_arbitrary_func = arbitrary_func
             if step_attention_mask is None and step_arbitrary_func is None:
-                step_attention_mask = padded_target_aware_causal_mask(
-                    torch.diff(input_offsets),
-                    input_max_seqlen,
-                    0 if i == 0 else topk_prev_step,
-                    candidate_length,
-                )
+                if self.decoder.use_jagged_flash_attn:
+                    # Direct vectorised build of the flattened arbitrary_func.
+                    # Avoids materialising the dense [B, 1, N, N] mask and
+                    # then converting it via a Python loop, which is two
+                    # orders of magnitude slower for typical seqlens.
+                    total_tokens = int(cated_offsets[-1].item())
+                    history_seqlen = torch.diff(input_offsets)
+                    # The flattened sequence layout is [hist+BOS, beam0, ...]
+                    # so the per-sample "history" length here includes BOS,
+                    # which is exactly torch.diff(input_offsets).
+                    step_arbitrary_func = build_jagged_target_aware_arbitrary_func(
+                        history_seqlen=history_seqlen,
+                        num_target_region=(0 if i == 0 else topk_prev_step),
+                        target_max_seqlen_per_region=candidate_length,
+                        offsets=cated_offsets,
+                        total_tokens=total_tokens,
+                    )
+                else:
+                    step_attention_mask = padded_target_aware_causal_mask(
+                        torch.diff(input_offsets),
+                        input_max_seqlen,
+                        0 if i == 0 else topk_prev_step,
+                        candidate_length,
+                    )
 
             jagged_output_hidden_states = self.decoder_step(
                 cated_hidden_states,

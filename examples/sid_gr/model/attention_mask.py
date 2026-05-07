@@ -321,6 +321,103 @@ def build_jagged_causal_arbitrary_func(
     return af
 
 
+def build_jagged_target_aware_arbitrary_func(
+    history_seqlen: torch.Tensor,
+    num_target_region: int,
+    target_max_seqlen_per_region: int,
+    offsets: torch.Tensor,
+    total_tokens: int,
+    padding: int = 256,
+) -> torch.Tensor:
+    """
+    Vectorised construction of the flattened (B=1) arbitrary_func that
+    encodes ``padded_target_aware_causal_mask`` semantics — i.e. each
+    target/beam region attends only to its own sample's history plus its
+    own region (causal), with other target regions invisible.
+
+    Sequence layout per sample b (in flattened coordinates):
+        [batch_start, batch_start + hist_len)  history
+        [batch_start + hist_len, batch_start + hist_len + cl)  region 0
+        ...
+        [batch_start + hist_len + (W-1)*cl, batch_start + hist_len + W*cl)  region W-1
+    where ``hist_len = history_seqlen[b]``, ``cl = target_max_seqlen_per_region``,
+    and ``W = num_target_region``.
+
+    For position q in sample b at offset ``local_q`` from batch_start:
+      - if local_q < hist_len: causal over history → [batch_start, batch_start + local_q + 1)
+      - else: in region k = (local_q - hist_len) // cl,
+        visible = [batch_start, batch_start + hist_len)
+                ∪ [region_k_start, batch_start + local_q + 1)
+
+    The arbitrary_func encodes this with n_func=5: F0=0,
+    (F1,F2)=(batch_start, batch_start+hist_len),
+    (F3,F4)=(region_k_start, batch_start+local_q+1)  (zero-zero for hist rows).
+
+    Args:
+        history_seqlen: [B] per-sample history lengths (no padding).
+        num_target_region: ``W`` (beam width). 0 → pure causal-history mask.
+        target_max_seqlen_per_region: ``cl``.
+        offsets: [B+1] flattened offsets so positions
+            [offsets[b], offsets[b+1]) correspond to sample b.
+        total_tokens: ``offsets[-1].item()``.
+        padding: FA convention padding (default 256).
+
+    Returns:
+        arbitrary_func: [1, 1, n_func, total_tokens + padding] int32 tensor.
+    """
+    device = history_seqlen.device
+    B = history_seqlen.shape[0]
+    W = num_target_region
+    cl = target_max_seqlen_per_region
+
+    # If there are no target regions, the mask reduces to pure jagged causal,
+    # for which the optimised builder is faster.
+    if W == 0 or cl == 0:
+        return build_jagged_causal_arbitrary_func(offsets, total_tokens, padding)
+
+    n_func = 5
+    af = torch.zeros(
+        1, 1, n_func, total_tokens + padding, dtype=torch.int32, device=device
+    )
+
+    # Per-position metadata in flattened coordinates.
+    pos = torch.arange(total_tokens, device=device)              # [N]
+    batch_id = torch.searchsorted(offsets[1:], pos, right=True)   # [N] in [0,B)
+    batch_start = offsets[batch_id]                                # [N]
+    local_q = pos - batch_start                                    # [N]
+
+    hist_per_pos = history_seqlen[batch_id]                        # [N]
+    is_history = local_q < hist_per_pos
+    # Position relative to beginning of beam region (>=0 only when not history)
+    target_offset = (local_q - hist_per_pos).clamp(min=0)
+    region_idx = (target_offset // cl).clamp(max=W - 1)
+    region_start = batch_start + hist_per_pos + region_idx * cl
+
+    # F1, F2 — full-history interval (always batch_start..batch_start+hist_len).
+    # For history rows we set this to (batch_start, batch_start+local_q+1) so
+    # the row only sees itself and earlier history.
+    f1_hist = batch_start                                          # [N]
+    f2_hist = batch_start + local_q + 1                            # [N]  causal
+
+    f1_region = batch_start                                        # [N]
+    f2_region = batch_start + hist_per_pos                         # [N]
+
+    f3_region = region_start                                       # [N]
+    f4_region = batch_start + local_q + 1                          # [N]
+
+    # Pick the right fields per row
+    f1 = torch.where(is_history, f1_hist, f1_region)
+    f2 = torch.where(is_history, f2_hist, f2_region)
+    f3 = torch.where(is_history, torch.zeros_like(f3_region), f3_region)
+    f4 = torch.where(is_history, torch.zeros_like(f4_region), f4_region)
+
+    af[0, 0, 1, :total_tokens] = f1.to(torch.int32)
+    af[0, 0, 2, :total_tokens] = f2.to(torch.int32)
+    af[0, 0, 3, :total_tokens] = f3.to(torch.int32)
+    af[0, 0, 4, :total_tokens] = f4.to(torch.int32)
+    return af
+
+
 def dense_mask_to_jagged_arbitrary_func(
     valid_mask: torch.Tensor,
     offsets: torch.Tensor,

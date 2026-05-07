@@ -889,13 +889,20 @@ class SIDGRModel(MegatronModule):
               auto-routes there regardless of the ``backend`` arg.
 
         Why we currently force ``backend="3kernel"``:
-          The fused path in ``gr-decode_atten/interface.py`` has a
-          compile-cache key bug that JIT-deadlocks when ``decode_nums``
-          varies across calls in the same process — exactly the pattern
-          beam search produces (``decode_nums`` grows from 1 to
-          num_hierarchies-1). Once the upstream cache key includes
-          ``decode_nums``, drop the assertion below and let the kernel's
-          per-arch auto-dispatch pick the optimal backend.
+          We empirically observed (2026-05) that ``backend="dsl"`` hangs
+          on H100 PCIe (SM90) even with the smallest workload (B=1, W=2,
+          decode_nums=1) — the fused kernel launches and the GPU sits
+          at 100% util, but the call never returns. We previously
+          patched ``gr-decode_atten/interface.py`` to include
+          ``decode_nums`` in the fused-path compile-cache key (so
+          stale-compile reuse can't be the cause), but the hang persists.
+          Root cause (CuTe-DSL fused-kernel bug, our env / kernel-version
+          mismatch, or something else) is not yet identified. The
+          3-kernel pipeline path runs cleanly and is what we ship.
+
+          When this is resolved upstream, drop the assertion below and
+          let the kernel's per-arch auto-dispatch pick the optimal
+          backend (3-kernel on SM100, fused on SM80/90/120).
 
         Args:
             batch: input batch.

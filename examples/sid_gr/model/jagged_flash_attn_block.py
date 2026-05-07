@@ -516,12 +516,12 @@ class JaggedGPTLayer(nn.Module):
 
         beam_decode_attn = _get_beam_decode_attn()
         # Backend rationale — see SIDGRModel.generate_beam_decode docstring.
-        # The kernel offers two implementations: pipelined ("3kernel") and
-        # fused ("dsl"). Fused is faster on SM80/90/120 at small decode_nums;
-        # SM100 prefers the pipeline and the kernel auto-routes there. We
-        # currently force "3kernel" everywhere as a workaround for an
-        # upstream JIT cache-key bug that deadlocks the fused path when
-        # decode_nums varies across calls.
+        # Two implementations of the same math: pipelined ("3kernel") and
+        # fused ("dsl"). Fused would normally be preferred on SM80/90/120
+        # at small decode_nums; SM100 prefers the pipeline and the kernel
+        # auto-routes there. We currently force "3kernel" because the
+        # fused path in this kernel build hangs on SM90 (observed
+        # empirically; root cause TBD).
         kernel_kwargs = {}
         if seqused_k is not None:
             # seqused_k is part of our local interface.py extension and

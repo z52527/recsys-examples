@@ -184,7 +184,9 @@ PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
 - **Fused-path JIT cache key**: stale-compile hang when `decode_nums`
   varies. We default to `backend="3kernel"` which is unaffected.
 - **Non-uniform `beam_widths`**: the kernel asserts uniform widths via
-  `k_beam.shape[1] == decode_nums * beam_width`. `BeamSearch.__init__`
-  validates uniformity and rejects non-uniform lists. The math in
+  `k_beam.shape[1] == decode_nums * beam_width`.
+  `SIDGRModel.generate_beam_decode` validates uniformity at entry and
+  rejects non-uniform lists; `BeamSearch` itself accepts non-uniform
+  widths so other consumers can use them. The math in
   `build_beam_topk_indices` is general (cumulative offsets), so the
   BeamSearch side is ready if/when the kernel grows non-uniform support.

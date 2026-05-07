@@ -152,19 +152,17 @@ class TestBuildBeamTopkIndices:
         bs = BeamSearch([3, 5, 7], 3, [10, 10, 10])
         assert bs.beam_widths == [3, 5, 7]
 
-    def test_cumsum_offsets_via_attribute_override(self):
+    def test_cumsum_offsets_with_nonuniform_widths(self):
         """Verify build_beam_topk_indices uses cumulative offsets, not s*W_d.
 
-        Bypasses the uniform-widths assertion by overriding beam_widths
-        after construction. This is purely a math check on the indexing
-        logic — the kernel won't accept non-uniform widths today.
+        BeamSearch itself accepts non-uniform widths; the kernel-using
+        path (SIDGRModel.generate_beam_decode) is what enforces uniform
+        widths. This is a math check on the indexing logic — non-uniform
+        widths can't currently be passed end-to-end through the kernel.
         """
         beam_widths = [3, 5, 7]
         codebook_sizes = [50, 50, 50]
-        bs = BeamSearch(beam_widths[0], 3, codebook_sizes, record_history=True)
-        # Override after construction — kernel won't accept this end-to-end
-        # but build_beam_topk_indices should still compute correct offsets.
-        bs.beam_widths = beam_widths
+        bs = BeamSearch(beam_widths, 3, codebook_sizes, record_history=True)
 
         B = 2
         topk_prev = 1

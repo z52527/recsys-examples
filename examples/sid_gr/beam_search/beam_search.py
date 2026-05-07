@@ -23,6 +23,10 @@ class BeamSearch:
             beam_widths = [beam_width] * num_hierarchies
         else:
             beam_widths = list(beam_width)
+        assert len(beam_widths) == num_hierarchies, (
+            f"beam_width length {len(beam_widths)} must match "
+            f"num_hierarchies {num_hierarchies}"
+        )
         # BeamSearch supports non-uniform beam widths in general; the
         # uniform-only constraint belongs to consumers that hand off to
         # Jerry's beam_decode_attn kernel (see SIDGRModel.generate_beam_decode),

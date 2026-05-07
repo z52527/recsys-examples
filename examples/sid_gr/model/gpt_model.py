@@ -881,6 +881,17 @@ class SIDGRModel(MegatronModule):
                   - "decode_loop_ms": time spent in the decode loop.
                 Useful for benchmarking. Adds tiny overhead.
         """
+        # Backend gate: we only support the "3kernel" path because (a) it
+        # has the seqused_k extension we use for variable-length history
+        # and (b) the fused/dsl path has a known JIT cache hang when
+        # decode_nums varies across calls. Fail early — before prefill —
+        # rather than waiting for decode_beam to assert.
+        assert backend == "3kernel", (
+            f"generate_beam_decode only supports backend='3kernel' (got "
+            f"{backend!r}); the dsl/fused path is unsafe with seqused_k and "
+            f"with varying decode_nums in this kernel build"
+        )
+
         # Kernel-side preconditions on BeamSearch configuration.
         # Jerry's beam_decode_attn asserts uniform beam widths via
         # k_beam.shape[1] == decode_nums * beam_width, and we accumulate

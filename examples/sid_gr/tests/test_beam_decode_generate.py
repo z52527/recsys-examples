@@ -121,6 +121,71 @@ class TestBuildBeamTopkIndices:
                 parent = bs.parent_indices[1][b, w].item()
                 assert topk[b, 0, 0, 0, w].item() == 0 * W + parent
 
+    def test_list_equal_widths_matches_int_path(self):
+        """Pass beam_width as list [W,W,W] vs int W; topk_indices must match."""
+        W = 4
+        B = 2
+        torch.manual_seed(123)
+        bs_int = BeamSearch(W, 3, [10, 10, 10], record_history=True)
+        bs_list = BeamSearch([W, W, W], 3, [10, 10, 10], record_history=True)
+
+        topk_prev = 1
+        for s in range(3):
+            log_probs = torch.randn(B, topk_prev, 10, device="cuda")
+            bs_int.propagate(log_probs.clone())
+            bs_list.propagate(log_probs.clone())
+            topk_prev = W
+
+        for d in range(3):
+            t_int = bs_int.build_beam_topk_indices(decode_step=d, num_heads=4)
+            t_list = bs_list.build_beam_topk_indices(decode_step=d, num_heads=4)
+            assert torch.equal(t_int, t_list), (
+                f"step {d}: int and list-with-equal-values disagree:\n"
+                f"  int:  {t_int.tolist()}\n"
+                f"  list: {t_list.tolist()}"
+            )
+
+    def test_nonuniform_widths_offsets(self):
+        """Non-uniform widths use cumsum offsets, not s*W_d."""
+        beam_widths = [3, 5, 7]
+        codebook_sizes = [50, 50, 50]
+        bs = BeamSearch(beam_widths, 3, codebook_sizes, record_history=True)
+        B = 2
+
+        topk_prev = 1
+        for s, W in enumerate(beam_widths):
+            log_probs = torch.randn(B, topk_prev, codebook_sizes[s], device="cuda")
+            bs.propagate(log_probs)
+            topk_prev = W
+
+        # Verify expected step_offsets in beam_kv: cumsum(beam_widths)
+        # step 0 → offset 0
+        # step 1 → offset 3 (after step 0's 3 entries)
+        # step 2 → offset 8 (after step 0+1's 3+5 entries)
+        expected_offsets = [0, 3, 8]
+        for d in range(3):
+            topk = bs.build_beam_topk_indices(decode_step=d, num_heads=2)
+            W_d = beam_widths[d]
+            # Self entries should be at expected_offsets[d] + w
+            for w in range(W_d):
+                assert (topk[:, 0, :, d, w] == expected_offsets[d] + w).all(), (
+                    f"step d={d}, w={w}: self index should be "
+                    f"{expected_offsets[d] + w}"
+                )
+            # Ancestors at earlier steps should be at expected_offsets[s] + parent_idx
+            for s in range(d):
+                # Trace ancestor for each w at d
+                pos = torch.arange(W_d, device="cuda").unsqueeze(0).expand(B, -1)
+                for ss in range(d, s, -1):
+                    pos = torch.gather(bs.parent_indices[ss], dim=1, index=pos)
+                expected = expected_offsets[s] + pos  # [B, W_d]
+                got = topk[:, 0, 0, s, :]  # [B, W_d]
+                assert torch.equal(got, expected.to(torch.int32)), (
+                    f"step d={d} s={s}: ancestors mismatch.\n"
+                    f"  expected: {expected.tolist()}\n"
+                    f"  got:      {got.tolist()}"
+                )
+
     @pytest.mark.parametrize("num_hierarchies", [2, 3, 4])
     def test_shape_and_range(self, num_hierarchies):
         """Verify topk_indices shape and value range."""

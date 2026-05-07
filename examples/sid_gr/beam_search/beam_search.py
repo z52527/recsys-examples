@@ -162,48 +162,64 @@ class BeamSearch:
         (steps 0..d, including self). The topk_indices encodes which beam
         KV entry each current beam should attend to at each previous step.
 
-        beam_kv layout: [B, (d+1)*W, Hkv, D]
-          - entries [s*W .. (s+1)*W - 1] are from decode step s
+        beam_kv layout (general, possibly non-uniform widths):
+            beam_kv[B, sum(W_0..W_d), Hkv, D]
+            block s spans flat indices [step_offsets[s], step_offsets[s+1])
+            where step_offsets[s] = sum(beam_widths[:s]).
 
         For beam w at current decode step d:
-          - at step d (self): index = d * W + w
-          - at step s < d: index = s * W + ancestor_beam_at_step_s
-            where ancestor is traced via parent_indices[s+1..d]
+          - at step d (self): index = step_offsets[d] + w
+          - at step s < d: index = step_offsets[s] + ancestor_beam_at_step_s
+            where ancestor is traced via parent_indices[s+1..d].
+
+        Note: Jerry's kernel currently asserts uniform beam_widths
+        (k_beam.shape[1] == decode_nums * beam_width). We compute the
+        correct general indexing here so the BeamSearch side is ready
+        if/when the kernel grows non-uniform support; the
+        ``__init__`` validates that beam_widths is uniform for now.
 
         Args:
             decode_step: current decode step (0-indexed). Must be < self.step.
             num_heads: number of query heads (Hq) for the output shape.
 
         Returns:
-            topk_indices: [B, 1, num_heads, decode_step+1, W] int32
+            topk_indices: [B, 1, num_heads, decode_step+1, W_d] int32
         """
         d = decode_step
-        W = self.beam_widths[d]
+        W_d = self.beam_widths[d]
         B = self.parent_indices[0].shape[0]
         device = self.parent_indices[0].device
-        decode_nums = d + 1  # include self
+        decode_nums = d + 1
 
-        # Trace ancestors backward from current step d
-        # ancestor_at[s] has shape [B, W]: the beam index at step s
+        # step_offsets[s] = first flat index of step s's block in beam_kv
+        step_offsets = [0]
+        for s in range(d):
+            step_offsets.append(step_offsets[-1] + self.beam_widths[s])
+        # step_offsets has length decode_nums (covers steps 0..d).
+
+        # Trace ancestors backward from step d
+        # ancestor_at[s] has shape [B, W_d]: which beam at step s is the
+        # ancestor of each current beam at step d.
         ancestor_at = [None] * decode_nums
-        ancestor_at[d] = torch.arange(W, device=device).unsqueeze(0).expand(B, -1)
-
+        ancestor_at[d] = (
+            torch.arange(W_d, device=device).unsqueeze(0).expand(B, -1)
+        )
         pos = ancestor_at[d]
         for s in range(d, 0, -1):
-            # parent_indices[s] maps step-s beams to step-(s-1) beams
             pos = torch.gather(self.parent_indices[s], dim=1, index=pos)
             ancestor_at[s - 1] = pos
 
-        # Convert beam indices to beam_kv flat indices: s * W + beam_idx
+        # Convert beam indices to beam_kv flat indices using the per-step
+        # offset (correct for both uniform and non-uniform widths).
         topk_flat = torch.stack(
-            [s * W + ancestor_at[s] for s in range(decode_nums)],
+            [step_offsets[s] + ancestor_at[s] for s in range(decode_nums)],
             dim=-1,
-        )  # [B, W, decode_nums]
+        )  # [B, W_d, decode_nums]
 
-        # Reshape to [B, 1, num_heads, decode_nums, W]
-        topk_flat = topk_flat.permute(0, 2, 1)  # [B, decode_nums, W]
-        topk_flat = topk_flat.unsqueeze(1).unsqueeze(1)  # [B, 1, 1, decode_nums, W]
-        topk_flat = topk_flat.expand(B, 1, num_heads, decode_nums, W)
+        # Reshape to [B, 1, num_heads, decode_nums, W_d]
+        topk_flat = topk_flat.permute(0, 2, 1)
+        topk_flat = topk_flat.unsqueeze(1).unsqueeze(1)
+        topk_flat = topk_flat.expand(B, 1, num_heads, decode_nums, W_d)
         return topk_flat.to(torch.int32).contiguous()
 
     def get_log_probs(self) -> torch.Tensor:

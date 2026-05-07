@@ -515,20 +515,13 @@ class JaggedGPTLayer(nn.Module):
         q_5d = q.unsqueeze(1)
 
         beam_decode_attn = _get_beam_decode_attn()
-        # Backend selection — see SIDGRModel.generate_beam_decode docstring
-        # for the full rationale. Summary:
-        #   * Per Jerry: fused ("dsl") is faster on SM80/90/120 at small
-        #     decode_nums; SM100 (B200) prefers 3-kernel and the kernel
-        #     auto-routes there regardless of `backend`.
-        #   * We currently force "3kernel" everywhere because the fused
-        #     path in gr-decode_atten/interface.py has a JIT compile-cache
-        #     key bug that deadlocks when decode_nums varies across calls
-        #     (exactly the pattern beam search produces).
-        # FIXME(kernel): once the cache key includes decode_nums upstream,
-        # restore the per-arch default (3kernel for SM100, dsl elsewhere)
-        # by removing the `backend == "3kernel"` assertion in
-        # SIDGRModel.generate_beam_decode and letting Jerry's auto-dispatch
-        # pick the optimal path.
+        # Backend rationale — see SIDGRModel.generate_beam_decode docstring.
+        # The kernel offers two implementations: pipelined ("3kernel") and
+        # fused ("dsl"). Fused is faster on SM80/90/120 at small decode_nums;
+        # SM100 prefers the pipeline and the kernel auto-routes there. We
+        # currently force "3kernel" everywhere as a workaround for an
+        # upstream JIT cache-key bug that deadlocks the fused path when
+        # decode_nums varies across calls.
         kernel_kwargs = {}
         if seqused_k is not None:
             # seqused_k is part of our local interface.py extension and

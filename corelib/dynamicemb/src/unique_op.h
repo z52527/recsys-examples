@@ -28,25 +28,24 @@ namespace dyn_emb {
 /**
  * @brief Segmented unique operation that deduplicates keys per table.
  *
- * This function performs unique operation on keys partitioned by table_ids.
- * Keys are deduplicated within each table independently, allowing the same key
- * to appear in different tables. Uses compound hashing on (key, table_id) pairs
- * with a single shared hash table for memory efficiency.
+ * Keys must be pre-sorted by table: keys[segmented_range[t]:segmented_range[t+1]]
+ * all belong to table t. Uses compound hashing on (key, table_id) pairs with a
+ * single shared hash table for memory efficiency.
  *
  * NOTE: This function is fully asynchronous with no GPU-CPU synchronization.
  *
- * @param keys Input keys tensor (int64 or uint64)
- * @param table_ids Table ID for each key (int64, same length as keys,
- *                  must be in ascending order)
+ * @param keys Input keys tensor (int64 or uint64), sorted by table.
+ * @param segmented_range Table boundary offsets (int64, size = num_tables+1).
+ *                        segmented_range[t] is the start index in keys for
+ *                        table t; segmented_range[num_tables] == num_keys.
  * @param num_tables Total number of tables
  * @param input_frequencies Controls frequency counting behavior:
  *                          - Undefined/empty tensor with numel()==0: Enable
- *                            frequency counting with each occurrence counted as
- * 1
+ *                            frequency counting with each occurrence counted as 1
  *                          - Tensor with numel()==num_keys: Use provided
  *                            frequencies for weighted counting
  *                          - Pass None from Python to disable frequency
- * counting entirely (output freq_counters will be empty)
+ *                            counting entirely (output freq_counters will be empty)
  *
  * @return Tuple of (num_uniques, unique_keys, output_indices, table_offsets,
  *         freq_counters)
@@ -56,40 +55,29 @@ namespace dyn_emb {
  *           input). Only first num_uniques elements are valid.
  *         - output_indices: Index mapping (input idx -> global unique idx)
  *         - table_offsets: Tensor of size (num_tables + 1) with cumulative
- *           counts.
+ *           unique counts per table.
  *         - freq_counters: Frequency counts per unique key. Empty if frequency
  *           counting is disabled (input_frequencies was None).
  */
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-segmented_unique_cuda(at::Tensor keys, at::Tensor table_ids, int64_t num_tables,
+segmented_unique_cuda(at::Tensor keys, at::Tensor segmented_range,
+                      int64_t num_tables,
                       at::Tensor input_frequencies = at::Tensor());
 
 /**
- * @brief Expand table IDs from offsets.
+ * @brief Expand table IDs from offsets (identity mapping: one feature per table,
+ * local_batch_size=1).
  *
- * Generates a table_id for each element based on offsets structure.
- * This is a helper function to prepare input for segmented_unique_cuda.
+ * Generates a table_id for each element via binary search on offsets.
+ * num_tables is derived from offsets.size(0)-1.
  *
- * @param offsets Jagged tensor offsets (int64)
- *                Size = num_features * local_batch_size + 1
- *                Indexed by (feature_id * local_batch_size + batch_id)
- *
- * @param table_offsets_in_feature Feature offsets per table (int64), or None
- *                Size = num_tables + 1
- *                Maps features to tables (adjacent features may share a table)
- *                table_offsets_in_feature[t] is the first feature index for
- * table t If None: each feature is treated as a separate table
- *
- * @param num_tables Number of tables (ignored if table_offsets_in_feature is
- * None)
- * @param local_batch_size Batch size per feature
+ * @param offsets Jagged tensor offsets (int64, size = num_tables + 1)
+ *                offsets[t] is the start index for table t's keys.
  * @param num_elements Total number of elements (keys)
  *
  * @return table_ids tensor (int64) with same length as num_elements
  */
-at::Tensor expand_table_ids_cuda(
-    at::Tensor offsets, c10::optional<at::Tensor> table_offsets_in_feature,
-    int64_t num_tables, int64_t local_batch_size, int64_t num_elements);
+at::Tensor expand_table_ids_cuda(at::Tensor offsets, int64_t num_elements);
 
 /**
  * @brief Compute new lengths and offsets by evenly distributing unique keys.

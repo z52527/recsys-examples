@@ -187,7 +187,9 @@ iter=50):
 | Decode loop | 4.14 ms | 4.10 ms | -0.04 ms |
 | **Total** | **6.28 ms** | **6.60 ms** | **+0.32 ms** |
 
-C/B median = **0.951×** (dense wins by ~5%). Top-1 SIDs match exactly
+`B_ms / C_ms` median = **0.951×** — i.e. B (dense) takes 95.1% of the
+wallclock that C (jagged) takes, so dense is the faster path by ~5% on
+these shapes. Top-1 SIDs match exactly
 across both paths; log-prob delta is ~0.012 (bf16 reduction-order noise,
 well below the 0.15 regression threshold).
 

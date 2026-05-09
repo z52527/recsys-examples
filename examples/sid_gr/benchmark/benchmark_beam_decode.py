@@ -351,14 +351,18 @@ def _validate_compare_outputs(
     test_generate_beam_decode_jagged_kv_matches_dense). Returns
     ``(passed, summary)``.
 
-    Thresholds:
-      - top-1 SID tuple must match exactly across all three paths.
-      - per-position |log_prob delta| < 0.15 between any pair.
-      - top-K beam SID set overlap >= 70% per sample for A vs B.
+    Thresholds (applied symmetrically across all three pairs):
+      - top-1 SID tuple must match exactly.
+      - per-position |log_prob delta| < 0.15.
+      - top-K beam SID set overlap >= 70% per sample.
+
+    The returned summary string includes the three log-prob deltas and the
+    three minimum-over-samples top-K overlaps so a passing config still
+    reports the actual numbers, not just PASS.
     """
     issues = []
 
-    # Top-1 across all three paths
+    # Top-1 across all three pairs
     top1_a = sids_a[:, 0, :]
     top1_b = sids_b[:, 0, :]
     top1_c = sids_c[:, 0, :]
@@ -368,33 +372,61 @@ def _validate_compare_outputs(
     if not torch.equal(top1_b, top1_c):
         bad = (top1_b != top1_c).any(dim=-1).nonzero(as_tuple=True)[0].tolist()
         issues.append(f"B vs C top-1 mismatch on samples {bad}")
+    if not torch.equal(top1_a, top1_c):
+        bad = (top1_a != top1_c).any(dim=-1).nonzero(as_tuple=True)[0].tolist()
+        issues.append(f"A vs C top-1 mismatch on samples {bad}")
 
-    # Log-prob deltas
+    # Log-prob deltas (3 pairs)
     lp_diff_ab = (lp_a - lp_b).abs().max().item()
     lp_diff_bc = (lp_b - lp_c).abs().max().item()
+    lp_diff_ac = (lp_a - lp_c).abs().max().item()
     if lp_diff_ab >= 0.15:
         issues.append(f"|lp_a - lp_b| = {lp_diff_ab:.4f} >= 0.15")
     if lp_diff_bc >= 0.15:
         issues.append(f"|lp_b - lp_c| = {lp_diff_bc:.4f} >= 0.15")
+    if lp_diff_ac >= 0.15:
+        issues.append(f"|lp_a - lp_c| = {lp_diff_ac:.4f} >= 0.15")
 
-    # Top-K overlap A vs B (lower bound, paths can rank different beams)
+    # Top-K overlap across all three pairs (min over samples per pair)
     top_k = sids_a.shape[1]
-    for b in range(sids_a.shape[0]):
-        set_a = {tuple(sids_a[b, k].tolist()) for k in range(top_k)}
-        set_b = {tuple(sids_b[b, k].tolist()) for k in range(top_k)}
-        overlap = len(set_a & set_b) / len(set_a)
-        if overlap < 0.7:
-            issues.append(
-                f"A vs B top-{top_k} overlap {overlap*100:.0f}% < 70% "
-                f"on sample {b}"
-            )
-            break
+    sets_a = [
+        {tuple(sids_a[b, k].tolist()) for k in range(top_k)}
+        for b in range(sids_a.shape[0])
+    ]
+    sets_b = [
+        {tuple(sids_b[b, k].tolist()) for k in range(top_k)}
+        for b in range(sids_b.shape[0])
+    ]
+    sets_c = [
+        {tuple(sids_c[b, k].tolist()) for k in range(top_k)}
+        for b in range(sids_c.shape[0])
+    ]
 
-    if issues:
-        return False, "; ".join(issues)
-    return True, (
-        f"|lp_ab|={lp_diff_ab:.3f} |lp_bc|={lp_diff_bc:.3f}"
+    def _min_overlap(sets_x, sets_y, label):
+        worst = 1.0
+        worst_sample = -1
+        for b, (sx, sy) in enumerate(zip(sets_x, sets_y)):
+            o = len(sx & sy) / len(sx)
+            if o < worst:
+                worst, worst_sample = o, b
+        if worst < 0.7:
+            issues.append(
+                f"{label} top-{top_k} overlap {worst*100:.0f}% < 70% "
+                f"on sample {worst_sample}"
+            )
+        return worst
+
+    ov_ab = _min_overlap(sets_a, sets_b, "A vs B")
+    ov_bc = _min_overlap(sets_b, sets_c, "B vs C")
+    ov_ac = _min_overlap(sets_a, sets_c, "A vs C")
+
+    summary = (
+        f"|lp_ab|={lp_diff_ab:.3f} |lp_bc|={lp_diff_bc:.3f} |lp_ac|={lp_diff_ac:.3f} "
+        f"ov_ab={ov_ab*100:.0f}% ov_bc={ov_bc*100:.0f}% ov_ac={ov_ac*100:.0f}%"
     )
+    if issues:
+        return False, "; ".join(issues) + " | " + summary
+    return True, summary
 
 
 def run_compare_kv_modes(base_args) -> None:
@@ -407,6 +439,11 @@ def run_compare_kv_modes(base_args) -> None:
     match, |lp delta| < 0.15, top-K overlap >= 70%) before timing — so a
     "12 configs ran" line is not silently misread as "12 configs produced
     equivalent rankings".
+
+    By default, any validation failure raises ``RuntimeError`` after the
+    table is printed, so CI / docs-driven copy-paste cannot absorb broken
+    numbers. Pass ``--allow_validation_fail`` for diagnostic sweeps where
+    you want to see the timing of a path that's known to drift.
     """
     hist_lens = [int(x) for x in base_args.sweep_hist.split(",")]
     beam_widths = [int(x) for x in base_args.sweep_beam.split(",")]
@@ -522,9 +559,17 @@ def run_compare_kv_modes(base_args) -> None:
               f"{len(val_fails)} FAIL")
         for line in val_fails:
             print(f"  - {line}")
+        if not getattr(base_args, "allow_validation_fail", False):
+            raise RuntimeError(
+                f"--compare_kv_modes validation failed on "
+                f"{len(val_fails)}/{total} configs. Pass "
+                f"--allow_validation_fail to continue anyway. See the "
+                f"validation block above for per-config diagnostics."
+            )
     else:
         print(f"## Validation: {val_passes}/{total} configs PASS "
-              f"(top-1 exact match, |lp delta| < 0.15, top-K overlap >= 70%)")
+              f"(top-1 exact match, |lp delta| < 0.15, "
+              f"top-K overlap >= 70% on all 3 pairs)")
 
 
 def main():
@@ -568,6 +613,13 @@ def main():
                         help="Time generate(), generate_beam_decode(use_jagged_kv=False) "
                              "and generate_beam_decode(use_jagged_kv=True) side by side. "
                              "Implies sweep semantics; uses --sweep_hist/--sweep_beam.")
+    parser.add_argument("--allow_validation_fail", action="store_true",
+                        help="Don't raise after the sweep when --compare_kv_modes "
+                             "validation fails. Default behavior is strict — any "
+                             "config that fails top-1 / log-prob / top-K overlap "
+                             "thresholds causes the run to exit non-zero so CI "
+                             "and copy-pasted timing tables don't silently "
+                             "absorb broken numbers.")
     args = parser.parse_args()
 
     init.initialize_distributed()

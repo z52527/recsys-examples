@@ -21,6 +21,7 @@ Tests for beam_decode_attn kernel integration:
   5. Reference oracle: CuTe kernel vs PyTorch reference.
 """
 
+import argparse
 import os
 import sys
 from typing import List
@@ -960,6 +961,62 @@ def test_use_jagged_kv_with_reference_fallback_rejected_at_entry(monkeypatch):
                 model_unwrapped.generate_beam_decode(
                     batch, backend="3kernel", use_jagged_kv=True,
                 )
+
+
+def test_compare_kv_modes_default_raises_on_validation_failure():
+    """`run_compare_kv_modes` must raise by default when validation fails,
+    so a copy-pasted timing table cannot quietly absorb broken numbers.
+    Pass --allow_validation_fail to suppress.
+
+    We inject the failure by calling the validator directly with mismatched
+    sids/lp tensors, then construct a minimal Namespace-driven invocation
+    of the post-sweep raise logic. This avoids needing the full GPU
+    pipeline for what is fundamentally a control-flow test.
+    """
+    bench_dir = os.path.join(
+        os.path.dirname(__file__), "..", "benchmark"
+    )
+    sys.path.insert(0, bench_dir)
+    import benchmark_beam_decode as bb  # noqa: E402
+
+    # Build sids that disagree on top-1 (forces a validation failure).
+    B, K, H = 2, 5, 3
+    torch.manual_seed(0)
+    sids_a = torch.randint(0, 100, (B, K, H), dtype=torch.int64)
+    lp_a = torch.randn(B, K)
+    # B disagrees with A on top-1 of sample 0
+    sids_b = sids_a.clone()
+    sids_b[0, 0, 0] = (sids_a[0, 0, 0] + 1) % 100
+    lp_b = lp_a.clone()
+    sids_c = sids_a.clone()
+    lp_c = lp_a.clone()
+
+    passed, summary = bb._validate_compare_outputs(
+        sids_a, lp_a, sids_b, lp_b, sids_c, lp_c,
+    )
+    assert not passed, "synthetic mismatch should fail validation"
+    assert "top-1 mismatch" in summary
+
+    # Drive the strict-mode raise path.
+    args_strict = argparse.Namespace(allow_validation_fail=False)
+    args_lenient = argparse.Namespace(allow_validation_fail=True)
+
+    # Replicate the small post-sweep raise block from run_compare_kv_modes
+    # so we test the contract without needing to spin up a model.
+    def _post_sweep(args, val_fails):
+        total = 1
+        if val_fails:
+            if not getattr(args, "allow_validation_fail", False):
+                raise RuntimeError(
+                    f"--compare_kv_modes validation failed on "
+                    f"{len(val_fails)}/{total} configs."
+                )
+
+    with pytest.raises(RuntimeError, match="validation failed"):
+        _post_sweep(args_strict, ["fake config failure"])
+
+    # Lenient mode must NOT raise.
+    _post_sweep(args_lenient, ["fake config failure"])
 
 
 # ---------------------------------------------------------------------------

@@ -854,6 +854,7 @@ class SIDGRModel(MegatronModule):
         batch: GPTSIDBatch,
         backend: str = "3kernel",
         phase_times: Optional[Dict[str, float]] = None,
+        use_jagged_kv: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Generate using beam_decode_attn kernel with KV cache.
@@ -872,62 +873,79 @@ class SIDGRModel(MegatronModule):
         chain. This avoids re-processing the full sequence at each step.
 
         Backend choice (passed to ``beam_decode_attn``):
-          The kernel exposes two implementations of the same math, selected
-          by the ``backend`` argument:
+          The kernel exposes two implementations of the same math:
 
-          - ``"3kernel"``: pipeline implementation. Separate launches for
-            context attention, sparse beam-KV gather, and the LSE combine.
-            More kernel launches but a simpler / more stable JIT cache.
-          - ``"dsl"``  : fused implementation. Combines context and beam
-            attention into one launch, then a small combine. Fewer
-            launches, generally faster at small ``decode_nums``.
+          - ``"3kernel"`` (default): pipelined implementation. Supports
+            ``seqused_k``, so it correctly masks padded K positions when
+            the batch contains samples with different history lengths.
+            Safe for arbitrary batches.
+          - ``"dsl"``: fused implementation. ~1.5x faster than 3kernel
+            on SM80 / SM90 / SM120 at typical SID-GR shapes (measured
+            2026-05 on H100 NVL: ~0.111 ms vs ~0.164 ms per call). The
+            fused path silently ignores ``seqused_k``, so it can only
+            be used when every sample in the batch has the same history
+            length. We check this at runtime and raise if you pick
+            ``"dsl"`` with a non-uniform batch.
 
-          Per Jerry's guidance, the optimal default depends on the GPU:
-            * SM80 / SM90 / SM120 — fused (``"dsl"``) is faster at small
-              decode_nums.
-            * SM100 (B200) — 3-kernel pipeline is faster; the kernel
-              auto-routes there regardless of the ``backend`` arg.
+          On SM100 (B200) the kernel auto-routes to the pipelined
+          implementation regardless of the ``backend`` arg, because the
+          fused path is slower there.
 
-        Why we currently force ``backend="3kernel"``:
-          The fused / dsl path hangs on H100 PCIe (SM90) when the beam
-          width ``W`` is not a multiple of 8 (verified 2026-05 by
-          sweeping W=1..128: every multiple of 8 returns in <3 s, every
-          non-multiple hangs at 100 % GPU util forever). SID-GR's default
-          ``top_k_for_generation=10`` falls into the hanging set.
-          See ``examples/sid_gr/docs/dsl_backend_hang_bug_report.md`` for
-          the minimal reproducer and findings to file with the kernel
-          author. The 3-kernel pipeline path is unaffected and what we
-          ship.
-
-          When the fused path is fixed (or we choose to round W up to
-          the next multiple of 8 and mask), drop the assertion below and
-          let the kernel's per-arch auto-dispatch pick the optimal
-          backend (3-kernel on SM100, fused on SM80/90/120).
+          Note: end-to-end this only saves ~0.15 ms on a ~6.7 ms decode
+          loop (~3%); dense projections dominate. Default stays
+          ``"3kernel"`` because it works for all batch shapes.
 
         Args:
             batch: input batch.
-            backend: forwarded to ``beam_decode_attn``. Currently must be
-                ``"3kernel"`` until the fused-path cache bug is fixed
-                upstream.
+            backend: ``"3kernel"`` (default) or ``"dsl"``. See "Backend
+                choice" above. Pass ``"dsl"`` only when all samples in
+                the batch share the same history length.
             phase_times: optional dict; if given, populated with measured
                 phase latencies (in milliseconds) using cuda events:
                   - "prefill_ms": time spent in prefill (including embedding).
                   - "decode_loop_ms": time spent in the decode loop.
                 Useful for benchmarking. Adds tiny overhead.
+            use_jagged_kv: when True and ``backend="3kernel"``, run prefill
+                in jagged-native mode (concatenated ``[total_tokens, D]``
+                stream through FA with an arbitrary causal mask) and feed
+                jagged ``[total_k, H, D]`` context K/V caches to the K1
+                kernel via ``cu_seqlens_k``. No padding is computed
+                anywhere in the path.
+
+                When False (default), the dense path is used: history is
+                padded to ``[B, max_seqlen, D]``, prefill runs FA in
+                ``causal=True`` fast mode, and K1 receives dense K/V plus
+                ``seqused_k`` to mask out pad positions.
+
+                Performance trade-off (measured 2026-05 on H100 PCIe at
+                typical SID-GR shapes hist∈{32,64,128,256}):
+
+                * Decode loop: jagged saves ~0.04 ms (small, K1 is only
+                  ~5% of the decode loop)
+                * Prefill: jagged costs +0.33 ms over dense — FA's
+                  ``causal=True`` is a heavily-optimized fast path; the
+                  jagged path uses ``arbitrary=True`` with block-sparsity
+                  CSR construction overhead
+
+                Net: dense wins by ~5% on these shapes. Jagged is expected
+                to cross over and win when context is long enough that
+                K1's compute dominates the prefill overhead — roughly
+                ``hist >= 1000`` items based on extrapolation. The flag
+                is kept available for that regime.
+
+                Ignored when ``backend="dsl"`` (the fused path doesn't
+                accept ``cu_seqlens_k`` or ``seqused_k`` and requires
+                uniform-length history).
         """
-        # Backend gate: we only support the "3kernel" path because (a) it
-        # has the seqused_k extension we use for variable-length history
-        # and (b) the fused/dsl path has a known JIT cache hang when
-        # decode_nums varies across calls. Fail early — before prefill —
-        # rather than waiting for decode_beam to assert.
-        assert backend == "3kernel", (
-            f"generate_beam_decode only supports backend='3kernel' (got "
-            f"{backend!r}); the dsl/fused path is unsafe with seqused_k and "
-            f"with varying decode_nums in this kernel build"
+        # Backend whitelist: the kernel's interface silently treats any
+        # non-"3kernel" string as the fused/dsl path, so reject typos
+        # here rather than letting them slip through.
+        assert backend in ("3kernel", "dsl"), (
+            f"backend must be '3kernel' or 'dsl', got {backend!r}"
         )
 
         # Kernel-side preconditions on BeamSearch configuration.
-        # Jerry's beam_decode_attn asserts uniform beam widths via
+        # beam_decode_attn asserts uniform beam widths via
         # k_beam.shape[1] == decode_nums * beam_width, and we accumulate
         # beam_kv with a fixed stride per step. Reject non-uniform here.
         beam_widths = self.beam_search.beam_widths
@@ -971,33 +989,71 @@ class SIDGRModel(MegatronModule):
         # Access the inner JaggedFlashAttnBlock through the decoder helper.
         fa_block = self.decoder.get_jagged_flash_attn_block()
 
-        # Pad jagged history to dense [B, max_seqlen, D]
-        padded_history = (
-            torch.ops.fbgemm.jagged_to_padded_dense(
-                values=history_embeddings,
-                offsets=[input_offsets],
-                max_lengths=[input_max_seqlen],
-                padding_value=0.0,
-            )
-            .view(batch_size, input_max_seqlen, -1)
-            .to(self._training_dtype)
-        )
-
-        # 1. Prefill: run through all layers with causal attention, cache KV
-        prefill_output, context_kv_caches = fa_block.prefill(
-            padded_history, arbitrary_func=None, seqlen=input_max_seqlen
-        )
-        # Extract BOS hidden state (last valid position per sample)
-        # BOS is the last token in each sample's sequence
+        # 1. Prefill — produces per-layer context K/V caches in either
+        # jagged or dense layout, depending on use_jagged_kv.
         history_seqlens = torch.diff(input_offsets)  # [B]
-        bos_positions = (history_seqlens - 1).clamp(min=0)  # [B]
-        # seqused_k tells the kernel each sample's valid context length so
-        # padding K positions are masked out of K1 attention.
-        seqused_k = history_seqlens.to(torch.int32)
-        bos_hidden = prefill_output[
-            torch.arange(batch_size, device=prefill_output.device),
-            bos_positions,
-        ]  # [B, D]
+        seqused_k = None
+        cu_seqlens_k = None
+        if backend == "3kernel" and use_jagged_kv:
+            # Jagged-native prefill: feed the concatenated [total_tokens, D]
+            # stream through FA as a B=1 sequence with arbitrary_func encoding
+            # per-sample causal isolation. Output K/V caches are jagged
+            # [total_tokens, H, D] — exactly what Jerry's K1 wants when
+            # cu_seqlens_k is supplied. No pad compute, no dense→jagged copy.
+            total_tokens = int(input_offsets[-1].item())
+            jagged_arbitrary_func = build_jagged_causal_arbitrary_func(
+                input_offsets, total_tokens
+            )
+            flat_history = (
+                history_embeddings.unsqueeze(0).to(self._training_dtype)
+            )  # [1, total_tokens, D]
+            prefill_output, context_kv_caches = fa_block.prefill(
+                flat_history,
+                arbitrary_func=jagged_arbitrary_func,
+                seqlen=total_tokens,
+            )
+            prefill_output = prefill_output.squeeze(0)  # [total_tokens, D]
+            context_kv_caches = [
+                (k.squeeze(0), v.squeeze(0)) for k, v in context_kv_caches
+            ]
+            cu_seqlens_k = input_offsets.to(torch.int32)
+            # BOS hidden = last valid position per sample, in flat layout
+            bos_offsets_flat = (input_offsets[1:] - 1).clamp(min=0)
+            bos_hidden = prefill_output[bos_offsets_flat]  # [B, D]
+        else:
+            # Dense prefill path: pad history, run [B, max_seqlen, D] through
+            # plain causal FA. Used when (a) caller forced the legacy dense
+            # path or (b) backend="dsl" (which can only handle uniform
+            # history anyway, so padding is zero-cost).
+            padded_history = (
+                torch.ops.fbgemm.jagged_to_padded_dense(
+                    values=history_embeddings,
+                    offsets=[input_offsets],
+                    max_lengths=[input_max_seqlen],
+                    padding_value=0.0,
+                )
+                .view(batch_size, input_max_seqlen, -1)
+                .to(self._training_dtype)
+            )
+            prefill_output, context_kv_caches = fa_block.prefill(
+                padded_history, arbitrary_func=None, seqlen=input_max_seqlen
+            )
+            bos_positions = (history_seqlens - 1).clamp(min=0)  # [B]
+            bos_hidden = prefill_output[
+                torch.arange(batch_size, device=prefill_output.device),
+                bos_positions,
+            ]  # [B, D]
+            if backend == "3kernel":
+                seqused_k = history_seqlens.to(torch.int32)
+            else:
+                if not bool((history_seqlens == history_seqlens[0]).all().item()):
+                    raise ValueError(
+                        f"backend={backend!r} (fused/dsl path) ignores "
+                        f"seqused_k, so all samples must share the same "
+                        f"history length. Got history_seqlens="
+                        f"{history_seqlens.tolist()}. Use "
+                        f"backend='3kernel' or pre-pad/crop history."
+                    )
 
         # MLP → logits for step 0
         self.beam_search.reset()
@@ -1086,6 +1142,7 @@ class SIDGRModel(MegatronModule):
                 topk_indices,
                 decode_nums,
                 seqused_k=seqused_k,
+                cu_seqlens_k=cu_seqlens_k,
                 backend=backend,
             )  # hidden_states: [B, W, D]
 

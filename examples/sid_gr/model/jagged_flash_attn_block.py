@@ -453,24 +453,30 @@ class JaggedGPTLayer(nn.Module):
         decode_nums: int,
         softmax_scale: Optional[float] = None,
         seqused_k: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
         backend: str = "3kernel",
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Decode step using beam_decode_attn kernel.
 
         Args:
             hidden_states: [batch, beam_width, hidden_size]
-            k_context: [batch, seqlen_context, num_heads, head_dim]
-            v_context: [batch, seqlen_context, num_heads, head_dim]
+            k_context: Dense  (cu_seqlens_k=None): [B, Sk, num_heads, head_dim]
+                       Jagged (cu_seqlens_k set):  [total_k, num_heads, head_dim]
+            v_context: same shape as k_context
             k_beam: [batch, prev_decode_nums * beam_width, num_heads, head_dim]
                 or None if no previous decode steps.
             v_beam: same shape as k_beam, or None.
             topk_indices: [batch, 1, num_heads, decode_nums, beam_width] int32
             decode_nums: number of decode steps in beam KV (including self).
-            seqused_k: [batch] int32 valid context length per sample, or None.
-            backend: "3kernel" (default) or "dsl" (fused). The fused path is
-                currently unsafe across decode steps with varying decode_nums
-                due to a kernel cache key bug; "3kernel" is the reliable
-                default.
+            seqused_k: [batch] int32 valid context length per sample (dense
+                mode), or None.
+            cu_seqlens_k: [batch+1] int32 jagged offsets for k_context /
+                v_context, or None. Mutually exclusive with seqused_k. Only
+                supported with backend="3kernel".
+            backend: "3kernel" (default) or "dsl" (fused). The fused path
+                does not support seqused_k or cu_seqlens_k; it silently
+                ignores them and would produce wrong output on a padded
+                batch. Use "3kernel" whenever the batch isn't uniform.
 
         Returns:
             hidden_states: [batch, beam_width, hidden_size]
@@ -515,26 +521,34 @@ class JaggedGPTLayer(nn.Module):
         q_5d = q.unsqueeze(1)
 
         beam_decode_attn = _get_beam_decode_attn()
-        # Backend rationale — see SIDGRModel.generate_beam_decode docstring
-        # and docs/dsl_backend_hang_bug_report.md.
-        # Two implementations of the same math: pipelined ("3kernel") and
-        # fused ("dsl"). Fused is normally preferred on SM80/90/120 at
-        # small decode_nums; SM100 prefers the pipeline and the kernel
-        # auto-routes there. We currently force "3kernel" because the
-        # fused path hangs on SM90 whenever W % 8 != 0 (our default W=10
-        # falls into this set).
+        # Two implementations of the same math: pipelined ("3kernel")
+        # and fused ("dsl"). Fused is faster on SM80/90/120 at small
+        # decode_nums (~1.5x kernel-level on H100); SM100 prefers the
+        # pipeline and the kernel auto-routes there. The fused path
+        # silently ignores seqused_k, so callers passing it must use
+        # "3kernel". See SIDGRModel.generate_beam_decode for details.
         kernel_kwargs = {}
         if seqused_k is not None:
-            # seqused_k is part of our local interface.py extension and
-            # only valid with backend="3kernel" — the fused/dsl path
-            # doesn't thread it through and pairing it with split-KV
-            # currently hangs. Reject up front rather than silently
-            # producing wrong results.
+            # seqused_k is part of our local interface.py extension to
+            # the pipelined context-attention launch. The fused path
+            # doesn't thread it through, so it would silently produce
+            # wrong results on padded batches.
             assert backend == "3kernel", (
                 f"seqused_k is only supported with backend='3kernel'; "
                 f"got backend={backend!r}"
             )
             kernel_kwargs["seqused_k"] = seqused_k
+        if cu_seqlens_k is not None:
+            # Jagged k_context path — k_context is [total_k, H, D] and the
+            # per-sample length is encoded in cu_seqlens_k.
+            assert backend == "3kernel", (
+                f"cu_seqlens_k is only supported with backend='3kernel'; "
+                f"got backend={backend!r}"
+            )
+            assert seqused_k is None, (
+                "cu_seqlens_k and seqused_k are mutually exclusive"
+            )
+            kernel_kwargs["cu_seqlens_k"] = cu_seqlens_k
         attn_out, _ = beam_decode_attn(
             q_5d,
             k_context,
@@ -689,19 +703,26 @@ class JaggedFlashAttnBlock(nn.Module):
         topk_indices: torch.Tensor,
         decode_nums: int,
         seqused_k: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
         backend: str = "3kernel",
     ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
         """Decode one beam search step through all layers.
 
         Args:
             hidden_states: [batch, beam_width, hidden_size]
-            context_kv_caches: per-layer (k, v) from prefill.
+            context_kv_caches: per-layer (k, v) from prefill. In dense mode
+                each (k, v) is [B, Sk, H, D]; in jagged mode (cu_seqlens_k
+                set) each is [total_k, H, D].
             beam_kv_caches: per-layer (k_beam, v_beam) accumulated from
                 previous decode steps, or None for each layer if no
                 previous steps.
             topk_indices: [B, 1, H, decode_nums, W] int32
             decode_nums: total decode steps including self.
-            seqused_k: [B] int32 valid context length per sample, or None.
+            seqused_k: [B] int32 valid context length per sample (dense mode),
+                or None.
+            cu_seqlens_k: [B+1] int32 jagged offsets for the per-layer
+                k_context / v_context, or None. Mutually exclusive with
+                seqused_k.
             backend: forwarded to the kernel; see JaggedGPTLayer.decode_beam.
 
         Returns:
@@ -719,6 +740,7 @@ class JaggedFlashAttnBlock(nn.Module):
                 k_beam, v_beam,
                 topk_indices, decode_nums,
                 seqused_k=seqused_k,
+                cu_seqlens_k=cu_seqlens_k,
                 backend=backend,
             )
             new_beam_kvs.append(kv_new)

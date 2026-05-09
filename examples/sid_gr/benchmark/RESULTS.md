@@ -3,7 +3,7 @@
 Hardware: **NVIDIA H100 PCIe** (114 SMs).
 Container: recsys-examples Docker (torch 2.11.0a0+nv26, CUDA 13).
 Branch: `fea-mask-beam-search` (SID-GR + Jerry's `beam_decode_attn` kernel).
-Date: 2026-05-07 (re-run after baseline beam-isolation fix).
+Date: 2026-05-09 (re-run with jagged-native option and phase breakdown).
 
 ## ⚠️ Correctness preconditions
 
@@ -20,10 +20,8 @@ new path vs broken baseline".
 
 **Required local kernel patches** (in our `gr-decode_atten/interface.py`
 clone, not yet upstream):
-1. K2 / fused cache keys include `decode_nums, W, B, k_beam.shape[1]` to
-   avoid stale-compile deadlocks.
-2. K1 accepts a `seqused_k` kwarg for variable-length history padding.
-3. `BeamDecodeAttn.forward` forces `num_splits=1` when `seqused_k` is set
+1. K1 accepts a `seqused_k` kwarg for variable-length history padding.
+2. `BeamDecodeAttn.forward` forces `num_splits=1` when `seqused_k` is set
    (workaround for split-KV + seqused_k hang).
 
 If you re-install `quack-kernels` from PyPI without re-cloning
@@ -138,6 +136,73 @@ No meaningful difference in either path — the H100 hardware is equally
 happy with both for tensor-core ops. We test fp16 mainly to verify
 correctness; numeric range is comparable for these SID-GR sizes.
 
+### Backend choice: 3kernel vs dsl (kernel-level)
+
+The model path defaults to `backend="3kernel"` because it's the only
+backend that supports `seqused_k` (variable-length history). For
+reference, a kernel-level micro-benchmark on H100 NVL (SM90, 2026-05)
+at SID-GR shapes (B=4, Hq=Hkv=4, D=64, decode_nums=3) shows the fused
+("dsl") path is ~1.46–1.49× faster per call across all measured
+configs (hist∈{32,64,128,256}, W∈{4,10,20}, bf16/fp16): ~0.111 ms vs
+~0.164 ms median.
+
+End-to-end this only saves ~0.15 ms on a ~6.7 ms decode loop (<3 %);
+prefill + dense projections dominate. `generate_beam_decode` accepts
+`backend="dsl"` but enforces uniform history at runtime (the fused
+path silently ignores `seqused_k`). On SM100 (B200) the kernel
+internally auto-routes to 3kernel regardless of the `backend` arg.
+
+### Jagged-native vs dense+seqused_k path (`use_jagged_kv` flag)
+
+`generate_beam_decode` supports two ways of feeding the variable-length
+context K/V to the K1 launch:
+
+- **Dense + seqused_k** (default, `use_jagged_kv=False`): pad history to
+  `[B, Sk_max, D]`, run prefill with FA's `causal=True` fast path,
+  pass dense K/V plus `seqused_k` to K1 so pad positions are masked out.
+- **Jagged-native** (`use_jagged_kv=True`): concatenate history into a
+  flat `[total_tokens, D]` stream, run prefill with FA's `arbitrary=True`
+  + a jagged-causal mask, feed jagged `[total_k, H, D]` K/V caches to K1
+  with `cu_seqlens_k`. No padding is computed anywhere.
+
+Phase-broken-down measurement on H100 PCIe (bf16, 12 configs, warmup=10
+iter=50):
+
+| Phase | Dense (B) | Jagged (C) | Δ (C - B) |
+|---|---:|---:|---:|
+| Prefill | **2.18 ms** | **2.50 ms** | **+0.33 ms** |
+| Decode loop | 4.14 ms | 4.10 ms | -0.04 ms |
+| **Total** | **6.28 ms** | **6.60 ms** | **+0.32 ms** |
+
+C/B median = **0.951×** (dense wins by ~5%). Top-1 SIDs match exactly
+across both paths; log-prob delta is ~0.012 (bf16 reduction-order noise,
+well below the 0.15 regression threshold).
+
+**Why dense wins on these shapes:**
+
+- The K1 attention is only ~5% of decode loop time; saving its pad
+  positions (~50% of K1 compute, i.e. ~2.5% of decode) gives ~0.04 ms.
+- FA's `causal=True` is a heavily-optimized fast path; the jagged path
+  uses `arbitrary=True` which adds `build_block_sparsity` CSR kernels
+  (~0.15 ms) and slightly slower per-block indexing (~0.13 ms) plus
+  arbitrary_func construction (~0.05 ms).
+- Net: prefill overhead +0.33 ms eats up the +0.04 ms K1 saving.
+
+**When jagged would win** (extrapolation, not measured):
+
+| Shape | Δprefill (est) | Δdecode (est) | Net |
+|---|---:|---:|---:|
+| current bench (hist≤256) | +0.33 ms | -0.04 ms | dense wins ~5% |
+| medium (hist=512) | +0.4 ms | -0.2 ms | dense still wins |
+| long (hist=2048, active users) | +0.6 ms | -1.0 ms | jagged wins ~5% |
+| very long (hist=8192) | +1.0 ms | -4 ms | jagged wins ~15% |
+
+Crossover point is roughly `hist >= 1000` items based on K1 scaling as
+O(B·W·Sk·D) while prefill setup overhead is roughly Sk-independent.
+This matches active-user history lengths in real SID-GR datasets
+(KuaiRand, ml-1m 99-percentile), but typical training/eval truncates
+history to under 512, so the default stays `use_jagged_kv=False`.
+
 ## Correctness verification
 
 Three tiers of correctness signal, in order of strength:
@@ -181,8 +246,6 @@ PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
   `corelib/.../docker_env_setup.md`-style memory.
 - **Split-KV + `seqused_k`**: hangs in the K1 kernel; worked around by
   forcing `num_splits=1` when `seqused_k` is set.
-- **Fused-path JIT cache key**: stale-compile hang when `decode_nums`
-  varies. We default to `backend="3kernel"` which is unaffected.
 - **Non-uniform `beam_widths`**: the kernel asserts uniform widths via
   `k_beam.shape[1] == decode_nums * beam_width`.
   `SIDGRModel.generate_beam_decode` validates uniformity at entry and

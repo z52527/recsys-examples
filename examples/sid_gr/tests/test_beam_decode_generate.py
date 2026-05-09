@@ -735,6 +735,95 @@ def test_generate_vs_generate_beam_decode_regression_guard(
             )
 
 
+@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("max_history_length", [32, 128])
+@pytest.mark.parametrize("num_layers", [2])
+@pytest.mark.parametrize("codebook_sizes", [[128, 128, 128]])
+@pytest.mark.parametrize("batchsize", [4])
+def test_generate_beam_decode_jagged_kv_matches_dense(
+    dtype, max_history_length, num_layers, codebook_sizes, batchsize,
+):
+    """Cross-check use_jagged_kv=True vs the default dense+seqused_k path.
+
+    Both should produce the same top-1 SID tuple per sample. Lower-ranked
+    beams may swap due to bf16 reduction-order differences (jagged prefill
+    runs FA with arbitrary_func instead of causal=True), so we use the same
+    relaxed thresholds as the generate() regression guard.
+    """
+    init = _E2E_DEPS["init"]
+    get_unwrapped_module = _E2E_DEPS["get_unwrapped_module"]
+    ShardedEmbeddingConfig = _E2E_DEPS["ShardedEmbeddingConfig"]
+    create_sid_gr_model_and_optimizer = _E2E_DEPS["create_sid_gr_model_and_optimizer"]
+
+    num_hierarchies = len(codebook_sizes)
+    init.initialize_distributed()
+    init.initialize_model_parallel(1)
+    init.set_random_seed(42)
+
+    hist_name = "hist_sids"
+    cand_name = "cand_sids"
+    codebook_embedding_config = ShardedEmbeddingConfig(
+        feature_names=[hist_name, cand_name],
+        table_name="codebook",
+        vocab_size=sum(codebook_sizes),
+        dim=256,
+        sharding_type="data_parallel",
+    )
+
+    with init.auto_destroy_global_state():
+        model, optimizer = create_sid_gr_model_and_optimizer(
+            dtype=dtype,
+            hidden_size=256,
+            num_attention_heads=4,
+            kv_channels=64,
+            num_layers=num_layers,
+            num_hierarchies=num_hierarchies,
+            codebook_embedding_config=codebook_embedding_config,
+            codebook_sizes=codebook_sizes,
+            use_jagged_flash_attn=True,
+        )
+        optimizer.reload_model_params()
+        model_unwrapped = get_unwrapped_module(model)
+        model_unwrapped.eval()
+
+        batch = _generate_random_batch(
+            batchsize=batchsize,
+            max_history_length=max_history_length,
+            codebook_sizes=codebook_sizes,
+            history_feature_name=hist_name,
+            candidate_feature_name=cand_name,
+        )
+        batch.to(torch.cuda.current_device())
+
+        with torch.no_grad():
+            sids_dense, lp_dense = model_unwrapped.generate_beam_decode(
+                batch, use_jagged_kv=False
+            )
+            sids_jagged, lp_jagged = model_unwrapped.generate_beam_decode(
+                batch, use_jagged_kv=True
+            )
+
+        # Top-1 must match exactly.
+        top1_dense = sids_dense[:, 0, :]
+        top1_jagged = sids_jagged[:, 0, :]
+        per_sample_match = (top1_dense == top1_jagged).all(dim=-1)
+        assert per_sample_match.all(), (
+            f"Top-1 SIDs differ on samples "
+            f"{(~per_sample_match).nonzero(as_tuple=True)[0].tolist()}:\n"
+            f"  dense:  {top1_dense.tolist()}\n"
+            f"  jagged: {top1_jagged.tolist()}"
+        )
+
+        # Log-probs within bf16 reduction-order noise.
+        lp_diff = (lp_dense - lp_jagged).abs().max().item()
+        assert lp_diff < 0.15, (
+            f"log_probs differ by {lp_diff:.4f} (limit 0.15):\n"
+            f"  dense:  {lp_dense.tolist()}\n"
+            f"  jagged: {lp_jagged.tolist()}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test: beam isolation (verify the attention mask actually isolates beams)
 # ---------------------------------------------------------------------------

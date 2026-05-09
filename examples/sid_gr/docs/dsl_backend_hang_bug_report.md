@@ -1,5 +1,9 @@
 # Bug report: `beam_decode_attn(backend="dsl")` hangs when `beam_width % 8 != 0` on SM90
 
+## Status: RESOLVED
+
+Fixed upstream in `gr-decode_atten` commit `9f1c2a9` ("fix: w is not divided by 4", 2026-05-07). Verified end-to-end on H100 NVL (SM90) by re-running the W sweep below: every value in `{1, 2, 4, 8, 9, 10, 11, 12, 14, 15, 16, 17, 20, 24, 32, 40, 48, 64, 128}` returns in <2 s. This document is preserved as a historical record of the bug we filed; the workaround it describes (forcing `backend="3kernel"`) is no longer required on the kernel side, though our model path still defaults to `3kernel` because the fused path silently ignores `seqused_k` (a separate, by-design limitation, not the hang).
+
 ## TL;DR
 
 The fused / `dsl` path of `beam_decode_attn` hangs (GPU at 100% util, kernel never returns) on H100 PCIe (SM90) when the beam width `W` is not a multiple of 8. The 3-kernel pipeline path (`backend="3kernel"`) works correctly for all `W` values we tested.
@@ -9,14 +13,12 @@ The fused / `dsl` path of `beam_decode_attn` hangs (GPU at 100% util, kernel nev
 | | |
 |---|---|
 | GPU | NVIDIA H100 PCIe (114 SMs), compute capability (9, 0) |
-| Container | `nvcr.io/nvidia/pytorch:25.06-py3` based |
+| Container | ` gitlab-master.nvidia.com/devtech-compute/distributed-recommender:devel_latest` based |
 | `torch` | 2.11.0a0+eb65b36914.nv26.02 |
 | `nvidia-cutlass-dsl` | 4.4.0 |
 | `quack-kernels` | 0.4.1 |
 | `flash-attn-cute` | 0.1.0 |
-| `gr-decode_atten` | clone at `master` (with our local cache-key patch — see below) |
-
-We did patch `gr-decode_atten/interface.py` locally to add `decode_nums, W, B, k_beam.shape[1]` (or `k_context.shape[1]`) to the `_compile_cache` keys for `_beam_sparse_attention` and `_fused_context_beam`. **The hang reproduces with or without this patch** — the cache-key issue we previously suspected is not the root cause.
+| `gr-decode_atten` | clone at `master` |
 
 `make tt` (`tests/test_fwd.py`) passes for both `3kernel` and `dsl` paths because all those tests use `W ∈ {128, 256, 512, 1024}` — all multiples of 8.
 
@@ -94,6 +96,6 @@ If you can point at where in `_fused_context_beam` (or the SM90 backend it dispa
 1. assert `W % 8 == 0` at the Python entry of the fused path and fall back to `3kernel` otherwise, or
 2. make the fused kernel actually handle non-multiple-of-8 `W` (probably what most callers expect).
 
-## Workaround in our code
+## Workaround in our code (historical — bug is now fixed)
 
-For our SID-GR integration we hard-code `backend="3kernel"`. Once the fused path supports arbitrary `W`, we'd switch to letting Jerry's per-arch auto-dispatch pick (3kernel on SM100, fused on SM80/90/120).
+While this bug was open we hard-coded `backend="3kernel"` in `SIDGRModel.generate_beam_decode`. After the upstream fix (`9f1c2a9`) we relaxed that to a runtime-checked option: `backend="3kernel"` remains the default (it's the only backend that supports our local `seqused_k` extension), but `backend="dsl"` is now selectable when the caller guarantees uniform-length history.

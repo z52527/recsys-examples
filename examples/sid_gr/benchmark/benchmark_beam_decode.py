@@ -34,7 +34,7 @@ import os
 import statistics
 import sys
 import time
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 import torch
 
@@ -343,17 +343,78 @@ def run_sweep(base_args) -> None:
         )
 
 
+def _validate_compare_outputs(
+    sids_a, lp_a, sids_b, lp_b, sids_c, lp_c,
+) -> Tuple[bool, str]:
+    """Apply the same thresholds as the regression-guard tests
+    (test_generate_vs_generate_beam_decode_regression_guard +
+    test_generate_beam_decode_jagged_kv_matches_dense). Returns
+    ``(passed, summary)``.
+
+    Thresholds:
+      - top-1 SID tuple must match exactly across all three paths.
+      - per-position |log_prob delta| < 0.15 between any pair.
+      - top-K beam SID set overlap >= 70% per sample for A vs B.
+    """
+    issues = []
+
+    # Top-1 across all three paths
+    top1_a = sids_a[:, 0, :]
+    top1_b = sids_b[:, 0, :]
+    top1_c = sids_c[:, 0, :]
+    if not torch.equal(top1_a, top1_b):
+        bad = (top1_a != top1_b).any(dim=-1).nonzero(as_tuple=True)[0].tolist()
+        issues.append(f"A vs B top-1 mismatch on samples {bad}")
+    if not torch.equal(top1_b, top1_c):
+        bad = (top1_b != top1_c).any(dim=-1).nonzero(as_tuple=True)[0].tolist()
+        issues.append(f"B vs C top-1 mismatch on samples {bad}")
+
+    # Log-prob deltas
+    lp_diff_ab = (lp_a - lp_b).abs().max().item()
+    lp_diff_bc = (lp_b - lp_c).abs().max().item()
+    if lp_diff_ab >= 0.15:
+        issues.append(f"|lp_a - lp_b| = {lp_diff_ab:.4f} >= 0.15")
+    if lp_diff_bc >= 0.15:
+        issues.append(f"|lp_b - lp_c| = {lp_diff_bc:.4f} >= 0.15")
+
+    # Top-K overlap A vs B (lower bound, paths can rank different beams)
+    top_k = sids_a.shape[1]
+    for b in range(sids_a.shape[0]):
+        set_a = {tuple(sids_a[b, k].tolist()) for k in range(top_k)}
+        set_b = {tuple(sids_b[b, k].tolist()) for k in range(top_k)}
+        overlap = len(set_a & set_b) / len(set_a)
+        if overlap < 0.7:
+            issues.append(
+                f"A vs B top-{top_k} overlap {overlap*100:.0f}% < 70% "
+                f"on sample {b}"
+            )
+            break
+
+    if issues:
+        return False, "; ".join(issues)
+    return True, (
+        f"|lp_ab|={lp_diff_ab:.3f} |lp_bc|={lp_diff_bc:.3f}"
+    )
+
+
 def run_compare_kv_modes(base_args) -> None:
     """3-way sweep: generate() vs generate_beam_decode(use_jagged_kv=False)
     vs generate_beam_decode(use_jagged_kv=True). Reports per-config timings
     and a markdown table that maps to the "Jagged-native vs dense" section
     in RESULTS.md.
+
+    Each config is also validated for output equivalence (top-1 exact
+    match, |lp delta| < 0.15, top-K overlap >= 70%) before timing — so a
+    "12 configs ran" line is not silently misread as "12 configs produced
+    equivalent rankings".
     """
     hist_lens = [int(x) for x in base_args.sweep_hist.split(",")]
     beam_widths = [int(x) for x in base_args.sweep_beam.split(",")]
     dtypes = [s.strip() for s in base_args.sweep_dtype.split(",")]
 
     rows = []
+    val_passes = 0
+    val_fails: List[str] = []
     for dtype_name in dtypes:
         dtype = _resolve_dtype(dtype_name)
         for hl in hist_lens:
@@ -365,6 +426,26 @@ def run_compare_kv_modes(base_args) -> None:
 
                 init.set_random_seed(cfg.seed)
                 model, optimizer, model_unwrapped, batch = build_model(cfg, dtype)
+
+                # 1. Untimed correctness pass first. If thresholds fail,
+                # we still time and report — but flag the validation.
+                with torch.no_grad():
+                    sids_a, lp_a = model_unwrapped.generate(batch)
+                    sids_b, lp_b = model_unwrapped.generate_beam_decode(
+                        batch, backend="3kernel", use_jagged_kv=False,
+                    )
+                    sids_c, lp_c = model_unwrapped.generate_beam_decode(
+                        batch, backend="3kernel", use_jagged_kv=True,
+                    )
+                val_ok, val_msg = _validate_compare_outputs(
+                    sids_a, lp_a, sids_b, lp_b, sids_c, lp_c,
+                )
+                if val_ok:
+                    val_passes += 1
+                else:
+                    val_fails.append(
+                        f"[{dtype_name} hist={hl} bw={bw}] {val_msg}"
+                    )
 
                 @torch.no_grad()
                 def run_a():  # generate()
@@ -401,12 +482,14 @@ def run_compare_kv_modes(base_args) -> None:
                     "pre_c": phase_c["prefill_ms_median"],
                     "dec_c": phase_c["decode_loop_ms_median"],
                 })
+                val_tag = "PASS" if val_ok else "FAIL"
                 print(
                     f"[{dtype_name} hist={hl:>3} bw={bw:>2}] "
                     f"A(generate)={ms_a:5.2f}  "
                     f"B(dense)={ms_b:5.2f}(pre={phase_b['prefill_ms_median']:.2f},dec={phase_b['decode_loop_ms_median']:.2f})  "
                     f"C(jagged)={ms_c:5.2f}(pre={phase_c['prefill_ms_median']:.2f},dec={phase_c['decode_loop_ms_median']:.2f})  "
-                    f"C/B={ms_b/ms_c:.3f}x"
+                    f"B_ms/C_ms={ms_b/ms_c:.3f}x  "  # >1: C faster, <1: B faster
+                    f"[validate: {val_tag}]"
                 )
 
                 del model, optimizer, model_unwrapped, batch
@@ -417,11 +500,11 @@ def run_compare_kv_modes(base_args) -> None:
     print()
     print(
         "| dtype | hist | bw | A generate | B dense | B pre | B dec "
-        "| C jagged | C pre | C dec | C/B |"
+        "| C jagged | C pre | C dec | B_ms / C_ms |"
     )
     print(
         "|-------|-----:|---:|-----------:|--------:|------:|------:"
-        "|---------:|------:|------:|----:|"
+        "|---------:|------:|------:|------------:|"
     )
     for r in rows:
         print(
@@ -431,6 +514,17 @@ def run_compare_kv_modes(base_args) -> None:
             f"{r['ms_c']:>8.2f} | {r['pre_c']:>5.2f} | {r['dec_c']:>5.2f} | "
             f"{r['ms_b']/r['ms_c']:>.3f}x |"
         )
+
+    total = val_passes + len(val_fails)
+    print()
+    if val_fails:
+        print(f"## Validation: {val_passes}/{total} configs PASS, "
+              f"{len(val_fails)} FAIL")
+        for line in val_fails:
+            print(f"  - {line}")
+    else:
+        print(f"## Validation: {val_passes}/{total} configs PASS "
+              f"(top-1 exact match, |lp delta| < 0.15, top-K overlap >= 70%)")
 
 
 def main():

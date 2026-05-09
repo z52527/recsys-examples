@@ -824,6 +824,144 @@ def test_generate_beam_decode_jagged_kv_matches_dense(
         )
 
 
+@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
+def test_use_jagged_kv_with_dsl_backend_rejected_at_entry():
+    """``use_jagged_kv=True`` is meaningless under ``backend="dsl"`` (the
+    fused path doesn't accept cu_seqlens_k). The combination must be
+    rejected at entry, not silently downgraded to the dense path.
+    """
+    init = _E2E_DEPS["init"]
+    get_unwrapped_module = _E2E_DEPS["get_unwrapped_module"]
+    ShardedEmbeddingConfig = _E2E_DEPS["ShardedEmbeddingConfig"]
+    create_sid_gr_model_and_optimizer = _E2E_DEPS["create_sid_gr_model_and_optimizer"]
+
+    init.initialize_distributed()
+    init.initialize_model_parallel(1)
+    init.set_random_seed(42)
+
+    hist_name = "hist_sids"
+    cand_name = "cand_sids"
+    codebook_sizes = [128, 128, 128]
+    codebook_embedding_config = ShardedEmbeddingConfig(
+        feature_names=[hist_name, cand_name],
+        table_name="codebook",
+        vocab_size=sum(codebook_sizes),
+        dim=256,
+        sharding_type="data_parallel",
+    )
+
+    with init.auto_destroy_global_state():
+        model, optimizer = create_sid_gr_model_and_optimizer(
+            dtype=torch.bfloat16,
+            hidden_size=256,
+            num_attention_heads=4,
+            kv_channels=64,
+            num_layers=2,
+            num_hierarchies=3,
+            codebook_embedding_config=codebook_embedding_config,
+            codebook_sizes=codebook_sizes,
+            use_jagged_flash_attn=True,
+        )
+        optimizer.reload_model_params()
+        model_unwrapped = get_unwrapped_module(model)
+        model_unwrapped.eval()
+
+        batch = _generate_random_batch(
+            batchsize=4,
+            max_history_length=64,
+            codebook_sizes=codebook_sizes,
+            history_feature_name=hist_name,
+            candidate_feature_name=cand_name,
+        )
+        batch.to(torch.cuda.current_device())
+
+        with pytest.raises(ValueError, match="use_jagged_kv=True requires backend='3kernel'"):
+            with torch.no_grad():
+                model_unwrapped.generate_beam_decode(
+                    batch, backend="dsl", use_jagged_kv=True,
+                )
+
+
+@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
+def test_use_jagged_kv_with_reference_fallback_rejected_at_entry(monkeypatch):
+    """When the real CuTe kernel isn't installed, the resolver returns
+    ``_beam_decode_attn_reference`` — which has ``cu_seqlens_k`` in its
+    signature for the explicit-raise contract but cannot actually run
+    jagged. The capability probe must catch this at entry, not later.
+    """
+    init = _E2E_DEPS["init"]
+    get_unwrapped_module = _E2E_DEPS["get_unwrapped_module"]
+    ShardedEmbeddingConfig = _E2E_DEPS["ShardedEmbeddingConfig"]
+    create_sid_gr_model_and_optimizer = _E2E_DEPS["create_sid_gr_model_and_optimizer"]
+
+    # gpt_model imports via `from .jagged_flash_attn_block import ...`,
+    # which registers the module under the package-qualified name. The
+    # standalone `import jagged_flash_attn_block` would land a *separate*
+    # module object in sys.modules, so patching that wouldn't affect the
+    # one the probe actually reads. Pull the right one out of sys.modules.
+    import sys as _sys
+    jfab = _sys.modules.get("model.jagged_flash_attn_block")
+    assert jfab is not None, (
+        "model.jagged_flash_attn_block not loaded; the test's "
+        "create_sid_gr_model_and_optimizer call should have triggered the "
+        "import chain"
+    )
+
+    init.initialize_distributed()
+    init.initialize_model_parallel(1)
+    init.set_random_seed(42)
+
+    hist_name = "hist_sids"
+    cand_name = "cand_sids"
+    codebook_sizes = [128, 128, 128]
+    codebook_embedding_config = ShardedEmbeddingConfig(
+        feature_names=[hist_name, cand_name],
+        table_name="codebook",
+        vocab_size=sum(codebook_sizes),
+        dim=256,
+        sharding_type="data_parallel",
+    )
+
+    with init.auto_destroy_global_state():
+        model, optimizer = create_sid_gr_model_and_optimizer(
+            dtype=torch.bfloat16,
+            hidden_size=256,
+            num_attention_heads=4,
+            kv_channels=64,
+            num_layers=2,
+            num_hierarchies=3,
+            codebook_embedding_config=codebook_embedding_config,
+            codebook_sizes=codebook_sizes,
+            use_jagged_flash_attn=True,
+        )
+        optimizer.reload_model_params()
+        model_unwrapped = get_unwrapped_module(model)
+        model_unwrapped.eval()
+
+        batch = _generate_random_batch(
+            batchsize=4,
+            max_history_length=64,
+            codebook_sizes=codebook_sizes,
+            history_feature_name=hist_name,
+            candidate_feature_name=cand_name,
+        )
+        batch.to(torch.cuda.current_device())
+
+        # Force the cached resolver result to be the PyTorch reference
+        # fallback, mimicking an environment without the CuTe kernel
+        # installed. _get_beam_decode_attn caches at the module level on
+        # the _beam_decode_attn name, so patch that directly.
+        monkeypatch.setattr(
+            jfab, "_beam_decode_attn", jfab._beam_decode_attn_reference,
+        )
+
+        with pytest.raises(RuntimeError, match="reference fallback does not implement"):
+            with torch.no_grad():
+                model_unwrapped.generate_beam_decode(
+                    batch, backend="3kernel", use_jagged_kv=True,
+                )
+
+
 # ---------------------------------------------------------------------------
 # Test: beam isolation (verify the attention mask actually isolates beams)
 # ---------------------------------------------------------------------------

@@ -933,9 +933,11 @@ class SIDGRModel(MegatronModule):
                 ``hist >= 1000`` items based on extrapolation. The flag
                 is kept available for that regime.
 
-                Ignored when ``backend="dsl"`` (the fused path doesn't
-                accept ``cu_seqlens_k`` or ``seqused_k`` and requires
-                uniform-length history).
+                Rejected at entry when paired with ``backend="dsl"`` (the
+                fused path doesn't accept ``cu_seqlens_k`` or
+                ``seqused_k`` and requires uniform-length history;
+                silently downgrading to dense would be a footgun, so the
+                combination raises ``ValueError`` instead).
         """
         # Backend whitelist: the kernel's interface silently treats any
         # non-"3kernel" string as the fused/dsl path, so reject typos
@@ -943,6 +945,18 @@ class SIDGRModel(MegatronModule):
         if backend not in ("3kernel", "dsl"):
             raise ValueError(
                 f"backend must be '3kernel' or 'dsl', got {backend!r}"
+            )
+
+        # use_jagged_kv requires the K1-only path. The fused/dsl path does
+        # not consume cu_seqlens_k, so silently routing through dense (or
+        # running an irrelevant capability probe first) is a footgun. The
+        # docstring used to say this combination was "ignored"; that
+        # contradicted the CLI help. Reject it explicitly.
+        if use_jagged_kv and backend != "3kernel":
+            raise ValueError(
+                f"use_jagged_kv=True requires backend='3kernel'; got "
+                f"backend={backend!r}. The fused/dsl path does not accept "
+                f"cu_seqlens_k."
             )
 
         # Kernel-side preconditions on BeamSearch configuration.
@@ -975,14 +989,34 @@ class SIDGRModel(MegatronModule):
         # release does not. Detect the gap before we build any tensors so
         # the user gets a clear error instead of a TypeError deep in
         # decode_beam.
+        #
+        # Two failure modes:
+        #   (a) Real CuTe kernel is installed but lacks the cu_seqlens_k
+        #       patch (upstream release). signature() check catches this.
+        #   (b) Real CuTe kernel is unavailable and the resolver fell
+        #       back to _beam_decode_attn_reference, which has
+        #       cu_seqlens_k in its signature for the explicit-raise
+        #       contract — so the signature() check would pass even
+        #       though the path can't actually run jagged. Identity-check
+        #       against the fallback to catch this.
         if use_jagged_kv:
             import inspect
-            from .jagged_flash_attn_block import _get_beam_decode_attn
+            from .jagged_flash_attn_block import (
+                _get_beam_decode_attn, _beam_decode_attn_reference,
+            )
+            kernel = _get_beam_decode_attn()
+            if kernel is _beam_decode_attn_reference:
+                raise RuntimeError(
+                    "use_jagged_kv=True requires the real CuTe "
+                    "beam_decode_attn kernel; the PyTorch reference "
+                    "fallback does not implement jagged context K/V "
+                    "(it only raises NotImplementedError when actually "
+                    "called). Install gr-decode_atten with the "
+                    "cu_seqlens_k patch (MR-B) or use use_jagged_kv=False."
+                )
             try:
-                _kernel_sig = inspect.signature(_get_beam_decode_attn())
-            except Exception:
-                # Reference fallback path may not be inspectable; let the
-                # call itself raise a clearer error.
+                _kernel_sig = inspect.signature(kernel)
+            except (TypeError, ValueError):
                 _kernel_sig = None
             if (_kernel_sig is not None
                     and "cu_seqlens_k" not in _kernel_sig.parameters):

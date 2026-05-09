@@ -165,14 +165,20 @@ def build_model(args, dtype: torch.dtype):
     return model, optimizer, model_unwrapped, batch
 
 
-def measure_phase_breakdown(model_unwrapped, batch, num_iter: int) -> Dict[str, float]:
+def measure_phase_breakdown(
+    model_unwrapped, batch, num_iter: int,
+    backend: str = "3kernel", use_jagged_kv: bool = False,
+) -> Dict[str, float]:
     """Average prefill_ms and decode_loop_ms across num_iter calls."""
     prefill = []
     decode = []
     for _ in range(num_iter):
         phase: Dict[str, float] = {}
         with torch.no_grad():
-            model_unwrapped.generate_beam_decode(batch, phase_times=phase)
+            model_unwrapped.generate_beam_decode(
+                batch, backend=backend, use_jagged_kv=use_jagged_kv,
+                phase_times=phase,
+            )
         prefill.append(phase["prefill_ms"])
         decode.append(phase["decode_loop_ms"])
     return {
@@ -195,7 +201,9 @@ def run_one_config(args) -> None:
 
     @torch.no_grad()
     def run_beam_decode():
-        sids, _ = model_unwrapped.generate_beam_decode(batch)
+        sids, _ = model_unwrapped.generate_beam_decode(
+            batch, backend=args.backend, use_jagged_kv=args.use_jagged_kv,
+        )
         return sids
 
     # Sanity: both produce valid outputs
@@ -223,7 +231,11 @@ def run_one_config(args) -> None:
           f"p95={stats_orig['p95_ms']:.3f} ms, "
           f"stdev={stats_orig['stdev_ms']:.3f} ms")
 
-    print("[2/2] Timing generate_beam_decode() (Jerry kernel, 3-kernel backend)...")
+    kv_label = "jagged+cu_seqlens_k" if args.use_jagged_kv else "dense+seqused_k"
+    print(
+        f"[2/2] Timing generate_beam_decode() "
+        f"(backend={args.backend}, {kv_label})..."
+    )
     stats_decode = time_fn(run_beam_decode, args.num_warmup, args.num_iter)
     print(f"  median={stats_decode['median_ms']:.3f} ms, "
           f"mean={stats_decode['mean_ms']:.3f} ms, "
@@ -231,7 +243,10 @@ def run_one_config(args) -> None:
           f"stdev={stats_decode['stdev_ms']:.3f} ms")
 
     # Phase breakdown for the beam_decode path
-    phase = measure_phase_breakdown(model_unwrapped, batch, num_iter=args.num_iter)
+    phase = measure_phase_breakdown(
+        model_unwrapped, batch, num_iter=args.num_iter,
+        backend=args.backend, use_jagged_kv=args.use_jagged_kv,
+    )
     print(f"  phase breakdown: prefill={phase['prefill_ms_median']:.3f} ms, "
           f"decode_loop={phase['decode_loop_ms_median']:.3f} ms")
 
@@ -266,12 +281,15 @@ def run_sweep(base_args) -> None:
 
                 @torch.no_grad()
                 def run_decode():
-                    model_unwrapped.generate_beam_decode(batch)
+                    model_unwrapped.generate_beam_decode(
+                        batch, backend=cfg.backend, use_jagged_kv=cfg.use_jagged_kv,
+                    )
 
                 stats_o = time_fn(run_orig, cfg.num_warmup, cfg.num_iter)
                 stats_d = time_fn(run_decode, cfg.num_warmup, cfg.num_iter)
                 phase = measure_phase_breakdown(
-                    model_unwrapped, batch, num_iter=cfg.num_iter
+                    model_unwrapped, batch, num_iter=cfg.num_iter,
+                    backend=cfg.backend, use_jagged_kv=cfg.use_jagged_kv,
                 )
                 rows.append(
                     {
@@ -325,6 +343,96 @@ def run_sweep(base_args) -> None:
         )
 
 
+def run_compare_kv_modes(base_args) -> None:
+    """3-way sweep: generate() vs generate_beam_decode(use_jagged_kv=False)
+    vs generate_beam_decode(use_jagged_kv=True). Reports per-config timings
+    and a markdown table that maps to the "Jagged-native vs dense" section
+    in RESULTS.md.
+    """
+    hist_lens = [int(x) for x in base_args.sweep_hist.split(",")]
+    beam_widths = [int(x) for x in base_args.sweep_beam.split(",")]
+    dtypes = [s.strip() for s in base_args.sweep_dtype.split(",")]
+
+    rows = []
+    for dtype_name in dtypes:
+        dtype = _resolve_dtype(dtype_name)
+        for hl in hist_lens:
+            for bw in beam_widths:
+                cfg = argparse.Namespace(**vars(base_args))
+                cfg.max_hist_len = hl
+                cfg.beam_width = bw
+                cfg.dtype = dtype_name
+
+                init.set_random_seed(cfg.seed)
+                model, optimizer, model_unwrapped, batch = build_model(cfg, dtype)
+
+                @torch.no_grad()
+                def run_a():  # generate()
+                    model_unwrapped.generate(batch)
+
+                @torch.no_grad()
+                def run_b():  # dense + seqused_k
+                    model_unwrapped.generate_beam_decode(
+                        batch, backend="3kernel", use_jagged_kv=False,
+                    )
+
+                @torch.no_grad()
+                def run_c():  # jagged + cu_seqlens_k
+                    model_unwrapped.generate_beam_decode(
+                        batch, backend="3kernel", use_jagged_kv=True,
+                    )
+
+                ms_a = time_fn(run_a, cfg.num_warmup, cfg.num_iter)["median_ms"]
+                ms_b = time_fn(run_b, cfg.num_warmup, cfg.num_iter)["median_ms"]
+                ms_c = time_fn(run_c, cfg.num_warmup, cfg.num_iter)["median_ms"]
+                phase_b = measure_phase_breakdown(
+                    model_unwrapped, batch, num_iter=cfg.num_iter,
+                    backend="3kernel", use_jagged_kv=False,
+                )
+                phase_c = measure_phase_breakdown(
+                    model_unwrapped, batch, num_iter=cfg.num_iter,
+                    backend="3kernel", use_jagged_kv=True,
+                )
+                rows.append({
+                    "dtype": dtype_name, "hist_len": hl, "beam_w": bw,
+                    "ms_a": ms_a, "ms_b": ms_b, "ms_c": ms_c,
+                    "pre_b": phase_b["prefill_ms_median"],
+                    "dec_b": phase_b["decode_loop_ms_median"],
+                    "pre_c": phase_c["prefill_ms_median"],
+                    "dec_c": phase_c["decode_loop_ms_median"],
+                })
+                print(
+                    f"[{dtype_name} hist={hl:>3} bw={bw:>2}] "
+                    f"A(generate)={ms_a:5.2f}  "
+                    f"B(dense)={ms_b:5.2f}(pre={phase_b['prefill_ms_median']:.2f},dec={phase_b['decode_loop_ms_median']:.2f})  "
+                    f"C(jagged)={ms_c:5.2f}(pre={phase_c['prefill_ms_median']:.2f},dec={phase_c['decode_loop_ms_median']:.2f})  "
+                    f"C/B={ms_b/ms_c:.3f}x"
+                )
+
+                del model, optimizer, model_unwrapped, batch
+                torch.cuda.empty_cache()
+
+    print()
+    print("## 3-way comparison")
+    print()
+    print(
+        "| dtype | hist | bw | A generate | B dense | B pre | B dec "
+        "| C jagged | C pre | C dec | C/B |"
+    )
+    print(
+        "|-------|-----:|---:|-----------:|--------:|------:|------:"
+        "|---------:|------:|------:|----:|"
+    )
+    for r in rows:
+        print(
+            f"| {r['dtype']:>5} | {r['hist_len']:>4} | {r['beam_w']:>2} | "
+            f"{r['ms_a']:>10.2f} | {r['ms_b']:>7.2f} | "
+            f"{r['pre_b']:>5.2f} | {r['dec_b']:>5.2f} | "
+            f"{r['ms_c']:>8.2f} | {r['pre_c']:>5.2f} | {r['dec_c']:>5.2f} | "
+            f"{r['ms_b']/r['ms_c']:>.3f}x |"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     # Workload
@@ -353,13 +461,28 @@ def main():
                         help="Comma-separated dtype names (bf16/fp16) for sweep.")
     parser.add_argument("--dtype", default="bf16", choices=list(_DTYPE_MAP.keys()),
                         help="Model + activation dtype (bf16 or fp16).")
+    # Backend / KV-mode
+    parser.add_argument("--backend", default="3kernel", choices=["3kernel", "dsl"],
+                        help="beam_decode_attn backend. '3kernel' supports "
+                             "variable-length history; 'dsl' requires uniform.")
+    parser.add_argument("--use_jagged_kv", action="store_true",
+                        help="Use the jagged-native prefill + cu_seqlens_k path. "
+                             "Only valid with backend='3kernel'. Requires the "
+                             "cu_seqlens_k patch in gr-decode_atten/interface.py "
+                             "(MR-B). See RESULTS.md for the perf trade-off.")
+    parser.add_argument("--compare_kv_modes", action="store_true",
+                        help="Time generate(), generate_beam_decode(use_jagged_kv=False) "
+                             "and generate_beam_decode(use_jagged_kv=True) side by side. "
+                             "Implies sweep semantics; uses --sweep_hist/--sweep_beam.")
     args = parser.parse_args()
 
     init.initialize_distributed()
     init.initialize_model_parallel(1)
 
     with init.auto_destroy_global_state():
-        if args.sweep:
+        if args.compare_kv_modes:
+            run_compare_kv_modes(args)
+        elif args.sweep:
             run_sweep(args)
         else:
             run_one_config(args)

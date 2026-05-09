@@ -21,13 +21,26 @@ new path vs broken baseline".
 **Required local kernel patches** (in our `gr-decode_atten/interface.py`
 clone, not yet upstream):
 1. K1 accepts a `seqused_k` kwarg for variable-length history padding.
+   Required by the default `use_jagged_kv=False` path. Filed upstream
+   as MR-A on `runchuz/gr-decode_atten:feat/seqused-k`.
 2. `BeamDecodeAttn.forward` forces `num_splits=1` when `seqused_k` is set
-   (workaround for split-KV + seqused_k hang).
+   (workaround for split-KV + seqused_k hang on SM90). Bundled with
+   patch (1).
+3. K1 accepts a `cu_seqlens_k` kwarg for jagged context K/V. Only
+   required when `use_jagged_kv=True`. Filed upstream as MR-B on
+   `runchuz/gr-decode_atten:feat/cu-seqlens-k-jagged-context` (built
+   on top of MR-A).
 
 If you re-install `quack-kernels` from PyPI without re-cloning
 `gr-decode_atten`, the patches stay (they live in the local clone). If
 you re-clone `gr-decode_atten` from upstream, the patches must be
 re-applied.
+
+`generate_beam_decode` runs a `inspect.signature` capability probe at
+entry: if you pick `use_jagged_kv=True` but the installed
+`beam_decode_attn` does not accept `cu_seqlens_k`, you get a clear
+``RuntimeError`` instead of a confusing ``TypeError`` deep in the
+decode loop.
 
 ## Setup
 
@@ -230,6 +243,9 @@ Three tiers of correctness signal, in order of strength:
 
 ## How to reproduce
 
+The headline `generate()` vs `generate_beam_decode()` (dense path) sweep
+in the table at the top of this document:
+
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
@@ -238,6 +254,23 @@ PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
   benchmark/benchmark_beam_decode.py \
   --sweep --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 --sweep_dtype bf16,fp16
 ```
+
+The dense-vs-jagged 3-way comparison (the `Jagged-native vs
+dense+seqused_k path` table above):
+
+```bash
+cd examples/sid_gr
+PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
+  PYTHONPATH=$REPO/examples:$KERNEL_PATH \
+  torchrun --nproc_per_node 1 --master_port 29504 \
+  benchmark/benchmark_beam_decode.py \
+  --compare_kv_modes --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 \
+  --sweep_dtype bf16 --num_warmup 10 --num_iter 50
+```
+
+`--compare_kv_modes` requires the `cu_seqlens_k` patch in
+`gr-decode_atten/interface.py` (MR-B) for the jagged column; the
+benchmark probes for it and raises a clear error if it's missing.
 
 ## Known issues
 

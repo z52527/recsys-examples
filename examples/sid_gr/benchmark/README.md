@@ -41,6 +41,25 @@ PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
 
 Output: per-config latency lines plus a markdown table at the end.
 
+### KV-mode comparison (3-way)
+
+To reproduce the dense-vs-jagged numbers in `RESULTS.md` (compares
+`generate()` baseline, `generate_beam_decode(use_jagged_kv=False)`, and
+`generate_beam_decode(use_jagged_kv=True)` side by side, with phase
+breakdown for the latter two):
+
+```bash
+cd examples/sid_gr
+PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
+  torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
+  --compare_kv_modes --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 \
+  --sweep_dtype bf16 --num_warmup 10 --num_iter 50
+```
+
+The `--use_jagged_kv` mode requires the `cu_seqlens_k` patch in
+`gr-decode_atten/interface.py` (MR-B). The benchmark probes for it at
+runtime and raises a clear error otherwise.
+
 ## Tunable arguments
 
 | Flag | Default | Description |
@@ -56,3 +75,6 @@ Output: per-config latency lines plus a markdown table at the end.
 | `--num_layers` | 2 | |
 | `--num_warmup` | 5 | warmup iterations (CuTe JIT compile is slow on first call) |
 | `--num_iter` | 20 | timed iterations |
+| `--backend` | `3kernel` | `beam_decode_attn` backend (`3kernel` or `dsl`) |
+| `--use_jagged_kv` | off | jagged-native prefill + `cu_seqlens_k` (requires MR-B) |
+| `--compare_kv_modes` | off | 3-way sweep (generate / dense / jagged) |

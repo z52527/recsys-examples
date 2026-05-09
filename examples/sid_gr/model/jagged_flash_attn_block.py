@@ -50,6 +50,8 @@ def _beam_decode_attn_reference(
     topk_indices: torch.Tensor,
     decode_nums: int,
     softmax_scale: Optional[float] = None,
+    seqused_k: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Pure-PyTorch reference for beam_decode_attn (single-pass).
@@ -61,11 +63,26 @@ def _beam_decode_attn_reference(
         k_beam:       [B, dn*W, Hkv, D]
         v_beam:       same
         topk_indices: [B, Sq, Hq, max_dn, W] int32
+        seqused_k:    optional [B] int32; positions >= seqused_k[b] in
+                      k_context are masked out of the softmax (matches the
+                      CuTe kernel's seqused_k semantics).
+        cu_seqlens_k: not supported in the reference path (jagged context K
+                      would require a different layout). Raises if set.
     Returns:
         out: [B, Sq, W, Hq, D]  (same dtype as q)
         lse: None
     """
     import math
+
+    if cu_seqlens_k is not None:
+        # Jagged context K is a kernel-only optimization. The reference uses
+        # dense expansion below, which doesn't have a sensible jagged form.
+        # Fail explicitly so callers don't think this code path validates
+        # use_jagged_kv=True.
+        raise NotImplementedError(
+            "_beam_decode_attn_reference does not implement jagged context "
+            "K/V (cu_seqlens_k). Run the CuTe kernel for jagged validation."
+        )
 
     B, Sq, W, Hq, D = q.shape
     Hkv = k_context.shape[2]
@@ -107,6 +124,23 @@ def _beam_decode_attn_reference(
         v_all = v_ctx_exp
 
     scores = torch.einsum("bqwhd,bqwhsd->bqwhs", q_f * softmax_scale, k_all)
+
+    if seqused_k is not None:
+        # Mask out context K positions >= seqused_k[b] before softmax.
+        # Beam K positions (concatenated to context K above) are always
+        # valid, so they're not masked.
+        ctx_pos = torch.arange(Sk, device=q.device)
+        valid_ctx = ctx_pos[None, :] < seqused_k.to(torch.long)[:, None]  # [B, Sk]
+        if decode_nums > 0:
+            valid_beam = torch.ones(
+                B, decode_nums, dtype=torch.bool, device=q.device
+            )
+            valid = torch.cat([valid_ctx, valid_beam], dim=1)  # [B, Sk + dn]
+        else:
+            valid = valid_ctx
+        mask = ~valid[:, None, None, None, :]  # [B, 1, 1, 1, Sk(+dn)]
+        scores = scores.masked_fill(mask, float('-inf'))
+
     attn = torch.softmax(scores, dim=-1)
     out = torch.einsum("bqwhs,bqwhsd->bqwhd", attn, v_all)
     return out.to(q.dtype), None
@@ -241,6 +275,22 @@ class JaggedGPTLayer(nn.Module):
     Q/K/V are produced by a single fused linear (same pattern as HSTU's
     ``linear_uvqk``). Flash Attention is called with arbitrary_func for
     tree-shaped beam search masks.
+
+    Scope:
+        This is a self-contained, inference-only block. It owns its own
+        ``nn.Linear`` weights for Q/K/V/output/MLP and is **not** a
+        drop-in replacement for Megatron-Core's ``TransformerBlock``.
+        In particular it does not support tensor parallelism, sequence
+        parallelism, FP8 / Transformer Engine, or Megatron-shaped
+        checkpoints.
+
+        Existing SID-GR checkpoints trained against Megatron-Core need
+        weight migration before this block can be substituted in. That
+        migration is intentionally out of scope here — the goal of this
+        block is to give ``generate_beam_decode`` a fast,
+        kernel-friendly forward path on a single GPU. Production
+        deployment that needs TP/SP/FP8 should keep using the
+        Megatron-Core path or do the migration in a follow-up.
     """
 
     def __init__(
@@ -533,21 +583,24 @@ class JaggedGPTLayer(nn.Module):
             # the pipelined context-attention launch. The fused path
             # doesn't thread it through, so it would silently produce
             # wrong results on padded batches.
-            assert backend == "3kernel", (
-                f"seqused_k is only supported with backend='3kernel'; "
-                f"got backend={backend!r}"
-            )
+            if backend != "3kernel":
+                raise ValueError(
+                    f"seqused_k is only supported with backend='3kernel'; "
+                    f"got backend={backend!r}"
+                )
             kernel_kwargs["seqused_k"] = seqused_k
         if cu_seqlens_k is not None:
             # Jagged k_context path — k_context is [total_k, H, D] and the
             # per-sample length is encoded in cu_seqlens_k.
-            assert backend == "3kernel", (
-                f"cu_seqlens_k is only supported with backend='3kernel'; "
-                f"got backend={backend!r}"
-            )
-            assert seqused_k is None, (
-                "cu_seqlens_k and seqused_k are mutually exclusive"
-            )
+            if backend != "3kernel":
+                raise ValueError(
+                    f"cu_seqlens_k is only supported with backend='3kernel'; "
+                    f"got backend={backend!r}"
+                )
+            if seqused_k is not None:
+                raise ValueError(
+                    "cu_seqlens_k and seqused_k are mutually exclusive"
+                )
             kernel_kwargs["cu_seqlens_k"] = cu_seqlens_k
         attn_out, _ = beam_decode_attn(
             q_5d,

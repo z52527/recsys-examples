@@ -940,32 +940,60 @@ class SIDGRModel(MegatronModule):
         # Backend whitelist: the kernel's interface silently treats any
         # non-"3kernel" string as the fused/dsl path, so reject typos
         # here rather than letting them slip through.
-        assert backend in ("3kernel", "dsl"), (
-            f"backend must be '3kernel' or 'dsl', got {backend!r}"
-        )
+        if backend not in ("3kernel", "dsl"):
+            raise ValueError(
+                f"backend must be '3kernel' or 'dsl', got {backend!r}"
+            )
 
         # Kernel-side preconditions on BeamSearch configuration.
         # beam_decode_attn asserts uniform beam widths via
         # k_beam.shape[1] == decode_nums * beam_width, and we accumulate
         # beam_kv with a fixed stride per step. Reject non-uniform here.
         beam_widths = self.beam_search.beam_widths
-        assert all(w == beam_widths[0] for w in beam_widths), (
-            f"generate_beam_decode requires uniform beam_widths across "
-            f"hierarchy steps for the beam_decode_attn kernel; got "
-            f"{beam_widths}"
-        )
+        if not all(w == beam_widths[0] for w in beam_widths):
+            raise ValueError(
+                f"generate_beam_decode requires uniform beam_widths across "
+                f"hierarchy steps for the beam_decode_attn kernel; got "
+                f"{beam_widths}"
+            )
         # propagate() clamps actual topk to
         # min(beam_widths[s], topk_previous_step * codebook_size_this_step).
         # If any codebook_size < beam_width, propagate would shrink topk,
         # making k_beam.shape[1] inconsistent with decode_nums * beam_width.
         bw = beam_widths[0]
         cs_min = min(self.codebook_sizes)
-        assert bw <= cs_min, (
-            f"generate_beam_decode requires beam_width ({bw}) <= "
-            f"min(codebook_sizes) ({cs_min}); otherwise propagate would "
-            f"shrink the actual topk and the kernel's "
-            f"k_beam.shape[1] == decode_nums * beam_width assertion fails"
-        )
+        if bw > cs_min:
+            raise ValueError(
+                f"generate_beam_decode requires beam_width ({bw}) <= "
+                f"min(codebook_sizes) ({cs_min}); otherwise propagate would "
+                f"shrink the actual topk and the kernel's "
+                f"k_beam.shape[1] == decode_nums * beam_width assertion fails"
+            )
+
+        # Capability probe for use_jagged_kv=True. Our local interface.py
+        # patch adds a cu_seqlens_k kwarg to beam_decode_attn; the upstream
+        # release does not. Detect the gap before we build any tensors so
+        # the user gets a clear error instead of a TypeError deep in
+        # decode_beam.
+        if use_jagged_kv:
+            import inspect
+            from .jagged_flash_attn_block import _get_beam_decode_attn
+            try:
+                _kernel_sig = inspect.signature(_get_beam_decode_attn())
+            except Exception:
+                # Reference fallback path may not be inspectable; let the
+                # call itself raise a clearer error.
+                _kernel_sig = None
+            if (_kernel_sig is not None
+                    and "cu_seqlens_k" not in _kernel_sig.parameters):
+                raise RuntimeError(
+                    "use_jagged_kv=True requires the local cu_seqlens_k "
+                    "patch in gr-decode_atten/interface.py "
+                    "(runchuz/gr-decode_atten:feat/cu-seqlens-k-jagged-"
+                    "context, MR-B). The currently-installed "
+                    "beam_decode_attn does not accept cu_seqlens_k. Use "
+                    "use_jagged_kv=False or install the patch."
+                )
 
         # Optional phase timing via cuda events
         record_times = phase_times is not None
@@ -994,6 +1022,21 @@ class SIDGRModel(MegatronModule):
         history_seqlens = torch.diff(input_offsets)  # [B]
         seqused_k = None
         cu_seqlens_k = None
+
+        # backend="dsl" silently ignores both seqused_k and cu_seqlens_k —
+        # so it can only handle uniform-length history. Validate that
+        # before paying any prefill cost (host sync on .all().item() is
+        # cheap; the actual prefill is 2-3 ms).
+        if backend != "3kernel":
+            if not bool((history_seqlens == history_seqlens[0]).all().item()):
+                raise ValueError(
+                    f"backend={backend!r} (fused/dsl path) ignores "
+                    f"seqused_k / cu_seqlens_k, so all samples must share "
+                    f"the same history length. Got history_seqlens="
+                    f"{history_seqlens.tolist()}. Use backend='3kernel' "
+                    f"or pre-pad/crop history."
+                )
+
         if backend == "3kernel" and use_jagged_kv:
             # Jagged-native prefill: feed the concatenated [total_tokens, D]
             # stream through FA as a B=1 sequence with arbitrary_func encoding
@@ -1045,15 +1088,7 @@ class SIDGRModel(MegatronModule):
             ]  # [B, D]
             if backend == "3kernel":
                 seqused_k = history_seqlens.to(torch.int32)
-            else:
-                if not bool((history_seqlens == history_seqlens[0]).all().item()):
-                    raise ValueError(
-                        f"backend={backend!r} (fused/dsl path) ignores "
-                        f"seqused_k, so all samples must share the same "
-                        f"history length. Got history_seqlens="
-                        f"{history_seqlens.tolist()}. Use "
-                        f"backend='3kernel' or pre-pad/crop history."
-                    )
+            # backend="dsl" already validated above (uniform history).
 
         # MLP → logits for step 0
         self.beam_search.reset()

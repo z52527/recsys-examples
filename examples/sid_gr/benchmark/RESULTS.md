@@ -57,6 +57,17 @@ Median latency (ms) over 10 iterations after 3 warmup runs;
 
 ## Summary
 
+> ⚠️ **The 24-config table below is a *small-model micro-benchmark*
+> (B=4, hidden=256, layers=2). It severely under-states the algorithmic
+> win.** A separate production-scale sweep (B=16, hidden=512, layers=8,
+> hierarchies=4) below shows speedup growing from ~2× at hist=256 to
+> ~12× at hist=1024 because `generate()` is O(hist²) while
+> `generate_beam_decode` is O(hist). For most readers, the
+> [Production-scale results](#production-scale-results) section is the
+> right number to take away.
+
+**Small-model bench** (B=4, hidden=256, layers=2, hierarchies=3):
+
 | Metric | Value |
 |---|---|
 | Configs tested | 24 (4 hist_len × 3 beam_w × 2 dtypes) |
@@ -64,12 +75,67 @@ Median latency (ms) over 10 iterations after 3 warmup runs;
 | Speedup median | **1.38×** |
 | Phase split | prefill ≈ 3.0 ms, decode_loop ≈ 5.7 ms |
 
+**Production-scale bench** (B=16, hidden=512, layers=8, hierarchies=4):
+
+| hist_len | beam_w | speedup |
+|---:|---:|---:|
+| 256  | 10–20 | **~2.1×** |
+| 512  | 10–20 | **~4.7×** |
+| 1024 | 10–20 | **~11–12×** |
+
+The speedup grows roughly linearly with `hist_len` because `generate()`
+re-runs attention over `[history + generated]` at every hierarchy step
+(O(hist²) total work for the attention matmul) while
+`generate_beam_decode` runs prefill once (O(hist) work) and the decode
+loop's K1 attention also scales O(hist) per step. Doubling `hist`
+roughly doubles the relative win.
+
 `generate_beam_decode` is consistently faster across all configurations
 and both dtypes. Speedup sits tightly around 1.35–1.40× — the workload
 is dominated by the FFN/MLP and embedding-table lookup that both paths
 share; the attention savings show up but don't dominate.
 
-## Sweep results
+## Production-scale results
+
+Run on the same H100 PCIe (2026-05-09) with a config closer to a real
+SID-GR production setup:
+
+Fixed: `batch=16, hierarchies=4, hidden=512, heads=8, kv_channels=64, layers=8, codebook=256`.
+
+| dtype | hist_len | beam_w | generate (ms) | decode total (ms) | prefill (ms) | decode_loop (ms) | speedup |
+|-------|---------:|-------:|--------------:|------------------:|-------------:|-----------------:|--------:|
+|  bf16 |      256 |     10 |         45.30 |             21.59 |         6.49 |            15.04 |   2.10× |
+|  bf16 |      256 |     20 |         45.87 |             21.59 |         6.49 |            15.07 |   2.13× |
+|  bf16 |      512 |     10 |        129.86 |             28.02 |        12.92 |            15.05 |   4.64× |
+|  bf16 |      512 |     20 |        134.38 |             28.10 |        12.98 |            15.03 |   4.78× |
+|  bf16 |     1024 |     10 |        493.81 |             45.05 |        29.70 |            14.85 |  10.96× |
+|  bf16 |     1024 |     20 |        535.28 |             44.34 |        32.69 |            14.92 |  12.07× |
+
+Key observations:
+
+- **`decode_loop` is hist-independent** at ~15 ms across all configs.
+  Once prefill is done, attention into the cached context K/V is O(hist)
+  per K1 launch but kernel time is dominated by the dense projections
+  and MLP; the K/V access is a small fraction.
+- **`prefill` scales linearly with hist** (6.5 → 13 → 30 ms), as
+  expected for a single FA pass over `[history + BOS]`.
+- **`generate()` scales super-linearly with hist** (45 → 130 → 494 ms).
+  It runs `num_hierarchies = 4` full transformer forward passes, each
+  over a sequence that grows with `hist + generated_so_far`. The
+  attention matmul is O(hist²) per pass; with 4 passes the relative
+  cost grows fast.
+- **Speedup grows roughly linearly with hist**: 2× → 5× → 12× as hist
+  doubles from 256 to 1024. At realistic active-user history lengths
+  (≥1K items), the win is an order of magnitude.
+
+The `decode_loop ≈ 15 ms` plateau is the next perf target if
+`generate_beam_decode` becomes a hot path: the bulk of it is per-step
+QKV/MLP projections (8 layers × 3 decode steps × small B*W tokens).
+That's a different optimization domain (small-batch dense ops, possible
+CUDA-graph capture, or fusing layer-stack into one launch) — out of
+scope for this MR.
+
+## Sweep results (small-model micro-bench, kept for reproducibility)
 
 Fixed: `batch=4, hierarchies=3, hidden=256, heads=4, kv_channels=64, layers=2, codebook=256`.
 
@@ -245,8 +311,22 @@ Three tiers of correctness signal, in order of strength:
 
 ## How to reproduce
 
-The headline `generate()` vs `generate_beam_decode()` (dense path) sweep
-in the table at the top of this document:
+**Production-scale results table** (recommended; this is the realistic
+end-to-end win):
+
+```bash
+cd examples/sid_gr
+PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
+  PYTHONPATH=$REPO/examples:$KERNEL_PATH \
+  torchrun --nproc_per_node 1 --master_port 29504 \
+  benchmark/benchmark_beam_decode.py \
+  --sweep --batch_size 16 --num_hierarchies 4 --num_layers 8 \
+  --hidden_size 512 --num_heads 8 --kv_channels 64 \
+  --sweep_hist 256,512,1024 --sweep_beam 10,20 --sweep_dtype bf16
+```
+
+**Small-model micro-bench** (the 24-config sweep at the bottom; mostly
+useful for smoke-testing the integration end-to-end):
 
 ```bash
 cd examples/sid_gr

@@ -82,7 +82,7 @@ The decoder supports two attention backends, controlled by `use_jagged_flash_att
 | Backend | Flag | Input Format | Mask Format | Dependency |
 |---------|------|-------------|-------------|------------|
 | Megatron-Core `TransformerBlock` | `False` | Padded dense `[S, B, D]` | Dense `[B, 1, N, N]` | megatron-core |
-| `JaggedTransformerBlock` (FA) | `True` | Flattened `[1, total_tokens, D]` (zero padding) | `arbitrary_func` interval encoding | [jiayus/flash-attention (arbitrary_mask branch)](https://github.com/jiayus-nvidia/flash-attention/tree/arbitrary_mask) |
+| `JaggedTransformerBlock` (FA) | `True` | Flattened `[1, total_tokens, D]` (zero padding) | `arbitrary_func` interval encoding | [FlashAttention (arbitrary_mask branch)](https://github.com/jiayus-nvidia/flash-attention/tree/arbitrary_mask) |
 
 The FA backend flattens all batch sequences into a single sequence (B=1) and encodes the attention pattern via `arbitrary_func`. Block sparsity skips masked regions automatically. The caller is responsible for building the `arbitrary_func` or `attention_mask` tensor.
 
@@ -90,5 +90,9 @@ The FA backend flattens all batch sequences into a single sequence (B=1) and enc
 
 **This implementation is under active development.**
 
-- **Beam search**: Does not yet support KV cache optimization
+- **Beam search**: `generate()` does not use a KV cache and re-runs
+  the transformer prefix at every hierarchy step. `generate_beam_decode()`
+  uses a prefill-plus-KV-cache path via `beam_decode_attn`, but requires
+  `use_jagged_flash_attn=True` and a compatible `gr-decode_atten` kernel
+  install (see `benchmark/RESULTS.md` for the required kernel patches).
 - **Performance**: Not fully optimized

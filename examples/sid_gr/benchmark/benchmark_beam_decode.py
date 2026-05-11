@@ -7,7 +7,7 @@
 #
 # http://www.apache.org/licenses/LICENSE-2.0
 """
-Benchmark: SIDGRModel.generate (jiayus FA + arbitrary mask) vs
+Benchmark: SIDGRModel.generate (arbitrary-mask FlashAttention) vs
            SIDGRModel.generate_beam_decode (CuTe beam_decode_attn kernel).
 
 Both paths share the same model weights (use_jagged_flash_attn=True). The
@@ -232,7 +232,7 @@ def run_one_config(args) -> None:
     print(f"warmup={args.num_warmup}, iter={args.num_iter}")
     print("-" * 80)
 
-    print("[1/2] Timing generate() (jiayus FA + arbitrary mask)...")
+    print("[1/2] Timing generate() (arbitrary-mask FlashAttention)...")
     stats_orig = time_fn(run_original, args.num_warmup, args.num_iter)
     print(f"  median={stats_orig['median_ms']:.3f} ms, "
           f"mean={stats_orig['mean_ms']:.3f} ms, "

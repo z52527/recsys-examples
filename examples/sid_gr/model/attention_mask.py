@@ -240,17 +240,10 @@ def dense_mask_to_arbitrary_func(
     shifted[:, :, 1:] = valid_mask[:, :, :-1]
     starts = valid_mask & ~shifted  # start of each True run
     max_intervals = int(starts.sum(dim=-1).max().item())
-    n_func = max(2 * max_intervals - 1, 1)
-    if n_func % 2 == 0:
-        n_func += 1
-
-    # When first interval doesn't start at 0, it needs an extra slot.
-    # Recount: base interval [0, F0) is free only if first run starts at 0.
-    # Worst case: all intervals need explicit [F_start, F_end) pairs.
-    # n_func = 2*max_intervals + 1 covers all cases.
+    # F0 encodes [0, F0); every non-prefix interval needs an explicit
+    # (start, end) pair. 2 * max_intervals + 1 (always odd) covers the
+    # worst case where the first run does not start at 0.
     n_func = 2 * max_intervals + 1
-    if n_func % 2 == 0:
-        n_func += 1
 
     af = torch.zeros(B, 1, n_func, seqlen + padding, dtype=torch.int32, device=device)
 

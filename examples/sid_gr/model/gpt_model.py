@@ -97,8 +97,9 @@ class SIDGRDecoder(MegatronModule):
     Supports two backend modes controlled by *use_jagged_flash_attn*:
 
     * **True** (default) — ``JaggedTransformerBlock``: flattens all batch
-      sequences into one (B=1) and uses jiayus's Flash Attention with
-      arbitrary_func mask encoding.  Zero padding.
+      sequences into one (B=1) and uses the arbitrary-mask FlashAttention
+      path (``flash_attn.cute``) with ``arbitrary_func`` mask encoding.
+      Zero padding.
     * **False** — Megatron-Core ``TransformerBlock``: pads jagged to dense,
       uses ``DotProductAttention`` with a dense arbitrary attention mask.
     """
@@ -940,6 +941,17 @@ class SIDGRModel(MegatronModule):
                 f"use_jagged_kv=True requires backend='3kernel'; got "
                 f"backend={backend!r}. The fused/dsl path does not accept "
                 f"cu_seqlens_k."
+            )
+
+        # generate_beam_decode uses JaggedFlashAttnBlock for prefill and
+        # decode; SIDGRDecoder must have been constructed with
+        # use_jagged_flash_attn=True. Fail at entry rather than after
+        # _prepare_embeddings does work that has to be thrown away.
+        if not self.decoder.use_jagged_flash_attn:
+            raise RuntimeError(
+                "generate_beam_decode() requires use_jagged_flash_attn=True "
+                "because it uses JaggedFlashAttnBlock for prefill and beam "
+                "decode."
             )
 
         # Kernel-side preconditions on BeamSearch configuration.

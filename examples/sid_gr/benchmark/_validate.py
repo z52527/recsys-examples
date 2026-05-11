@@ -17,6 +17,39 @@ from typing import Tuple
 import torch
 
 
+def _check_shapes(*tensors):
+    """Validate that all sids/lp tensors share a consistent shape.
+
+    Returns an issue string on mismatch, or ``None`` if shapes line up.
+    Done before any element-level comparison so callers get a clear
+    error instead of a downstream indexing / broadcast failure.
+    """
+    # Expecting pairs of (sids, lp); sids is [B, K, H], lp is [B, K]
+    if len(tensors) % 2 != 0:
+        return f"_validate received {len(tensors)} tensors, expected pairs"
+    sids_list = tensors[0::2]
+    lp_list = tensors[1::2]
+    ref_sids_shape = sids_list[0].shape
+    ref_lp_shape = lp_list[0].shape
+    if len(ref_sids_shape) != 3 or len(ref_lp_shape) != 2:
+        return (
+            f"unexpected ranks: sids should be 3-D [B, K, H], lp 2-D [B, K]; "
+            f"got sids={tuple(ref_sids_shape)}, lp={tuple(ref_lp_shape)}"
+        )
+    if ref_sids_shape[:2] != ref_lp_shape:
+        return (
+            f"sids/lp batch+top-k mismatch: sids={tuple(ref_sids_shape)}, "
+            f"lp={tuple(ref_lp_shape)}"
+        )
+    for i, s in enumerate(sids_list):
+        if s.shape != ref_sids_shape:
+            return f"sids shape mismatch at path {i}: {tuple(s.shape)} != {tuple(ref_sids_shape)}"
+    for i, lp in enumerate(lp_list):
+        if lp.shape != ref_lp_shape:
+            return f"lp shape mismatch at path {i}: {tuple(lp.shape)} != {tuple(ref_lp_shape)}"
+    return None
+
+
 def validate_compare_outputs(
     sids_a: torch.Tensor, lp_a: torch.Tensor,
     sids_b: torch.Tensor, lp_b: torch.Tensor,
@@ -35,6 +68,10 @@ def validate_compare_outputs(
     log-prob deltas and the three worst-case overlaps so a passing config
     still surfaces the actual numbers.
     """
+    shape_issue = _check_shapes(sids_a, lp_a, sids_b, lp_b, sids_c, lp_c)
+    if shape_issue is not None:
+        return False, shape_issue
+
     issues = []
 
     top1_a = sids_a[:, 0, :]
@@ -108,6 +145,10 @@ def validate_pair_outputs(
     """Two-path version of ``validate_compare_outputs`` for
     ``run_sweep`` (A vs B only). Same thresholds, single pair.
     """
+    shape_issue = _check_shapes(sids_a, lp_a, sids_b, lp_b)
+    if shape_issue is not None:
+        return False, shape_issue
+
     issues = []
 
     top1_a = sids_a[:, 0, :]

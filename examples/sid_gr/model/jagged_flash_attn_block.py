@@ -14,7 +14,8 @@
 # limitations under the License.
 """
 JaggedFlashAttnBlock: a self-contained GPT Transformer block that uses
-jiayus's Flash Attention with arbitrary_func mask encoding.
+the arbitrary-mask FlashAttention CuTe path (`flash_attn.cute`) with
+``arbitrary_func`` mask encoding.
 
 This replaces Megatron-Core's TransformerBlock for the inference path
 used by ``SIDGRModel.generate_beam_decode``.
@@ -448,8 +449,8 @@ class JaggedGPTLayer(nn.Module):
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass that also returns the K/V cache for this layer.
 
-        Uses jiayus's flash_attn for attention, consistent with the
-        JaggedTransformerBlock training path.
+        Uses the arbitrary-mask FlashAttention path for attention,
+        consistent with the JaggedTransformerBlock training path.
 
         Args:
             hidden_states: [batch, seqlen, hidden_size]
@@ -556,10 +557,17 @@ class JaggedGPTLayer(nn.Module):
         assert k_context.dtype in (torch.float16, torch.bfloat16), (
             f"k_context must be fp16/bf16, got {k_context.dtype}"
         )
+        assert v_context.dtype in (torch.float16, torch.bfloat16), (
+            f"v_context must be fp16/bf16, got {v_context.dtype}"
+        )
 
         if k_beam is not None:
+            assert v_beam is not None, "k_beam and v_beam must be paired"
             assert k_beam.dtype in (torch.float16, torch.bfloat16), (
                 f"k_beam must be fp16/bf16, got {k_beam.dtype}"
+            )
+            assert v_beam.dtype in (torch.float16, torch.bfloat16), (
+                f"v_beam must be fp16/bf16, got {v_beam.dtype}"
             )
             k_beam_full = torch.cat([k_beam, k_new], dim=1)
             v_beam_full = torch.cat([v_beam, v_new], dim=1)
@@ -618,8 +626,8 @@ class JaggedGPTLayer(nn.Module):
 
 class JaggedFlashAttnBlock(nn.Module):
     """
-    A stack of JaggedGPTLayers — the GPT decoder block using jiayus's
-    Flash Attention with arbitrary_func mask encoding.
+    A stack of JaggedGPTLayers — the GPT decoder block using the
+    arbitrary-mask FlashAttention path with ``arbitrary_func`` masks.
 
     This module owns its own weights (not shared with Megatron-Core).
     It is used in place of Megatron's TransformerBlock for the

@@ -5,6 +5,11 @@ Container: recsys-examples Docker (torch 2.11.0a0+nv26, CUDA 13).
 Branch: `fea-mask-beam-search` (SID-GR + `beam_decode_attn` kernel).
 Date: 2026-05-09 (re-run with jagged-native option and phase breakdown).
 
+Build dependencies pinned at this measurement:
+- `flash-attention` (arbitrary_mask branch): commit
+  `b56db721d65afadd8cfe154cd12e83693bf0aba3` (default
+  `FLASH_ATTN_ARBITRARY_MASK_COMMIT` in `docker/Dockerfile`).
+
 ## ⚠️ Correctness preconditions
 
 These speedup numbers assume the beam-isolated baseline. Both paths
@@ -163,7 +168,7 @@ is **FFN/MLP and embedding lookup**, not attention.
 ### Phase breakdown
 
 - **Prefill**: ~3 ms regardless of config. This is the cost of running
-  history+BOS through the transformer once, including jiayus FA + MLP/FFN
+  history+BOS through the transformer once, including FlashAttention + MLP/FFN
   + KV-cache materialisation.
 - **Decode loop**: ~5.7 ms regardless of config. This is the cost of
   `(num_hierarchies − 1)` decode iterations, each containing: KJT lookup,
@@ -293,7 +298,10 @@ Three tiers of correctness signal, in order of strength:
 ## How to reproduce
 
 **Long-history inference table** (recommended for production-relevant
-end-to-end numbers):
+end-to-end numbers). The reproduction command includes
+`--validate_outputs` so the headline numbers come from a run that also
+verified A-vs-B equivalence at each config (top-1 exact, |lp delta| <
+0.15, top-K overlap >= 70%):
 
 ```bash
 cd examples/sid_gr
@@ -301,18 +309,16 @@ PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
   PYTHONPATH=$REPO/examples:$KERNEL_PATH \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
-  --sweep --batch_size 16 --num_hierarchies 4 --num_layers 8 \
+  --sweep --validate_outputs \
+  --batch_size 16 --num_hierarchies 4 --num_layers 8 \
   --hidden_size 512 --num_heads 8 --kv_channels 64 \
   --sweep_hist 256,512,1024 --sweep_beam 10,20 --sweep_dtype bf16
 ```
 
-This command is **timing-only by default** — to also check output
-equivalence between `generate()` and `generate_beam_decode()` per config
-(same thresholds as the regression-guard tests: top-1 exact, |lp delta|
-< 0.15, top-K overlap >= 70%), append `--validate_outputs`. Correctness
-at smaller shapes is covered by
+Drop `--validate_outputs` for a faster timing-only sweep; correctness at
+smaller shapes is still covered by
 `test_generate_vs_generate_beam_decode_regression_guard` in
-`tests/test_beam_decode_generate.py`; the math is shape-invariant.
+`tests/test_beam_decode_generate.py`, and the math is shape-invariant.
 
 **Small-model micro-bench** (the 24-config sweep at the bottom; mostly
 useful for smoke-testing the integration end-to-end):

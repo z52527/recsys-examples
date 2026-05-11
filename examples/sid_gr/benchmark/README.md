@@ -4,7 +4,7 @@ Compares the two generation paths in `SIDGRModel`:
 
 | Path | Method | Attention |
 |---|---|---|
-| Original | `generate()` | jiayus FA over full `[history + all_generated]` per step, with arbitrary mask isolating beams |
+| Original | `generate()` | Arbitrary-mask FlashAttention over full `[history + all_generated]` per step, with arbitrary mask isolating beams |
 | New | `generate_beam_decode()` | Prefill once → KV cache; per-step decode via the CuTe `beam_decode_attn` kernel (pipelined backend) |
 
 ## Requirements

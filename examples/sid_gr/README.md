@@ -81,7 +81,17 @@ The SID-GR model performs retrieval through beam search generation. To retrieve 
    - LLMs use beam search primarily for diversity, typically with beam width < 10
    - Recommender systems require retrieving hundreds or thousands of candidates, necessitating much larger beam widths
 
-These two characteristics necessitate different performance optimization strategies compared to LLM inference. 
+These two characteristics necessitate different performance optimization strategies compared to LLM inference.
+
+### Generation APIs
+
+The model exposes two generation entry points, both producing top-K beams of full SID tuples:
+
+1. **`generate()`** — baseline path. At every hierarchy step it re-runs the transformer over `[history + generated_prefix]` with a beam-isolating attention mask so beams do not cross-attend within a step. Works with either decoder backend (Megatron-Core `TransformerBlock` or `JaggedTransformerBlock`). Per-step cost grows with the running prefix length.
+
+2. **`generate_beam_decode()`** — KV-cache path. Runs a single prefill over `[history + BOS]` to populate a per-layer context K/V cache, then performs incremental beam decode using the `beam_decode_attn` kernel. The fixed context K/V is shared across beams; per-step beam K/V is appended to the cache and parent-beam ancestry is tracked through `topk_indices` rather than by reshuffling the cache. Requires `use_jagged_flash_attn=True` and a compatible `gr-decode_atten` install. Per-step cost is independent of history length, which is where the long-history speedup comes from.
+
+For backend selection (`backend="3kernel"` vs `"dsl"`), jagged-vs-dense context K/V (`use_jagged_kv`), kernel dependency notes, and measured numbers, see [`benchmark/RESULTS.md`](./benchmark/RESULTS.md) and [`training/README.md`](./training/README.md).
 
 
 ## References

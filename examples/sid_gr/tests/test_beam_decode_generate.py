@@ -964,34 +964,30 @@ def test_use_jagged_kv_with_reference_fallback_rejected_at_entry(monkeypatch):
 
 
 def test_compare_kv_modes_default_raises_on_validation_failure():
-    """`run_compare_kv_modes` must raise by default when validation fails,
-    so a copy-pasted timing table cannot quietly absorb broken numbers.
-    Pass --allow_validation_fail to suppress.
+    """``run_compare_kv_modes`` must raise by default when validation
+    fails. Pass ``--allow_validation_fail`` to suppress.
 
-    We inject the failure by calling the validator directly with mismatched
-    sids/lp tensors, then construct a minimal Namespace-driven invocation
-    of the post-sweep raise logic. This avoids needing the full GPU
-    pipeline for what is fundamentally a control-flow test.
+    We exercise the validator directly with mismatched sids/lp tensors,
+    then replicate the post-sweep raise block so the test stays
+    dependency-light (no benchmark runtime, no GPU).
     """
     bench_dir = os.path.join(
         os.path.dirname(__file__), "..", "benchmark"
     )
     sys.path.insert(0, bench_dir)
-    import benchmark_beam_decode as bb  # noqa: E402
+    from _validate import validate_compare_outputs  # noqa: E402
 
-    # Build sids that disagree on top-1 (forces a validation failure).
     B, K, H = 2, 5, 3
     torch.manual_seed(0)
     sids_a = torch.randint(0, 100, (B, K, H), dtype=torch.int64)
     lp_a = torch.randn(B, K)
-    # B disagrees with A on top-1 of sample 0
     sids_b = sids_a.clone()
-    sids_b[0, 0, 0] = (sids_a[0, 0, 0] + 1) % 100
+    sids_b[0, 0, 0] = (sids_a[0, 0, 0] + 1) % 100  # top-1 mismatch
     lp_b = lp_a.clone()
     sids_c = sids_a.clone()
     lp_c = lp_a.clone()
 
-    passed, summary = bb._validate_compare_outputs(
+    passed, summary = validate_compare_outputs(
         sids_a, lp_a, sids_b, lp_b, sids_c, lp_c,
     )
     assert not passed, "synthetic mismatch should fail validation"

@@ -7,19 +7,18 @@ Date: 2026-05-09 (re-run with jagged-native option and phase breakdown).
 
 ## ⚠️ Correctness preconditions
 
-These speedup numbers compare the **corrected** `generate()` baseline against
-`generate_beam_decode()`. Both paths now implement beam-isolated attention:
-- `generate()` builds `padded_target_aware_causal_mask` per step and feeds
-  it through the jagged FA path (the `528cf77` regression has been fixed).
-- `generate_beam_decode()` uses `beam_decode_attn` with
-  `topk_indices` for the same isolation.
+These speedup numbers assume the beam-isolated baseline. Both paths
+implement the same attention semantics:
+- `generate()` builds `padded_target_aware_causal_mask` per step and
+  feeds it through the jagged FA path.
+- `generate_beam_decode()` uses `beam_decode_attn` with `topk_indices`
+  for the same isolation.
 
 The speedup is therefore an apples-to-apples comparison of two
-mathematically equivalent implementations — not a comparison of "correct
-new path vs broken baseline".
+mathematically equivalent implementations.
 
-**Required local kernel patches** (applied to our `gr-decode_atten`
-clone, awaiting upstream review):
+**Required local kernel patches** (applied to the local
+`gr-decode_atten` checkout):
 1. The context-attention launch accepts a `seqused_k` kwarg for
    per-sample variable-length context. Required by the default
    `use_jagged_kv=False` path.
@@ -113,8 +112,7 @@ The `decode_loop ≈ 15 ms` plateau is the next perf target if
 `generate_beam_decode` becomes a hot path: the bulk of it is per-step
 QKV/MLP projections (8 layers × 3 decode steps × small B*W tokens).
 That's a different optimization domain (small-batch dense ops, possible
-CUDA-graph capture, or fusing layer-stack into one launch) — out of
-scope for this MR.
+CUDA-graph capture, or fusing layer-stack into one launch).
 
 ## Sweep results (small-model micro-bench, kept for reproducibility)
 
@@ -308,6 +306,14 @@ PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
   --sweep_hist 256,512,1024 --sweep_beam 10,20 --sweep_dtype bf16
 ```
 
+This command is **timing-only by default** — to also check output
+equivalence between `generate()` and `generate_beam_decode()` per config
+(same thresholds as the regression-guard tests: top-1 exact, |lp delta|
+< 0.15, top-K overlap >= 70%), append `--validate_outputs`. Correctness
+at smaller shapes is covered by
+`test_generate_vs_generate_beam_decode_regression_guard` in
+`tests/test_beam_decode_generate.py`; the math is shape-invariant.
+
 **Small-model micro-bench** (the 24-config sweep at the bottom; mostly
 useful for smoke-testing the integration end-to-end):
 
@@ -340,8 +346,8 @@ probes for it and raises a clear error if it's missing.
 ## Known issues
 
 - **Local kernel patches are not upstream** in `quack-kernels`: see the
-  preconditions section. Documented in
-  `corelib/.../docker_env_setup.md`-style memory.
+  preconditions section above. Re-cloning `gr-decode_atten` from
+  upstream requires re-applying the patches.
 - **Split-KV + `seqused_k`**: hangs in the context-attention kernel;
   worked around by forcing `num_splits=1` when `seqused_k` is set.
 - **Non-uniform `beam_widths`**: the kernel asserts uniform widths via

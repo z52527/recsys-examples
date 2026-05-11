@@ -933,8 +933,8 @@ class SIDGRModel(MegatronModule):
             )
 
         # use_jagged_kv requires the pipelined backend. The fused path
-        # doesn't consume cu_seqlens_k, so silently routing through dense
-        # would be a footgun.
+        # doesn't consume cu_seqlens_k; silently routing through dense
+        # would discard the caller's choice.
         if use_jagged_kv and backend != "3kernel":
             raise ValueError(
                 f"use_jagged_kv=True requires backend='3kernel'; got "

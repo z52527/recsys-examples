@@ -78,3 +78,5 @@ runtime and raises a clear error otherwise.
 | `--backend` | `3kernel` | `beam_decode_attn` backend (`3kernel` or `dsl`) |
 | `--use_jagged_kv` | off | jagged-native prefill + `cu_seqlens_k` (requires the cu_seqlens_k kernel patch) |
 | `--compare_kv_modes` | off | 3-way sweep (generate / dense / jagged) |
+| `--validate_outputs` | off | In `--sweep` mode, add an untimed A-vs-B correctness check per config |
+| `--allow_validation_fail` | off | Allow `--compare_kv_modes` / `--validate_outputs` to exit successfully on validation failure (default: raise `RuntimeError`) |

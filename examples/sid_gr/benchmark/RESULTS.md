@@ -2,7 +2,7 @@
 
 Hardware: **NVIDIA H100 PCIe** (114 SMs).
 Container: recsys-examples Docker (torch 2.11.0a0+nv26, CUDA 13).
-Branch: `fea-mask-beam-search` (SID-GR + Jerry's `beam_decode_attn` kernel).
+Branch: `fea-mask-beam-search` (SID-GR + `beam_decode_attn` kernel).
 Date: 2026-05-09 (re-run with jagged-native option and phase breakdown).
 
 ## ⚠️ Correctness preconditions
@@ -11,32 +11,30 @@ These speedup numbers compare the **corrected** `generate()` baseline against
 `generate_beam_decode()`. Both paths now implement beam-isolated attention:
 - `generate()` builds `padded_target_aware_causal_mask` per step and feeds
   it through the jagged FA path (the `528cf77` regression has been fixed).
-- `generate_beam_decode()` uses Jerry's `beam_decode_attn` with
+- `generate_beam_decode()` uses `beam_decode_attn` with
   `topk_indices` for the same isolation.
 
 The speedup is therefore an apples-to-apples comparison of two
 mathematically equivalent implementations — not a comparison of "correct
 new path vs broken baseline".
 
-**Required local kernel patches** (in our `gr-decode_atten/interface.py`
-clone, not yet upstream):
-1. K1 accepts a `seqused_k` kwarg for variable-length history padding.
-   Required by the default `use_jagged_kv=False` path. Filed upstream
-   as MR-A on `runchuz/gr-decode_atten:feat/seqused-k`.
-2. `BeamDecodeAttn.forward` forces `num_splits=1` when `seqused_k` is set
-   (workaround for split-KV + seqused_k hang on SM90). Bundled with
-   patch (1).
-3. K1 accepts a `cu_seqlens_k` kwarg for jagged context K/V. Only
-   required when `use_jagged_kv=True`. Filed upstream as MR-B on
-   `runchuz/gr-decode_atten:feat/cu-seqlens-k-jagged-context` (built
-   on top of MR-A).
+**Required local kernel patches** (applied to our `gr-decode_atten`
+clone, awaiting upstream review):
+1. The context-attention launch accepts a `seqused_k` kwarg for
+   per-sample variable-length context. Required by the default
+   `use_jagged_kv=False` path.
+2. `BeamDecodeAttn.forward` forces `num_splits=1` when `seqused_k` is
+   set (workaround for a split-KV + `seqused_k` hang on SM90). Bundled
+   with patch (1).
+3. The context-attention launch accepts a `cu_seqlens_k` kwarg for
+   jagged context K/V. Only required when `use_jagged_kv=True`.
 
 If you re-install `quack-kernels` from PyPI without re-cloning
 `gr-decode_atten`, the patches stay (they live in the local clone). If
 you re-clone `gr-decode_atten` from upstream, the patches must be
 re-applied.
 
-`generate_beam_decode` runs a `inspect.signature` capability probe at
+`generate_beam_decode` runs an `inspect.signature` capability probe at
 entry: if you pick `use_jagged_kv=True` but the installed
 `beam_decode_attn` does not accept `cu_seqlens_k`, you get a clear
 ``RuntimeError`` instead of a confusing ``TypeError`` deep in the
@@ -50,32 +48,29 @@ Both paths share the same model weights (`use_jagged_flash_attn=True`).
   arbitrary mask (built directly via `build_jagged_target_aware_arbitrary_func`).
 - **New (`generate_beam_decode()`)** — prefill once → context KV cache;
   per-step decode reuses cached context KV and accumulates beam KV via
-  `topk_indices` (Jerry's CuTe kernel, 3-kernel backend).
+  `topk_indices` (the CuTe `beam_decode_attn` kernel, pipelined backend).
 
 Median latency (ms) over 10 iterations after 3 warmup runs;
 `cuda.synchronize()` before/after each iteration.
 
 ## Summary
 
-> ⚠️ **The 24-config table below is a *small-model micro-benchmark*
-> (B=4, hidden=256, layers=2). It severely under-states the algorithmic
-> win.** A separate production-scale sweep (B=16, hidden=512, layers=8,
-> hierarchies=4) below shows speedup growing from ~2× at hist=256 to
-> ~12× at hist=1024 because `generate()` is O(hist²) while
-> `generate_beam_decode` is O(hist). For most readers, the
-> [Production-scale results](#production-scale-results) section is the
-> right number to take away.
+The speedup of `generate_beam_decode` over `generate()` scales with
+history length: short-history workloads see ~1.3×, long-history
+inference workloads see >10×. The reason is that `generate()` re-runs
+attention over `[history + generated_so_far]` at every hierarchy step
+(O(hist²) attention work) while `generate_beam_decode` runs prefill
+once and the decode loop's context-side attention is O(hist) per step.
 
-**Small-model bench** (B=4, hidden=256, layers=2, hierarchies=3):
+**Short-history micro-bench** (B=4, hidden=256, layers=2, hierarchies=3):
 
 | Metric | Value |
 |---|---|
 | Configs tested | 24 (4 hist_len × 3 beam_w × 2 dtypes) |
 | Speedup range | 1.31× – 1.43× |
 | Speedup median | **1.38×** |
-| Phase split | prefill ≈ 3.0 ms, decode_loop ≈ 5.7 ms |
 
-**Production-scale bench** (B=16, hidden=512, layers=8, hierarchies=4):
+**Long-history inference scenario** (B=16, hidden=512, layers=8, hierarchies=4):
 
 | hist_len | beam_w | speedup |
 |---:|---:|---:|
@@ -83,24 +78,14 @@ Median latency (ms) over 10 iterations after 3 warmup runs;
 | 512  | 10–20 | **~4.7×** |
 | 1024 | 10–20 | **~11–12×** |
 
-The speedup grows roughly linearly with `hist_len` because `generate()`
-re-runs attention over `[history + generated]` at every hierarchy step
-(O(hist²) total work for the attention matmul) while
-`generate_beam_decode` runs prefill once (O(hist) work) and the decode
-loop's K1 attention also scales O(hist) per step. Doubling `hist`
-roughly doubles the relative win.
+The long-history numbers are the right reference for production
+inference workloads where active-user history isn't truncated (offline
+candidate generation, tail-latency on heavy users). The short-history
+table is a smoke-test of the same integration on a tiny model.
 
-`generate_beam_decode` is consistently faster across all configurations
-and both dtypes. Speedup sits tightly around 1.35–1.40× — the workload
-is dominated by the FFN/MLP and embedding-table lookup that both paths
-share; the attention savings show up but don't dominate.
+## Long-history inference scenario
 
-## Production-scale results
-
-Run on the same H100 PCIe (2026-05-09) with a config closer to a real
-SID-GR production setup:
-
-Fixed: `batch=16, hierarchies=4, hidden=512, heads=8, kv_channels=64, layers=8, codebook=256`.
+Fixed: `batch=16, hierarchies=4, hidden=512, heads=8, kv_channels=64, layers=8, codebook=256` on H100 PCIe.
 
 | dtype | hist_len | beam_w | generate (ms) | decode total (ms) | prefill (ms) | decode_loop (ms) | speedup |
 |-------|---------:|-------:|--------------:|------------------:|-------------:|-----------------:|--------:|
@@ -111,22 +96,18 @@ Fixed: `batch=16, hierarchies=4, hidden=512, heads=8, kv_channels=64, layers=8, 
 |  bf16 |     1024 |     10 |        493.81 |             45.05 |        29.70 |            14.85 |  10.96× |
 |  bf16 |     1024 |     20 |        535.28 |             44.34 |        32.69 |            14.92 |  12.07× |
 
-Key observations:
+- `decode_loop` is hist-independent at ~15 ms — once prefill is done,
+  the per-step work is dominated by dense projections and MLP, not
+  attention.
+- `prefill` scales linearly with hist (6.5 → 13 → 30 ms).
+- `generate()` scales super-linearly: 45 → 130 → 494 ms. It runs
+  `num_hierarchies = 4` full transformer passes, each over a sequence
+  that grows with `hist + generated_so_far` and pays O(hist²) attention.
+- Speedup grows roughly linearly with hist (2× → 5× → 12×).
 
-- **`decode_loop` is hist-independent** at ~15 ms across all configs.
-  Once prefill is done, attention into the cached context K/V is O(hist)
-  per K1 launch but kernel time is dominated by the dense projections
-  and MLP; the K/V access is a small fraction.
-- **`prefill` scales linearly with hist** (6.5 → 13 → 30 ms), as
-  expected for a single FA pass over `[history + BOS]`.
-- **`generate()` scales super-linearly with hist** (45 → 130 → 494 ms).
-  It runs `num_hierarchies = 4` full transformer forward passes, each
-  over a sequence that grows with `hist + generated_so_far`. The
-  attention matmul is O(hist²) per pass; with 4 passes the relative
-  cost grows fast.
-- **Speedup grows roughly linearly with hist**: 2× → 5× → 12× as hist
-  doubles from 256 to 1024. At realistic active-user history lengths
-  (≥1K items), the win is an order of magnitude.
+This scenario is the relevant reference for offline candidate generation
+and tail-latency on active users with long histories. Most training and
+short-history academic benchmarks won't see numbers this large.
 
 The `decode_loop ≈ 15 ms` plateau is the next perf target if
 `generate_beam_decode` becomes a hot path: the bulk of it is per-step
@@ -234,15 +215,15 @@ internally auto-routes to 3kernel regardless of the `backend` arg.
 ### Jagged-native vs dense+seqused_k path (`use_jagged_kv` flag)
 
 `generate_beam_decode` supports two ways of feeding the variable-length
-context K/V to the K1 launch:
+context K/V to the context-attention launch:
 
 - **Dense + seqused_k** (default, `use_jagged_kv=False`): pad history to
   `[B, Sk_max, D]`, run prefill with FA's `causal=True` fast path,
-  pass dense K/V plus `seqused_k` to K1 so pad positions are masked out.
+  pass dense K/V plus `seqused_k` so pad positions are masked out.
 - **Jagged-native** (`use_jagged_kv=True`): concatenate history into a
   flat `[total_tokens, D]` stream, run prefill with FA's `arbitrary=True`
-  + a jagged-causal mask, feed jagged `[total_k, H, D]` K/V caches to K1
-  with `cu_seqlens_k`. No padding is computed anywhere.
+  + a jagged-causal mask, feed jagged `[total_k, H, D]` K/V caches with
+  `cu_seqlens_k`. No padding is computed anywhere.
 
 Phase-broken-down measurement on H100 PCIe (bf16, 12 configs, warmup=10
 iter=50):
@@ -261,13 +242,14 @@ well below the 0.15 regression threshold).
 
 **Why dense wins on these shapes:**
 
-- The K1 attention is only ~5% of decode loop time; saving its pad
-  positions (~50% of K1 compute, i.e. ~2.5% of decode) gives ~0.04 ms.
+- The context attention is only ~5% of decode-loop time; saving its
+  pad positions (~50% of that compute, i.e. ~2.5% of decode) gives
+  ~0.04 ms.
 - FA's `causal=True` is a heavily-optimized fast path; the jagged path
   uses `arbitrary=True` which adds `build_block_sparsity` CSR kernels
   (~0.15 ms) and slightly slower per-block indexing (~0.13 ms) plus
   arbitrary_func construction (~0.05 ms).
-- Net: prefill overhead +0.33 ms eats up the +0.04 ms K1 saving.
+- Net: prefill overhead +0.33 ms eats up the +0.04 ms savings.
 
 **When jagged would win** (extrapolation, not measured):
 
@@ -278,8 +260,9 @@ well below the 0.15 regression threshold).
 | long (hist=2048, active users) | +0.6 ms | -1.0 ms | jagged wins ~5% |
 | very long (hist=8192) | +1.0 ms | -4 ms | jagged wins ~15% |
 
-Crossover point is roughly `hist >= 1000` items based on K1 scaling as
-O(B·W·Sk·D) while prefill setup overhead is roughly Sk-independent.
+Crossover point is roughly `hist >= 1000` items based on context-side
+attention scaling as O(B·W·Sk·D) while prefill setup overhead is
+roughly Sk-independent.
 This matches active-user history lengths in real SID-GR datasets
 (KuaiRand, ml-1m 99-percentile), but typical training/eval truncates
 history to under 512, so the default stays `use_jagged_kv=False`.
@@ -311,8 +294,8 @@ Three tiers of correctness signal, in order of strength:
 
 ## How to reproduce
 
-**Production-scale results table** (recommended; this is the realistic
-end-to-end win):
+**Long-history inference table** (recommended for production-relevant
+end-to-end numbers):
 
 ```bash
 cd examples/sid_gr
@@ -351,16 +334,16 @@ PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
 ```
 
 `--compare_kv_modes` requires the `cu_seqlens_k` patch in
-`gr-decode_atten/interface.py` (MR-B) for the jagged column; the
-benchmark probes for it and raises a clear error if it's missing.
+`gr-decode_atten/interface.py` for the jagged column; the benchmark
+probes for it and raises a clear error if it's missing.
 
 ## Known issues
 
 - **Local kernel patches are not upstream** in `quack-kernels`: see the
   preconditions section. Documented in
   `corelib/.../docker_env_setup.md`-style memory.
-- **Split-KV + `seqused_k`**: hangs in the K1 kernel; worked around by
-  forcing `num_splits=1` when `seqused_k` is set.
+- **Split-KV + `seqused_k`**: hangs in the context-attention kernel;
+  worked around by forcing `num_splits=1` when `seqused_k` is set.
 - **Non-uniform `beam_widths`**: the kernel asserts uniform widths via
   `k_beam.shape[1] == decode_nums * beam_width`.
   `SIDGRModel.generate_beam_decode` validates uniformity at entry and

@@ -8,7 +8,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0
 """
 Benchmark: SIDGRModel.generate (jiayus FA + arbitrary mask) vs
-           SIDGRModel.generate_beam_decode (Jerry's beam_decode_attn kernel).
+           SIDGRModel.generate_beam_decode (CuTe beam_decode_attn kernel).
 
 Both paths share the same model weights (use_jagged_flash_attn=True). The
 difference is the attention path during generation:
@@ -607,8 +607,8 @@ def main():
     parser.add_argument("--use_jagged_kv", action="store_true",
                         help="Use the jagged-native prefill + cu_seqlens_k path. "
                              "Only valid with backend='3kernel'. Requires the "
-                             "cu_seqlens_k patch in gr-decode_atten/interface.py "
-                             "(MR-B). See RESULTS.md for the perf trade-off.")
+                             "cu_seqlens_k patch in gr-decode_atten/interface.py. "
+                             "See RESULTS.md for the perf trade-off.")
     parser.add_argument("--compare_kv_modes", action="store_true",
                         help="Time generate(), generate_beam_decode(use_jagged_kv=False) "
                              "and generate_beam_decode(use_jagged_kv=True) side by side. "

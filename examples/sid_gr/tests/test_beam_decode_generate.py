@@ -368,7 +368,7 @@ class TestVariableLengthHistory:
         """Same valid hist + different padding length → same valid attention output.
 
         Verifies the kernel's seqused_k arg correctly masks padding K positions
-        so they don't contaminate K1 attention output.
+        so they don't contaminate the context attention output.
         """
         B, W, H, D_head = 2, 3, 4, 64
         valid_seqlen = 8

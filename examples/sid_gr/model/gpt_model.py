@@ -905,39 +905,24 @@ class SIDGRModel(MegatronModule):
                   - "prefill_ms": time spent in prefill (including embedding).
                   - "decode_loop_ms": time spent in the decode loop.
                 Useful for benchmarking. Adds tiny overhead.
-            use_jagged_kv: when True and ``backend="3kernel"``, run prefill
-                in jagged-native mode (concatenated ``[total_tokens, D]``
-                stream through FA with an arbitrary causal mask) and feed
-                jagged ``[total_k, H, D]`` context K/V caches to the K1
-                kernel via ``cu_seqlens_k``. No padding is computed
-                anywhere in the path.
+            use_jagged_kv: when True and ``backend="3kernel"``, run
+                prefill in jagged-native mode (concatenated
+                ``[total_tokens, D]`` stream through FA with an
+                arbitrary causal mask) and feed jagged
+                ``[total_k, H, D]`` context K/V caches to the kernel via
+                ``cu_seqlens_k``. No padding is computed anywhere.
+                When False (default), pad history to
+                ``[B, max_seqlen, D]``, run FA in ``causal=True``, and
+                pass ``seqused_k`` to mask pad positions.
 
-                When False (default), the dense path is used: history is
-                padded to ``[B, max_seqlen, D]``, prefill runs FA in
-                ``causal=True`` fast mode, and K1 receives dense K/V plus
-                ``seqused_k`` to mask out pad positions.
+                Dense is faster on short-history shapes because FA's
+                ``causal=True`` is heavily optimized and the
+                arbitrary-mask path adds block-sparsity setup overhead.
+                Jagged wins once context grows past roughly
+                ``hist >= 1000`` items; see benchmark/RESULTS.md.
 
-                Performance trade-off (measured 2026-05 on H100 PCIe at
-                typical SID-GR shapes hist∈{32,64,128,256}):
-
-                * Decode loop: jagged saves ~0.04 ms (small, K1 is only
-                  ~5% of the decode loop)
-                * Prefill: jagged costs +0.33 ms over dense — FA's
-                  ``causal=True`` is a heavily-optimized fast path; the
-                  jagged path uses ``arbitrary=True`` with block-sparsity
-                  CSR construction overhead
-
-                Net: dense wins by ~5% on these shapes. Jagged is expected
-                to cross over and win when context is long enough that
-                K1's compute dominates the prefill overhead — roughly
-                ``hist >= 1000`` items based on extrapolation. The flag
-                is kept available for that regime.
-
-                Rejected at entry when paired with ``backend="dsl"`` (the
-                fused path doesn't accept ``cu_seqlens_k`` or
-                ``seqused_k`` and requires uniform-length history;
-                silently downgrading to dense would be a footgun, so the
-                combination raises ``ValueError`` instead).
+                Requires ``backend="3kernel"``; raises ``ValueError``
+                otherwise.
         """
         # Backend whitelist: the kernel's interface silently treats any
         # non-"3kernel" string as the fused/dsl path, so reject typos
@@ -947,11 +932,9 @@ class SIDGRModel(MegatronModule):
                 f"backend must be '3kernel' or 'dsl', got {backend!r}"
             )
 
-        # use_jagged_kv requires the K1-only path. The fused/dsl path does
-        # not consume cu_seqlens_k, so silently routing through dense (or
-        # running an irrelevant capability probe first) is a footgun. The
-        # docstring used to say this combination was "ignored"; that
-        # contradicted the CLI help. Reject it explicitly.
+        # use_jagged_kv requires the pipelined backend. The fused path
+        # doesn't consume cu_seqlens_k, so silently routing through dense
+        # would be a footgun.
         if use_jagged_kv and backend != "3kernel":
             raise ValueError(
                 f"use_jagged_kv=True requires backend='3kernel'; got "
@@ -984,21 +967,12 @@ class SIDGRModel(MegatronModule):
                 f"k_beam.shape[1] == decode_nums * beam_width assertion fails"
             )
 
-        # Capability probe for use_jagged_kv=True. Our local interface.py
-        # patch adds a cu_seqlens_k kwarg to beam_decode_attn; the upstream
-        # release does not. Detect the gap before we build any tensors so
-        # the user gets a clear error instead of a TypeError deep in
-        # decode_beam.
-        #
-        # Two failure modes:
-        #   (a) Real CuTe kernel is installed but lacks the cu_seqlens_k
-        #       patch (upstream release). signature() check catches this.
-        #   (b) Real CuTe kernel is unavailable and the resolver fell
-        #       back to _beam_decode_attn_reference, which has
-        #       cu_seqlens_k in its signature for the explicit-raise
-        #       contract — so the signature() check would pass even
-        #       though the path can't actually run jagged. Identity-check
-        #       against the fallback to catch this.
+        # Capability probe for use_jagged_kv=True: fail at entry rather
+        # than deep in decode_beam. Catches two cases:
+        #   (a) installed kernel lacks the cu_seqlens_k kwarg (upstream).
+        #   (b) resolver fell back to _beam_decode_attn_reference, whose
+        #       signature includes cu_seqlens_k but only to raise
+        #       NotImplementedError on use.
         if use_jagged_kv:
             import inspect
             from .jagged_flash_attn_block import (
@@ -1012,7 +986,7 @@ class SIDGRModel(MegatronModule):
                     "fallback does not implement jagged context K/V "
                     "(it only raises NotImplementedError when actually "
                     "called). Install gr-decode_atten with the "
-                    "cu_seqlens_k patch (MR-B) or use use_jagged_kv=False."
+                    "cu_seqlens_k patch, or use use_jagged_kv=False."
                 )
             try:
                 _kernel_sig = inspect.signature(kernel)
@@ -1022,11 +996,10 @@ class SIDGRModel(MegatronModule):
                     and "cu_seqlens_k" not in _kernel_sig.parameters):
                 raise RuntimeError(
                     "use_jagged_kv=True requires the local cu_seqlens_k "
-                    "patch in gr-decode_atten/interface.py "
-                    "(runchuz/gr-decode_atten:feat/cu-seqlens-k-jagged-"
-                    "context, MR-B). The currently-installed "
-                    "beam_decode_attn does not accept cu_seqlens_k. Use "
-                    "use_jagged_kv=False or install the patch."
+                    "patch in gr-decode_atten/interface.py. The "
+                    "currently-installed beam_decode_attn does not "
+                    "accept cu_seqlens_k. Use use_jagged_kv=False or "
+                    "install the patch."
                 )
 
         # Optional phase timing via cuda events
@@ -1074,9 +1047,9 @@ class SIDGRModel(MegatronModule):
         if backend == "3kernel" and use_jagged_kv:
             # Jagged-native prefill: feed the concatenated [total_tokens, D]
             # stream through FA as a B=1 sequence with arbitrary_func encoding
-            # per-sample causal isolation. Output K/V caches are jagged
-            # [total_tokens, H, D] — exactly what Jerry's K1 wants when
-            # cu_seqlens_k is supplied. No pad compute, no dense→jagged copy.
+            # per-sample causal isolation. The K/V caches that fall out are
+            # already jagged [total_tokens, H, D] — exactly the layout the
+            # kernel expects when cu_seqlens_k is supplied.
             total_tokens = int(input_offsets[-1].item())
             jagged_arbitrary_func = build_jagged_causal_arbitrary_func(
                 input_offsets, total_tokens
@@ -1098,10 +1071,8 @@ class SIDGRModel(MegatronModule):
             bos_offsets_flat = (input_offsets[1:] - 1).clamp(min=0)
             bos_hidden = prefill_output[bos_offsets_flat]  # [B, D]
         else:
-            # Dense prefill path: pad history, run [B, max_seqlen, D] through
-            # plain causal FA. Used when (a) caller forced the legacy dense
-            # path or (b) backend="dsl" (which can only handle uniform
-            # history anyway, so padding is zero-cost).
+            # Dense prefill: pad history, run [B, max_seqlen, D] through
+            # FA's causal=True fast path.
             padded_history = (
                 torch.ops.fbgemm.jagged_to_padded_dense(
                     values=history_embeddings,

@@ -29,7 +29,7 @@ class BeamSearch:
         )
         # BeamSearch supports non-uniform beam widths in general; the
         # uniform-only constraint belongs to consumers that hand off to
-        # Jerry's beam_decode_attn kernel (see SIDGRModel.generate_beam_decode),
+        # the beam_decode_attn kernel (see SIDGRModel.generate_beam_decode),
         # which asserts ``k_beam.shape[1] == decode_nums * beam_width``.
         self.beam_widths = beam_widths
         self.num_hierarchies = num_hierarchies
@@ -188,7 +188,7 @@ class BeamSearch:
         is small. Using the actual count keeps indexing consistent with
         the beam_kv accumulation in ``generate_beam_decode``.
 
-        Note: Jerry's kernel asserts uniform widths via
+        Note: ``beam_decode_attn`` asserts uniform widths via
         ``k_beam.shape[1] == decode_nums * beam_width``. The
         kernel-using path (``generate_beam_decode``) enforces uniformity
         upstream; this function is correct in the general case so the

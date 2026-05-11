@@ -5,7 +5,7 @@ Compares the two generation paths in `SIDGRModel`:
 | Path | Method | Attention |
 |---|---|---|
 | Original | `generate()` | jiayus FA over full `[history + all_generated]` per step, with arbitrary mask isolating beams |
-| New | `generate_beam_decode()` | Prefill once → KV cache; per-step decode via Jerry's `beam_decode_attn` (3-kernel pipeline) |
+| New | `generate_beam_decode()` | Prefill once → KV cache; per-step decode via the CuTe `beam_decode_attn` kernel (pipelined backend) |
 
 ## Requirements
 
@@ -57,7 +57,7 @@ PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
 ```
 
 The `--use_jagged_kv` mode requires the `cu_seqlens_k` patch in
-`gr-decode_atten/interface.py` (MR-B). The benchmark probes for it at
+`gr-decode_atten/interface.py`. The benchmark probes for it at
 runtime and raises a clear error otherwise.
 
 ## Tunable arguments
@@ -76,5 +76,5 @@ runtime and raises a clear error otherwise.
 | `--num_warmup` | 5 | warmup iterations (CuTe JIT compile is slow on first call) |
 | `--num_iter` | 20 | timed iterations |
 | `--backend` | `3kernel` | `beam_decode_attn` backend (`3kernel` or `dsl`) |
-| `--use_jagged_kv` | off | jagged-native prefill + `cu_seqlens_k` (requires MR-B) |
+| `--use_jagged_kv` | off | jagged-native prefill + `cu_seqlens_k` (requires the cu_seqlens_k kernel patch) |
 | `--compare_kv_modes` | off | 3-way sweep (generate / dense / jagged) |

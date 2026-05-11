@@ -16,8 +16,8 @@
 JaggedFlashAttnBlock: a self-contained GPT Transformer block that uses
 jiayus's Flash Attention with arbitrary_func mask encoding.
 
-This replaces Megatron-Core's TransformerBlock for inference with
-Method A (Incremental Append) beam search.
+This replaces Megatron-Core's TransformerBlock for the inference path
+used by ``SIDGRModel.generate_beam_decode``.
 
 Architecture per layer (standard pre-norm GPT):
   Input → LayerNorm → QKV Projection → Flash Attention (arbitrary mask)
@@ -571,18 +571,12 @@ class JaggedGPTLayer(nn.Module):
         q_5d = q.unsqueeze(1)
 
         beam_decode_attn = _get_beam_decode_attn()
-        # Two implementations of the same math: pipelined ("3kernel")
-        # and fused ("dsl"). Fused is faster on SM80/90/120 at small
-        # decode_nums (~1.5x kernel-level on H100); SM100 prefers the
-        # pipeline and the kernel auto-routes there. The fused path
-        # silently ignores seqused_k, so callers passing it must use
-        # "3kernel". See SIDGRModel.generate_beam_decode for details.
+        # seqused_k / cu_seqlens_k are local kernel extensions on the
+        # pipelined context-attention launch. The fused path doesn't
+        # thread them through and would silently give wrong results on
+        # padded batches — reject upfront.
         kernel_kwargs = {}
         if seqused_k is not None:
-            # seqused_k is part of our local interface.py extension to
-            # the pipelined context-attention launch. The fused path
-            # doesn't thread it through, so it would silently produce
-            # wrong results on padded batches.
             if backend != "3kernel":
                 raise ValueError(
                     f"seqused_k is only supported with backend='3kernel'; "
@@ -590,8 +584,6 @@ class JaggedGPTLayer(nn.Module):
                 )
             kernel_kwargs["seqused_k"] = seqused_k
         if cu_seqlens_k is not None:
-            # Jagged k_context path — k_context is [total_k, H, D] and the
-            # per-sample length is encoded in cu_seqlens_k.
             if backend != "3kernel":
                 raise ValueError(
                     f"cu_seqlens_k is only supported with backend='3kernel'; "
@@ -630,8 +622,8 @@ class JaggedFlashAttnBlock(nn.Module):
     Flash Attention with arbitrary_func mask encoding.
 
     This module owns its own weights (not shared with Megatron-Core).
-    It is used in place of Megatron's TransformerBlock for inference
-    with Method A beam search.
+    It is used in place of Megatron's TransformerBlock for the
+    inference path used by ``SIDGRModel.generate_beam_decode``.
 
     Usage::
 

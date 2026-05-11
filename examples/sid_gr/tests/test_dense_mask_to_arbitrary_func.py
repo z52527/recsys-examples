@@ -62,9 +62,8 @@ def dense_mask_to_jagged_arbitrary_func(
     ends = valid_mask & ~ends_shifted
 
     max_intervals = int(starts.sum(dim=-1).max().item())
+    # max(2 * max_intervals + 1, 3) is always odd, so no extra parity fix-up.
     n_func = max(2 * max_intervals + 1, 3)
-    if n_func % 2 == 0:
-        n_func += 1
 
     af = torch.zeros(
         1, 1, n_func, total_tokens + padding, dtype=torch.int32, device=device

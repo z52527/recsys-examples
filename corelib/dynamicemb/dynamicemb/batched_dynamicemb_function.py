@@ -98,14 +98,6 @@ def segmented_unique(
         )
         need_frequency_output = is_lfu_enabled or frequency_counts is not None
 
-        table_ids = expand_table_ids_cuda(
-            segment_range,
-            None,
-            num_tables,
-            1,
-            num_keys,
-        )
-
         input_frequencies = None
         if frequency_counts is not None:
             input_frequencies = frequency_counts
@@ -118,7 +110,7 @@ def segmented_unique(
             reverse_indices,
             table_offsets,
             freq_counters,
-        ) = segmented_unique_cuda(keys, table_ids, num_tables, input_frequencies)
+        ) = segmented_unique_cuda(keys, segment_range, num_tables, input_frequencies)
 
         table_offsets_cpu = table_offsets.cpu()
         total_unique = table_offsets_cpu[num_tables].item()
@@ -718,9 +710,6 @@ def dynamicemb_prefetch(
 
         unique_table_ids = expand_table_ids_cuda(
             unique_indices_table_range,
-            None,
-            table_num,
-            1,
             unique_keys.numel(),
         )
 
@@ -832,9 +821,6 @@ def dynamicemb_eval_forward(
         if not is_pooling:
             table_ids = expand_table_ids_cuda(
                 indices_table_range,
-                None,
-                table_num,
-                1,
                 indices.numel(),
             )
             frequency_counts_int64 = (
@@ -870,9 +856,6 @@ def dynamicemb_eval_forward(
 
         unique_table_ids = expand_table_ids_cuda(
             unique_indices_table_range,
-            None,
-            table_num,
-            1,
             unique_indices.numel(),
         )
 

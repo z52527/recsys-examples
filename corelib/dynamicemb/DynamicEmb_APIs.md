@@ -91,6 +91,14 @@ Wrapped TorchREC's `EmbeddingShardingPlanner` to perform sharding for dynamic em
 
 On construction it runs the internal preparation step described under [Sharding planner](#sharding-planner), then builds the TorchREC sub-planner and DynamicEmb shard metadata as before.
 
+For row-wise DynamicEmb sharding, the supported `dist_type` values are:
+
+- `continuous`
+- `roundrobin`
+- `hash_roundrobin`
+
+`hash_roundrobin` hashes the raw key before rank assignment and is intended to reduce sensitivity to pathological raw-key patterns that can break plain modulo-based `roundrobin`. It is an opt-in routing mode; the default remains `roundrobin` for compatibility with existing checkpoints. It should be understood as a routing robustness improvement, not as a general solution to arbitrary hot-key or Zipf-skew load balancing.
+
     ```python
     #How to import
     from dynamicemb.planner import DynamicEmbeddingShardingPlanner
@@ -919,3 +927,13 @@ Please see `DynamicEmbDump`, `DynamicEmbLoad`, `incremental_dump` in [APIs Doc](
 
 When handling cache eviction and final table eviction, dynamicemb encounters randomness in the eviction of keys with the same score. To eliminate this uncertainty, dynamicemb provides a deterministic mode. Enabling this mode ensures that, under the same training script, the evicted keys will be determined.
 This mode is enabled by setting the environment variable `DEMB_DETERMINISM_MODE`.
+
+## Environment Variables
+
+The following environment variables control runtime behavior of dynamicemb:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DYNAMICEMB_CSTM_SCORE_CHECK` | `1` | When set to `0`, suppresses warnings in `set_score` when a new score is less than the previous one (CUSTOMIZED eviction mode). |
+| `DEMB_DETERMINISM_MODE` | unset | When set, enables deterministic eviction of keys with equal scores during cache eviction and final table eviction. |
+| `DYNAMICEMB_DEBUG` | unset | When set to any non-empty value, enables extra runtime validation in `segmented_unique_cuda`. Copies `segmented_range` to CPU and verifies: (1) `segmented_range[0] == 0`, (2) `segmented_range[num_tables] == num_keys`, (3) monotonically non-decreasing. Raises an error with a descriptive message on violation. Intended for development and testing only; incurs one device-to-host copy per call. |

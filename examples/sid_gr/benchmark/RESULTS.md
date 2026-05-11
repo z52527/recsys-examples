@@ -39,10 +39,12 @@ you re-clone `gr-decode_atten` from upstream, the patches must be
 re-applied.
 
 `generate_beam_decode` runs an `inspect.signature` capability probe at
-entry: if you pick `use_jagged_kv=True` but the installed
-`beam_decode_attn` does not accept `cu_seqlens_k`, you get a clear
-``RuntimeError`` instead of a confusing ``TypeError`` deep in the
-decode loop.
+entry. With `use_jagged_kv=True`, you get a clear ``RuntimeError`` —
+not a deep ``TypeError`` mid-decode — in any of these cases:
+- the installed `beam_decode_attn` is the PyTorch reference fallback;
+- its signature doesn't accept `cu_seqlens_k`;
+- its signature can't be inspected at all (the probe fails closed so an
+  unverified kernel can't slip into the hot path).
 
 ## Setup
 

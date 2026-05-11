@@ -1002,10 +1002,21 @@ class SIDGRModel(MegatronModule):
                 )
             try:
                 _kernel_sig = inspect.signature(kernel)
-            except (TypeError, ValueError):
-                _kernel_sig = None
-            if (_kernel_sig is not None
-                    and "cu_seqlens_k" not in _kernel_sig.parameters):
+            except (TypeError, ValueError) as exc:
+                # Fail closed: an uninspectable callable (e.g. a C
+                # extension) cannot be proven to accept cu_seqlens_k.
+                # Better an explicit entry error than a deep
+                # "unexpected keyword argument" surprise mid-decode.
+                raise RuntimeError(
+                    "use_jagged_kv=True requires a beam_decode_attn "
+                    "callable whose signature can be inspected for "
+                    "cu_seqlens_k support. The installed kernel's "
+                    "signature is not inspectable, so cu_seqlens_k "
+                    "support cannot be verified. Use use_jagged_kv=False "
+                    "or install the local cu_seqlens_k patch in "
+                    "gr-decode_atten/interface.py."
+                ) from exc
+            if "cu_seqlens_k" not in _kernel_sig.parameters:
                 raise RuntimeError(
                     "use_jagged_kv=True requires the local cu_seqlens_k "
                     "patch in gr-decode_atten/interface.py. The "

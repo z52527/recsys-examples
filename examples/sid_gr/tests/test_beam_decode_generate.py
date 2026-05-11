@@ -847,6 +847,93 @@ def test_use_jagged_kv_with_reference_fallback_rejected_at_entry(monkeypatch):
                 )
 
 
+@pytest.mark.skipif(not _E2E_AVAILABLE, reason=_E2E_SKIP_REASON)
+def test_use_jagged_kv_uninspectable_signature_rejected_at_entry(monkeypatch):
+    """If the resolved kernel's signature cannot be inspected (e.g. a C
+    extension), the cu_seqlens_k capability probe must fail closed: emit
+    a clear entry-time RuntimeError instead of silently letting the call
+    proceed and surfacing a deep "unexpected keyword argument" later.
+    """
+    init = _E2E_DEPS["init"]
+    get_unwrapped_module = _E2E_DEPS["get_unwrapped_module"]
+    ShardedEmbeddingConfig = _E2E_DEPS["ShardedEmbeddingConfig"]
+    create_sid_gr_model_and_optimizer = _E2E_DEPS["create_sid_gr_model_and_optimizer"]
+
+    import inspect as _inspect
+    import sys as _sys
+    jfab = _sys.modules.get("model.jagged_flash_attn_block")
+    assert jfab is not None
+
+    init.initialize_distributed()
+    init.initialize_model_parallel(1)
+    init.set_random_seed(42)
+
+    hist_name = "hist_sids"
+    cand_name = "cand_sids"
+    codebook_sizes = [128, 128, 128]
+    codebook_embedding_config = ShardedEmbeddingConfig(
+        feature_names=[hist_name, cand_name],
+        table_name="codebook",
+        vocab_size=sum(codebook_sizes),
+        dim=256,
+        sharding_type="data_parallel",
+    )
+
+    with init.auto_destroy_global_state():
+        model, optimizer = create_sid_gr_model_and_optimizer(
+            dtype=torch.bfloat16,
+            hidden_size=256,
+            num_attention_heads=4,
+            kv_channels=64,
+            num_layers=2,
+            num_hierarchies=3,
+            codebook_embedding_config=codebook_embedding_config,
+            codebook_sizes=codebook_sizes,
+            use_jagged_flash_attn=True,
+        )
+        optimizer.reload_model_params()
+        model_unwrapped = get_unwrapped_module(model)
+        model_unwrapped.eval()
+
+        batch = _generate_random_batch(
+            batchsize=4,
+            max_history_length=64,
+            codebook_sizes=codebook_sizes,
+            history_feature_name=hist_name,
+            candidate_feature_name=cand_name,
+        )
+        batch.to(torch.cuda.current_device())
+
+        # Install a kernel stub that is NOT the reference fallback (so the
+        # earlier identity-based reject doesn't fire) but whose signature
+        # is unreachable: builtin_function_or_method-style objects raise
+        # TypeError from inspect.signature.
+        def _stub_kernel(*args, **kwargs):
+            raise AssertionError(
+                "kernel must not be called — the probe should reject earlier"
+            )
+        monkeypatch.setattr(jfab, "_beam_decode_attn", _stub_kernel)
+
+        # Force inspect.signature to raise TypeError for this stub,
+        # simulating a C-extension callable. gpt_model imports inspect
+        # at function-scope inside generate_beam_decode, so patch the
+        # module-level binding on `inspect` itself; the filter ensures
+        # other callers (pytest internals, etc.) are unaffected.
+        orig_signature = _inspect.signature
+
+        def _raising_signature(obj, *args, **kwargs):
+            if obj is _stub_kernel:
+                raise TypeError("simulated uninspectable signature")
+            return orig_signature(obj, *args, **kwargs)
+        monkeypatch.setattr(_inspect, "signature", _raising_signature)
+
+        with pytest.raises(RuntimeError, match="signature is not inspectable"):
+            with torch.no_grad():
+                model_unwrapped.generate_beam_decode(
+                    batch, backend="3kernel", use_jagged_kv=True,
+                )
+
+
 def test_compare_kv_modes_default_raises_on_validation_failure():
     """``run_compare_kv_modes`` must raise by default when validation
     fails. Pass ``--allow_validation_fail`` to suppress.

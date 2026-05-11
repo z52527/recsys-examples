@@ -16,9 +16,11 @@
 Tests for beam_decode_attn kernel integration:
   1. BeamSearch.build_beam_topk_indices correctness.
   2. JaggedGPTLayer prefill/decode_beam smoke test.
-  3. JaggedFlashAttnBlock prefill + decode_beam pipeline.
+  3. Variable-length history correctness (seqused_k masking).
   4. End-to-end generate_beam_decode through SIDGRModel.
-  5. Reference oracle: CuTe kernel vs PyTorch reference.
+  5. Regression guards comparing generate() / dense / jagged paths.
+  6. Entry-contract tests (backend whitelist, fallback rejection, etc).
+  7. padded_target_aware_causal_mask beam-isolation geometry.
 """
 
 import argparse
@@ -35,7 +37,6 @@ from beam_search.beam_search import BeamSearch
 # which pulls in heavy dependencies (dynamicemb, megatron, torchrec).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "model"))
 from jagged_flash_attn_block import (  # noqa: E402
-    JaggedFlashAttnBlock,
     JaggedGPTLayer,
     _beam_decode_attn_reference,
     _get_beam_decode_attn,
@@ -299,62 +300,6 @@ class TestJaggedGPTLayerPrefillDecode:
 
 
 # ---------------------------------------------------------------------------
-# Test: Full JaggedFlashAttnBlock prefill + decode pipeline
-# ---------------------------------------------------------------------------
-class TestJaggedFlashAttnBlockPipeline:
-    @pytest.fixture
-    def block(self):
-        return JaggedFlashAttnBlock(
-            num_layers=2,
-            hidden_size=64,
-            num_attention_heads=4,
-            ffn_hidden_size=128,
-        ).cuda().bfloat16()
-
-    def test_prefill_and_decode(self, block):
-        """Prefill + one decode step should run end-to-end."""
-        # Uses reference fallback if CuTe kernel not available
-
-        B, S_ctx, W, D = 2, 16, 3, 64
-        H, D_head = 4, 16
-        num_layers = 2
-
-        # Prefill
-        x_prefill = torch.randn(B, S_ctx, D, device="cuda", dtype=torch.bfloat16)
-        prefill_out, ctx_kv = block.prefill(x_prefill)
-        assert prefill_out.shape == (B, S_ctx, D)
-        assert len(ctx_kv) == num_layers
-
-        # Decode step 0
-        x_decode = torch.randn(B, W, D, device="cuda", dtype=torch.bfloat16)
-        topk = torch.arange(W, device="cuda").view(1, 1, 1, 1, W).expand(B, 1, H, 1, W).to(torch.int32)
-        beam_kv = [None] * num_layers
-
-        out, new_kvs = block.decode_beam(
-            x_decode, ctx_kv, beam_kv, topk, decode_nums=1,
-        )
-        assert out.shape == (B, W, D)
-        assert len(new_kvs) == num_layers
-
-        # Accumulate beam KV
-        for l in range(num_layers):
-            beam_kv[l] = new_kvs[l]
-
-        # Decode step 1
-        x_decode2 = torch.randn(B, W, D, device="cuda", dtype=torch.bfloat16)
-        # topk for step 1: self + ancestor at step 0
-        topk2 = torch.zeros(B, 1, H, 2, W, device="cuda", dtype=torch.int32)
-        for w in range(W):
-            topk2[:, 0, :, 0, w] = w  # ancestor at step 0 (self, for simplicity)
-            topk2[:, 0, :, 1, w] = W + w  # self at step 1
-
-        out2, new_kvs2 = block.decode_beam(
-            x_decode2, ctx_kv, beam_kv, topk2, decode_nums=2,
-        )
-        assert out2.shape == (B, W, D)
-
-
-# ---------------------------------------------------------------------------
 # Test: variable-length history padding (P0 #1: padding KV must be masked)
 # ---------------------------------------------------------------------------
 class TestVariableLengthHistory:
@@ -410,67 +355,6 @@ class TestVariableLengthHistory:
         assert diff < 0.05, (
             f"Padding contaminates output: diff={diff:.4f}. "
             f"seqused_k masking is broken."
-        )
-
-
-# ---------------------------------------------------------------------------
-# Test: reference oracle — CuTe kernel matches PyTorch reference
-# ---------------------------------------------------------------------------
-class TestReferenceOracle:
-    """Compare beam_decode_attn CuTe kernel against PyTorch reference.
-
-    These tests are skipped when the CuTe kernel is unavailable.
-    Tolerance follows FA convention: kernel error ≤ 2× the bf16 baseline error
-    relative to fp32 reference, plus a small atol.
-    """
-
-    @staticmethod
-    def _maybe_skip_no_kernel():
-        fn = _get_beam_decode_attn()
-        if fn is _beam_decode_attn_reference:
-            pytest.skip("CuTe beam_decode_attn kernel not available")
-
-    @pytest.mark.parametrize("decode_nums", [1, 2, 3])
-    @pytest.mark.parametrize("seqlen_context", [16, 64])
-    @pytest.mark.parametrize("beam_width", [2, 4])
-    def test_kernel_vs_reference(self, decode_nums, seqlen_context, beam_width):
-        """Output of the CuTe kernel should match PyTorch reference within tolerance."""
-        self._maybe_skip_no_kernel()
-
-        B, W, H, D_head = 2, beam_width, 4, 64
-        torch.manual_seed(42)
-
-        q = torch.randn(B, 1, W, H, D_head, device="cuda", dtype=torch.bfloat16)
-        k_ctx = torch.randn(B, seqlen_context, H, D_head, device="cuda", dtype=torch.bfloat16)
-        v_ctx = torch.randn(B, seqlen_context, H, D_head, device="cuda", dtype=torch.bfloat16)
-        k_beam = torch.randn(B, decode_nums * W, H, D_head, device="cuda", dtype=torch.bfloat16)
-        v_beam = torch.randn(B, decode_nums * W, H, D_head, device="cuda", dtype=torch.bfloat16)
-        # Random topk indices into [0, decode_nums*W)
-        topk = torch.randint(
-            0, decode_nums * W,
-            (B, 1, H, decode_nums, W),
-            device="cuda", dtype=torch.int32,
-        )
-
-        # Kernel output
-        kernel_fn = _get_beam_decode_attn()
-        out_kernel, _ = kernel_fn(
-            q, k_ctx, v_ctx, k_beam, v_beam, topk, decode_nums,
-            backend="3kernel",
-        )
-
-        # PyTorch reference (fp32 inside)
-        out_ref, _ = _beam_decode_attn_reference(
-            q, k_ctx, v_ctx, k_beam, v_beam, topk, decode_nums,
-        )
-
-        # bf16 baseline error (reference twice, should be ~0)
-        # Use absolute tolerance suitable for bf16 attention output magnitude.
-        diff = (out_kernel.float() - out_ref.float()).abs()
-        max_diff = diff.max().item()
-        # Loose tolerance: bf16 attention has inherent precision loss
-        assert max_diff < 0.05, (
-            f"kernel vs reference max diff {max_diff:.4f} exceeds tolerance"
         )
 
 

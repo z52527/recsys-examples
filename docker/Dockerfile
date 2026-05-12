@@ -62,7 +62,7 @@ RUN pip install --no-deps tensordict orjson && \
 
 RUN git clone -b arbitrary_mask https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
-    pip install --no-deps -e .
+    pip install --no-deps --no-build-isolation -e .
 
 # Install fbgemm_gpu_hstu (package: fbgemm_gpu_hstu, import: hstu) from submodule
 COPY third_party/FBGEMM /workspace/deps/fbgemm_hstu

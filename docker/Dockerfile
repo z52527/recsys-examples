@@ -55,6 +55,12 @@ RUN pip install --no-deps tensordict orjson && \
     cd torchrec && \
     pip install --no-deps .
 
+# Install flash_attn.cute (the standalone CuTe DSL submodule of
+# jiayus-nvidia/flash-attention). The arbitrary-mask CuTe path is the
+# only thing this repo uses; installing the full flash-attention root
+# would trigger a heavy CUDA-extension build (flash_attn_2_cuda etc.)
+# that we don't need.
+#
 # Pin the arbitrary_mask branch to a known-good commit so builds are
 # reproducible even if the upstream branch moves. Override via
 # `--build-arg FLASH_ATTN_ARBITRARY_MASK_COMMIT=<sha>` if needed.
@@ -62,7 +68,7 @@ ARG FLASH_ATTN_ARBITRARY_MASK_COMMIT=b56db721d65afadd8cfe154cd12e83693bf0aba3
 RUN git clone https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_ARBITRARY_MASK_COMMIT} && \
-    pip install --no-deps --no-build-isolation -e .
+    pip install --no-deps --no-build-isolation -e ./flash_attn/cute
 
 # Install fbgemm_gpu_hstu (package: fbgemm_gpu_hstu, import: hstu) from submodule
 COPY third_party/FBGEMM /workspace/deps/fbgemm_hstu

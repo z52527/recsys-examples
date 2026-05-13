@@ -274,10 +274,13 @@ history to under 512, so the default stays `use_jagged_kv=False`.
 
 Three tiers of correctness signal, in order of strength:
 
-1. **Reference oracle** (`TestReferenceOracle::test_kernel_vs_reference`,
-   12 cases): the CuTe kernel output is compared against a pure-PyTorch
-   reference implementation in fp32 using FA-style tolerance
-   (`max_diff < 0.05`). This is the strongest mathematical check.
+1. **Reference oracle for the kernel itself**
+   (`corelib/gr_decode_atten/tests/test_fwd.py` — 14 quick cases via
+   `make tt`, 1200 parametrized cases via `make vt`): the CuTe kernel
+   output is compared against a pure-PyTorch reference implementation in
+   fp32 using FA-style tolerance. This is the strongest mathematical
+   check; upstream `cjerry/gr-decode_atten` CI also runs the full
+   sweep on every change.
 
 2. **Mask isolation unit tests** (`TestBeamIsolationMask`): direct check
    on `padded_target_aware_causal_mask` geometry — different beam
@@ -306,7 +309,7 @@ verified A-vs-B equivalence at each config (top-1 exact, |lp delta| <
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
-  PYTHONPATH=$REPO/examples \
+  PYTHONPATH=$REPO/examples:${PYTHONPATH} \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
   --sweep --validate_outputs \
@@ -326,7 +329,7 @@ useful for smoke-testing the integration end-to-end):
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
-  PYTHONPATH=$REPO/examples \
+  PYTHONPATH=$REPO/examples:${PYTHONPATH} \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
   --sweep --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 --sweep_dtype bf16,fp16
@@ -338,7 +341,7 @@ dense+seqused_k path` table above):
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
-  PYTHONPATH=$REPO/examples \
+  PYTHONPATH=$REPO/examples:${PYTHONPATH} \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
   --compare_kv_modes --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 \

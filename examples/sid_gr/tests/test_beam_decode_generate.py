@@ -560,8 +560,9 @@ def test_generate_vs_generate_beam_decode_regression_guard(
 
     This is a regression GUARD — it catches a path going significantly off
     spec. It is NOT a mathematical equivalence proof; for that, see the
-    reference oracle (`TestReferenceOracle`) which compares the kernel
-    against a fp32 PyTorch reference at the attention-call level.
+    kernel-level reference oracle in
+    `corelib/gr_decode_atten/tests/test_fwd.py`, which compares the CuTe
+    kernel against a fp32 PyTorch reference at the attention-call level.
 
     Thresholds:
       - top-1 SID per sample matches exactly (small bf16 noise should not

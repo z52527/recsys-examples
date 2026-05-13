@@ -113,13 +113,13 @@ The four leaves are the recommended SID tuples for this sample.
 
 The model exposes two generation entry points, both producing top-K beams of full SID tuples. The diagram below contrasts the per-step work (example shapes: `hist=15`, `BOS=1`, `W=4`, `H=3`):
 
-<table>
+<table width="100%">
 <tr>
-<th><code>generate()</code> — no KV cache</th>
-<th><code>generate_beam_decode()</code> — KV cache</th>
+<th width="50%" align="center"><code>generate()</code> — no KV cache</th>
+<th width="50%" align="center"><code>generate_beam_decode()</code> — KV cache</th>
 </tr>
 <tr>
-<td>
+<td width="50%" align="center">
 
 ```mermaid
 flowchart TB
@@ -132,7 +132,7 @@ flowchart TB
 ```
 
 </td>
-<td>
+<td width="50%" align="center">
 
 ```mermaid
 flowchart TB

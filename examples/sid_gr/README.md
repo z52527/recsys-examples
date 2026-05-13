@@ -123,9 +123,9 @@ The model exposes two generation entry points, both producing top-K beams of ful
 
 ```mermaid
 flowchart TB
-    N0["forward<br/>seqlen = 16<br/>(hist + BOS)"]
-    N1["forward<br/>seqlen = 20<br/>(hist + BOS + 4 codes)"]
-    N2["forward<br/>seqlen = 24<br/>(hist + BOS + 8 codes)"]
+    N0["forward<br/>seqlen = 16<br/>(hist + BOS)<br/>recompute all K/V"]
+    N1["forward<br/>seqlen = 20<br/>(hist + BOS + 4 codes)<br/>recompute all K/V"]
+    N2["forward<br/>seqlen = 24<br/>(hist + BOS + 8 codes)<br/>recompute all K/V"]
     N0 -- "propagate → SID #1" --> N1
     N1 -- "propagate → SID #2" --> N2
     N2 -- "propagate → SID #3" --> Ne["done"]

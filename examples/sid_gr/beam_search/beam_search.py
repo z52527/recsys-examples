@@ -219,7 +219,7 @@ class BeamSearch:
         # Trace ancestors backward from step d
         # ancestor_at[s] has shape [B, W_d]: which beam at step s is the
         # ancestor of each current beam at step d.
-        ancestor_at = [None] * decode_nums
+        ancestor_at: List[Optional[torch.Tensor]] = [None] * decode_nums
         ancestor_at[d] = torch.arange(W_d, device=device).unsqueeze(0).expand(B, -1)
         pos = ancestor_at[d]
         for s in range(d, 0, -1):
@@ -227,11 +227,15 @@ class BeamSearch:
             ancestor_at[s - 1] = pos
 
         # Convert beam indices to beam_kv flat indices using the per-step
-        # offset (correct for both uniform and non-uniform widths).
-        topk_flat = torch.stack(
-            [step_offsets[s] + ancestor_at[s] for s in range(decode_nums)],
-            dim=-1,
-        )  # [B, W_d, decode_nums]
+        # offset (correct for both uniform and non-uniform widths). The
+        # loop above fills every slot in ancestor_at, so the asserts only
+        # exist to narrow Optional for mypy.
+        topk_columns = []
+        for s in range(decode_nums):
+            a_s = ancestor_at[s]
+            assert a_s is not None
+            topk_columns.append(step_offsets[s] + a_s)
+        topk_flat = torch.stack(topk_columns, dim=-1)  # [B, W_d, decode_nums]
 
         # Reshape to [B, 1, num_heads, decode_nums, W_d]
         topk_flat = topk_flat.permute(0, 2, 1)

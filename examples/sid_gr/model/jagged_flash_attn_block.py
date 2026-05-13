@@ -789,8 +789,9 @@ class JaggedFlashAttnBlock(nn.Module):
         new_beam_kvs = []
         for i, layer in enumerate(self.layers):
             k_context, v_context = context_kv_caches[i]
-            k_beam = beam_kv_caches[i][0] if beam_kv_caches[i] is not None else None
-            v_beam = beam_kv_caches[i][1] if beam_kv_caches[i] is not None else None
+            beam_cache_i = beam_kv_caches[i]
+            k_beam = beam_cache_i[0] if beam_cache_i is not None else None
+            v_beam = beam_cache_i[1] if beam_cache_i is not None else None
             hidden_states, kv_new = layer.decode_beam(
                 hidden_states,
                 k_context,

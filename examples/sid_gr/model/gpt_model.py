@@ -1217,8 +1217,9 @@ class SIDGRModel(MegatronModule):
             # Accumulate beam KV for next step
             for l in range(num_layers):
                 k_new, v_new = new_beam_kvs[l]
-                if beam_kv_caches[l] is not None:
-                    k_prev, v_prev = beam_kv_caches[l]
+                cache = beam_kv_caches[l]
+                if cache is not None:
+                    k_prev, v_prev = cache
                     beam_kv_caches[l] = (
                         torch.cat([k_prev, k_new], dim=1),
                         torch.cat([v_prev, v_new], dim=1),
@@ -1243,7 +1244,7 @@ class SIDGRModel(MegatronModule):
             )
             self.beam_search.propagate(probs_this_step)
 
-        if record_times:
+        if phase_times is not None:
             ev_t2.record()
             torch.cuda.synchronize()
             phase_times["prefill_ms"] = ev_t0.elapsed_time(ev_t1)

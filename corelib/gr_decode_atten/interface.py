@@ -421,7 +421,12 @@ def _beam_sparse_attention(
 
 
 def _combine(o_partial, lse_partial, o_out, lse_out):
-    """K3: Log-sum-exp merge. Reads pre-allocated partials, writes output."""
+    """K3: Log-sum-exp merge. Reads pre-allocated partials, writes output.
+
+    Output dtype is derived from ``o_out`` (fp16 or bf16). The dtype is
+    part of the kernel compile cache key so bf16 and fp16 callers don't
+    share a compiled binary.
+    """
     D = o_partial.shape[-1]
     num_splits = o_partial.shape[0]
 
@@ -437,13 +442,14 @@ def _combine(o_partial, lse_partial, o_out, lse_out):
     if tile_m == 8:
         log_max_splits = max(log_max_splits, 5)
 
-    key = ("k3", D, k_block_size, tile_m, log_max_splits, use_pdl)
+    out_dtype = TORCH_TO_CUTLASS[o_out.dtype]
+    key = ("k3", D, k_block_size, tile_m, log_max_splits, use_pdl, out_dtype)
     if key not in _compile_cache:
         from quack.compile_utils import make_fake_tensor
         from src.flash_fwd_combine import FlashAttentionForwardCombine
 
         kernel = FlashAttentionForwardCombine(
-            dtype=cutlass.BFloat16,
+            dtype=out_dtype,
             dtype_partial=cutlass.Float32,
             head_dim=D,
             tile_m=tile_m,
@@ -464,9 +470,7 @@ def _combine(o_partial, lse_partial, o_out, lse_out):
             divisibility=1,
             leading_dim=2,
         )
-        mO = make_fake_tensor(
-            cutlass.BFloat16, (batch, sq, nheads, D), divisibility=div
-        )
+        mO = make_fake_tensor(out_dtype, (batch, sq, nheads, D), divisibility=div)
         mLSE = make_fake_tensor(
             cutlass.Float32,
             (batch, sq, nheads),
@@ -705,7 +709,7 @@ class BeamDecodeAttn(torch.autograd.Function):
             lse_partial_raw = torch.empty(
                 total_splits, B, Hq, W, device=q.device, dtype=torch.float32
             )
-            o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=torch.bfloat16)
+            o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=q.dtype)
             lse_out = torch.empty(
                 B, Hq, W, device=q.device, dtype=torch.float32
             ).transpose(-1, -2)
@@ -774,7 +778,7 @@ class BeamDecodeAttn(torch.autograd.Function):
             lse_partial_raw = torch.empty(
                 ns, B, Hq, W, device=q.device, dtype=torch.float32
             )
-            o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=torch.bfloat16)
+            o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=q.dtype)
             lse_out = torch.empty(
                 B, Hq, W, device=q.device, dtype=torch.float32
             ).transpose(-1, -2)
@@ -799,7 +803,7 @@ class BeamDecodeAttn(torch.autograd.Function):
             return o_out.unsqueeze(1), lse_out.unsqueeze(1)
         else:
             # Fused, no split → bf16 direct
-            o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=torch.bfloat16)
+            o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=q.dtype)
             lse_out = torch.empty(B, Hq, W, device=q.device, dtype=torch.float32)
 
             _fused_context_beam(

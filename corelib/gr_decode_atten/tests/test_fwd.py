@@ -188,6 +188,37 @@ def test_beam_attention_fused(dim, head_kv, beam_width, decode_nums, seqlen_cont
     )
 
 
+# ============== Output dtype contract (4 cases) ==============
+#
+# beam_decode_attn() documents the output dtype as matching `q.dtype`.
+# These tests exercise both bf16 and fp16 input on both backends to
+# keep the contract honest — the bulk parametrized tests above default
+# to bf16 only, so they would not catch a regression where the output
+# silently gets allocated as bf16 for fp16 input.
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float16],
+    ids=lambda d: "bf16" if d == torch.bfloat16 else "fp16",
+)
+@pytest.mark.parametrize("backend", ["3kernel", "dsl"])
+def test_output_dtype_matches_input(dtype, backend):
+    """Output dtype must equal q.dtype on every code path."""
+    _test_single(
+        batch=4,
+        seqlen_q=1,
+        beam_width=128,
+        head_q=16,
+        head_kv=4,
+        dim=128,
+        seqlen_context=1024,
+        decode_nums=4,
+        dtype=dtype,
+        backend=backend,
+    )
+
+
 # ============== Quick test (python tests/test_fwd.py) ==============
 
 
@@ -195,28 +226,42 @@ def run_quick_tests():
     print("Quick correctness tests")
     print("=" * 70)
     configs = [
-        # (batch, seqlen_q, beam_width, head_q, head_kv, dim, seqlen_ctx, decode_nums, backend)
-        # 3-kernel: basic coverage
-        (4, 1, 128, 16, 16, 128, 256, 1, "3kernel"),
-        (4, 1, 256, 16, 16, 128, 256, 8, "3kernel"),
-        (4, 1, 512, 16, 16, 64, 256, 16, "3kernel"),
-        (4, 1, 128, 16, 4, 128, 256, 4, "3kernel"),
-        (4, 1, 1024, 16, 4, 64, 256, 16, "3kernel"),
+        # (batch, seqlen_q, beam_width, head_q, head_kv, dim, seqlen_ctx, decode_nums, backend, dtype)
+        # 3-kernel: basic coverage (bf16)
+        (4, 1, 128, 16, 16, 128, 256, 1, "3kernel", torch.bfloat16),
+        (4, 1, 256, 16, 16, 128, 256, 8, "3kernel", torch.bfloat16),
+        (4, 1, 512, 16, 16, 64, 256, 16, "3kernel", torch.bfloat16),
+        (4, 1, 128, 16, 4, 128, 256, 4, "3kernel", torch.bfloat16),
+        (4, 1, 1024, 16, 4, 64, 256, 16, "3kernel", torch.bfloat16),
         # Fused: no split (small ctx)
-        (4, 1, 128, 16, 16, 128, 256, 1, "dsl"),
-        (4, 1, 256, 16, 4, 128, 256, 8, "dsl"),
+        (4, 1, 128, 16, 16, 128, 256, 1, "dsl", torch.bfloat16),
+        (4, 1, 256, 16, 4, 128, 256, 8, "dsl", torch.bfloat16),
         # Fused: split-KV (large ctx)
-        (4, 1, 128, 16, 16, 128, 1024, 3, "dsl"),
-        (4, 1, 128, 16, 4, 128, 2048, 3, "dsl"),
-        (4, 1, 128, 16, 1, 128, 2048, 3, "dsl"),
-        (4, 1, 256, 16, 4, 128, 4096, 8, "dsl"),
-        (4, 1, 128, 16, 4, 64, 1024, 1, "dsl"),
+        (4, 1, 128, 16, 16, 128, 1024, 3, "dsl", torch.bfloat16),
+        (4, 1, 128, 16, 4, 128, 2048, 3, "dsl", torch.bfloat16),
+        (4, 1, 128, 16, 1, 128, 2048, 3, "dsl", torch.bfloat16),
+        (4, 1, 256, 16, 4, 128, 4096, 8, "dsl", torch.bfloat16),
+        (4, 1, 128, 16, 4, 64, 1024, 1, "dsl", torch.bfloat16),
         # Edge: decode_nums=0
-        (4, 1, 128, 16, 4, 128, 256, 0, "3kernel"),
-        (4, 1, 128, 16, 4, 128, 1024, 0, "dsl"),
+        (4, 1, 128, 16, 4, 128, 256, 0, "3kernel", torch.bfloat16),
+        (4, 1, 128, 16, 4, 128, 1024, 0, "dsl", torch.bfloat16),
+        # fp16 dtype contract (one config per backend, hits _combine + fused)
+        (4, 1, 128, 16, 4, 128, 1024, 4, "3kernel", torch.float16),
+        (4, 1, 128, 16, 4, 128, 1024, 4, "dsl", torch.float16),
     ]
-    for batch, sq, bw, hq, hk, d, ctx, dn, backend in configs:
-        _test_single(batch, sq, bw, hq, hk, d, ctx, dn, backend=backend)
+    for batch, sq, bw, hq, hk, d, ctx, dn, backend, dtype in configs:
+        _test_single(
+            batch,
+            sq,
+            bw,
+            hq,
+            hk,
+            d,
+            ctx,
+            dn,
+            dtype=dtype,
+            backend=backend,
+        )
     print("=" * 70)
     print("All quick tests passed.")
 

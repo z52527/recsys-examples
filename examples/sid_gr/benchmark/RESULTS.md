@@ -351,6 +351,27 @@ already includes it (the Dockerfile adds the vendor dir to
 `PYTHONPATH`), and the benchmark probes at runtime as a defensive
 guard.
 
+### Tunable flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--batch_size` | 4 | |
+| `--max_hist_len` | 128 | |
+| `--beam_width` | 10 | |
+| `--num_hierarchies` | 3 | |
+| `--codebook_size` | 256 | per-level codebook size |
+| `--hidden_size` | 256 | |
+| `--num_heads` | 4 | |
+| `--kv_channels` | 64 | per-head dim |
+| `--num_layers` | 2 | |
+| `--num_warmup` | 5 | warmup iterations (CuTe JIT compile is slow on first call) |
+| `--num_iter` | 20 | timed iterations |
+| `--backend` | `3kernel` | `beam_decode_attn` backend (`3kernel` or `dsl`) |
+| `--use_jagged_kv` | off | jagged-native prefill + `cu_seqlens_k` (requires the cu_seqlens_k kernel patch) |
+| `--compare_kv_modes` | off | 3-way sweep (generate / dense / jagged) |
+| `--validate_outputs` | off | In `--sweep` mode, add an untimed A-vs-B correctness check per config |
+| `--allow_validation_fail` | off | Allow `--compare_kv_modes` / `--validate_outputs` to exit successfully on validation failure (default: raise `RuntimeError`) |
+
 ## Known issues
 
 - **Split-KV + `seqused_k`**: hangs in the context-attention kernel;

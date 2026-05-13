@@ -83,13 +83,72 @@ The SID-GR model performs retrieval through beam search generation. To retrieve 
 
 These two characteristics necessitate different performance optimization strategies compared to LLM inference.
 
+The diagram below illustrates one full generation for `H=3` hierarchies and `beam_width=4`. Each `propagate` call applies top-K over the cross product of surviving parents and the next codebook; pruned beams (dashed) drop out, and a surviving parent can be cloned into multiple children:
+
+```mermaid
+graph TD
+    BOS["history + BOS<br/>(prefill input)"]
+
+    BOS -->|"propagate #1<br/>topk over 256"| b00["beam 0: (88)"]
+    BOS --> b01["beam 1: (89)"]:::pruned
+    BOS --> b02["beam 2: (12)"]
+    BOS --> b03["beam 3: (200)"]
+
+    b02 -->|"propagate #2<br/>topk over 4×256"| b10["beam 0: (12, 30)"]
+    b02 --> b11["beam 1: (12, 28)"]
+    b00 --> b12["beam 2: (88, 50)"]:::pruned
+    b03 --> b13["beam 3: (200, 32)"]
+
+    b10 -->|"propagate #3<br/>topk over 4×256"| b20["beam 0: (12, 30, 7)"]
+    b11 --> b21["beam 1: (12, 28, 100)"]
+    b10 --> b22["beam 2: (12, 30, 200)"]
+    b13 --> b23["beam 3: (200, 32, 88)"]
+
+    classDef pruned stroke:#888,stroke-dasharray:4 4,color:#888;
+```
+
+The four leaves are the recommended SID tuples for this sample.
+
 ### Generation APIs
 
-The model exposes two generation entry points, both producing top-K beams of full SID tuples:
+The model exposes two generation entry points, both producing top-K beams of full SID tuples. The diagram below contrasts the per-step work (example shapes: `hist=15`, `BOS=1`, `W=4`, `H=3`):
+
+```mermaid
+flowchart LR
+    subgraph naive["generate() — no KV cache"]
+        direction TB
+        N0["forward<br/>seqlen = 16<br/>(hist + BOS)"]
+        N1["forward<br/>seqlen = 20<br/>(hist + BOS + 4 codes)"]
+        N2["forward<br/>seqlen = 24<br/>(hist + BOS + 8 codes)"]
+        N0 -- "propagate → SID #1" --> N1
+        N1 -- "propagate → SID #2" --> N2
+        N2 -- "propagate → SID #3" --> Ne["done"]
+    end
+
+    subgraph fast["generate_beam_decode() — KV cache"]
+        direction TB
+        F0["prefill<br/>seqlen = 16<br/>(hist + BOS)<br/>→ context_kv_caches"]
+        F1["decode<br/>1 new token × W beams<br/>read ctx + own beam_kv"]
+        F2["decode<br/>1 new token × W beams<br/>read ctx + grown beam_kv"]
+        F0 -- "propagate → SID #1" --> F1
+        F1 -- "propagate → SID #2" --> F2
+        F2 -- "propagate → SID #3" --> Fe["done"]
+    end
+```
+
+`generate()` reruns the full transformer over a growing `[hist + already-generated]` sequence at every step. `generate_beam_decode()` pays the history cost once during prefill and then each decode step runs only the new token per beam, attending into the cached K/V.
 
 1. **`generate()`** — baseline path. At every hierarchy step it re-runs the transformer over `[history + generated_prefix]` with a beam-isolating attention mask so beams do not cross-attend within a step. Works with either decoder backend (Megatron-Core `TransformerBlock` or `JaggedTransformerBlock`). Per-step cost grows with the running prefix length.
 
 2. **`generate_beam_decode()`** — KV-cache path. Runs a single prefill over `[history + BOS]` to populate a per-layer context K/V cache, then performs incremental beam decode using the `beam_decode_attn` kernel. The fixed context K/V is shared across beams; per-step beam K/V is appended to the cache and parent-beam ancestry is tracked through `topk_indices` rather than by reshuffling the cache. Requires `use_jagged_flash_attn=True`; the kernel is vendored at [`corelib/gr_decode_atten/`](../../corelib/gr_decode_atten/) and is on `PYTHONPATH` automatically in the Docker image. Per-step cost is independent of history length, which is where the long-history speedup comes from.
+
+The KV cache in `generate_beam_decode()` is split into two parts, with different sharing and indexing semantics:
+
+<p align="center">
+  <img src="./figs/kv_cache_split.png" alt="KV cache split in generate_beam_decode" width="75%">
+</p>
+
+`context_kv_caches[ℓ]` is a single per-layer slab populated by prefill and read every decode step by every beam; no per-beam indexing. `beam_kv_caches[ℓ]` is a 2-D grid (decode step × beam slot) that grows by `W` rows per decode step; per-beam ancestor lookup walks `parent_indices` backwards and is fed to the kernel as `topk_indices`. This split is what keeps the kernel from re-shuffling the cache after each beam-search pruning and what avoids replicating history `W` times.
 
 For backend selection (`backend="3kernel"` vs `"dsl"`), jagged-vs-dense context K/V (`use_jagged_kv`), kernel dependency notes, and measured numbers, see [`benchmark/RESULTS.md`](./benchmark/RESULTS.md) and [`training/README.md`](./training/README.md).
 

@@ -113,30 +113,40 @@ The four leaves are the recommended SID tuples for this sample.
 
 The model exposes two generation entry points, both producing top-K beams of full SID tuples. The diagram below contrasts the per-step work (example shapes: `hist=15`, `BOS=1`, `W=4`, `H=3`):
 
+<table>
+<tr>
+<th><code>generate()</code> — no KV cache</th>
+<th><code>generate_beam_decode()</code> — KV cache</th>
+</tr>
+<tr>
+<td>
+
 ```mermaid
-flowchart LR
-    subgraph naive["generate() — no KV cache"]
-        direction TB
-        N0["forward<br/>seqlen = 16<br/>(hist + BOS)"]
-        N1["forward<br/>seqlen = 20<br/>(hist + BOS + 4 codes)"]
-        N2["forward<br/>seqlen = 24<br/>(hist + BOS + 8 codes)"]
-        N0 -- "propagate → SID #1" --> N1
-        N1 -- "propagate → SID #2" --> N2
-        N2 -- "propagate → SID #3" --> Ne["done"]
-    end
-
-    subgraph fast["generate_beam_decode() — KV cache"]
-        direction TB
-        F0["prefill<br/>seqlen = 16<br/>(hist + BOS)<br/>→ context_kv_caches"]
-        F1["decode<br/>1 new token × W beams<br/>read ctx + own beam_kv"]
-        F2["decode<br/>1 new token × W beams<br/>read ctx + grown beam_kv"]
-        F0 -- "propagate → SID #1" --> F1
-        F1 -- "propagate → SID #2" --> F2
-        F2 -- "propagate → SID #3" --> Fe["done"]
-    end
-
-    N0 ~~~ F0
+flowchart TB
+    N0["forward<br/>seqlen = 16<br/>(hist + BOS)"]
+    N1["forward<br/>seqlen = 20<br/>(hist + BOS + 4 codes)"]
+    N2["forward<br/>seqlen = 24<br/>(hist + BOS + 8 codes)"]
+    N0 -- "propagate → SID #1" --> N1
+    N1 -- "propagate → SID #2" --> N2
+    N2 -- "propagate → SID #3" --> Ne["done"]
 ```
+
+</td>
+<td>
+
+```mermaid
+flowchart TB
+    F0["prefill<br/>seqlen = 16<br/>(hist + BOS)<br/>→ context_kv_caches"]
+    F1["decode<br/>1 new token × W beams<br/>read ctx + own beam_kv"]
+    F2["decode<br/>1 new token × W beams<br/>read ctx + grown beam_kv"]
+    F0 -- "propagate → SID #1" --> F1
+    F1 -- "propagate → SID #2" --> F2
+    F2 -- "propagate → SID #3" --> Fe["done"]
+```
+
+</td>
+</tr>
+</table>
 
 `generate()` reruns the full transformer over a growing `[hist + already-generated]` sequence at every step. `generate_beam_decode()` pays the history cost once during prefill and then each decode step runs only the new token per beam, attending into the cached K/V.
 

@@ -134,6 +134,8 @@ flowchart LR
         F1 -- "propagate → SID #2" --> F2
         F2 -- "propagate → SID #3" --> Fe["done"]
     end
+
+    N0 ~~~ F0
 ```
 
 `generate()` reruns the full transformer over a growing `[hist + already-generated]` sequence at every step. `generate_beam_decode()` pays the history cost once during prefill and then each decode step runs only the new token per beam, attending into the cached K/V.

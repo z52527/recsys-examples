@@ -18,13 +18,13 @@ difference is the attention path during generation:
     cached context KV and accumulates beam KV via topk_indices.
 
 Run inside the recsys-examples Docker container (commons + dynamicemb +
-megatron + torchrec must import cleanly). Required PYTHONPATH must include
-the gr-decode_atten clone for the CuTe kernel.
+megatron + torchrec must import cleanly). The CuTe kernel is vendored at
+corelib/gr_decode_atten/; the Dockerfile adds it to PYTHONPATH
+automatically.
 
 Example:
   cd examples/sid_gr
-  PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
-    torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
+  torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
     --max_hist_len 128 --beam_width 10 --num_layers 4
 """
 from __future__ import annotations
@@ -573,8 +573,9 @@ def main():
                              "variable-length history; 'dsl' requires uniform.")
     parser.add_argument("--use_jagged_kv", action="store_true",
                         help="Use the jagged-native prefill + cu_seqlens_k path. "
-                             "Only valid with backend='3kernel'. Requires the "
-                             "cu_seqlens_k patch in gr-decode_atten/interface.py. "
+                             "Only valid with backend='3kernel'. Needs the "
+                             "cu_seqlens_k kernel entry point (already present "
+                             "in the vendored corelib/gr_decode_atten). "
                              "See RESULTS.md for the perf trade-off.")
     parser.add_argument("--compare_kv_modes", action="store_true",
                         help="Time generate(), generate_beam_decode(use_jagged_kv=False) "

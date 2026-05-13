@@ -997,8 +997,9 @@ class SIDGRModel(MegatronModule):
                     "beam_decode_attn kernel; the PyTorch reference "
                     "fallback does not implement jagged context K/V "
                     "(it only raises NotImplementedError when actually "
-                    "called). Install gr-decode_atten with the "
-                    "cu_seqlens_k patch, or use use_jagged_kv=False."
+                    "called). Ensure corelib/gr_decode_atten is on "
+                    "PYTHONPATH (Docker image sets this automatically), "
+                    "or use use_jagged_kv=False."
                 )
             try:
                 _kernel_sig = inspect.signature(kernel)
@@ -1013,16 +1014,15 @@ class SIDGRModel(MegatronModule):
                     "cu_seqlens_k support. The installed kernel's "
                     "signature is not inspectable, so cu_seqlens_k "
                     "support cannot be verified. Use use_jagged_kv=False "
-                    "or install the local cu_seqlens_k patch in "
-                    "gr-decode_atten/interface.py."
+                    "or verify corelib/gr_decode_atten is on PYTHONPATH."
                 ) from exc
             if "cu_seqlens_k" not in _kernel_sig.parameters:
                 raise RuntimeError(
-                    "use_jagged_kv=True requires the local cu_seqlens_k "
-                    "patch in gr-decode_atten/interface.py. The "
-                    "currently-installed beam_decode_attn does not "
-                    "accept cu_seqlens_k. Use use_jagged_kv=False or "
-                    "install the patch."
+                    "use_jagged_kv=True requires a beam_decode_attn "
+                    "entry point that accepts cu_seqlens_k. The vendored "
+                    "corelib/gr_decode_atten kernel includes it; the "
+                    "currently-resolved kernel does not. Check "
+                    "PYTHONPATH, or use use_jagged_kv=False."
                 )
 
         # Optional phase timing via cuda events

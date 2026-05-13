@@ -22,21 +22,19 @@ implement the same attention semantics:
 The speedup is therefore an apples-to-apples comparison of two
 mathematically equivalent implementations.
 
-**Required local kernel patches** (applied to the local
-`gr-decode_atten` checkout):
-1. The context-attention launch accepts a `seqused_k` kwarg for
-   per-sample variable-length context. Required by the default
+**Kernel entry points used by these numbers** (all included in the
+vendored snapshot at `corelib/gr_decode_atten/`, pinned to upstream
+commit `1c540f6`):
+1. Context-attention launch accepts a `seqused_k` kwarg for per-sample
+   variable-length context. Required by the default
    `use_jagged_kv=False` path.
 2. `BeamDecodeAttn.forward` forces `num_splits=1` when `seqused_k` is
-   set (workaround for a split-KV + `seqused_k` hang on SM90). Bundled
-   with patch (1).
-3. The context-attention launch accepts a `cu_seqlens_k` kwarg for
-   jagged context K/V. Only required when `use_jagged_kv=True`.
+   set (workaround for a split-KV + `seqused_k` hang on SM90).
+3. Context-attention launch accepts a `cu_seqlens_k` kwarg for jagged
+   context K/V. Only required when `use_jagged_kv=True`.
 
-If you re-install `quack-kernels` from PyPI without re-cloning
-`gr-decode_atten`, the patches stay (they live in the local clone). If
-you re-clone `gr-decode_atten` from upstream, the patches must be
-re-applied.
+See `corelib/gr_decode_atten/README.md` for the provenance block and
+on-demand sync policy.
 
 `generate_beam_decode` runs an `inspect.signature` capability probe at
 entry. With `use_jagged_kv=True`, you get a clear ``RuntimeError`` —
@@ -308,7 +306,7 @@ verified A-vs-B equivalence at each config (top-1 exact, |lp delta| <
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
-  PYTHONPATH=$REPO/examples:$KERNEL_PATH \
+  PYTHONPATH=$REPO/examples \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
   --sweep --validate_outputs \
@@ -328,7 +326,7 @@ useful for smoke-testing the integration end-to-end):
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
-  PYTHONPATH=$REPO/examples:$KERNEL_PATH \
+  PYTHONPATH=$REPO/examples \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
   --sweep --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 --sweep_dtype bf16,fp16
@@ -340,22 +338,21 @@ dense+seqused_k path` table above):
 ```bash
 cd examples/sid_gr
 PYTHONNOUSERSITE=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnccl.so.2 \
-  PYTHONPATH=$REPO/examples:$KERNEL_PATH \
+  PYTHONPATH=$REPO/examples \
   torchrun --nproc_per_node 1 --master_port 29504 \
   benchmark/benchmark_beam_decode.py \
   --compare_kv_modes --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 \
   --sweep_dtype bf16 --num_warmup 10 --num_iter 50
 ```
 
-`--compare_kv_modes` requires the `cu_seqlens_k` patch in
-`gr-decode_atten/interface.py` for the jagged column; the benchmark
-probes for it and raises a clear error if it's missing.
+`--compare_kv_modes` needs the `cu_seqlens_k` kernel entry point for
+the jagged column; the vendored kernel at `corelib/gr_decode_atten/`
+already includes it (the Dockerfile adds the vendor dir to
+`PYTHONPATH`), and the benchmark probes at runtime as a defensive
+guard.
 
 ## Known issues
 
-- **Local kernel patches are not upstream** in `quack-kernels`: see the
-  preconditions section above. Re-cloning `gr-decode_atten` from
-  upstream requires re-applying the patches.
 - **Split-KV + `seqused_k`**: hangs in the context-attention kernel;
   worked around by forcing `num_splits=1` when `seqused_k` is set.
 - **Non-uniform `beam_widths`**: the kernel asserts uniform widths via

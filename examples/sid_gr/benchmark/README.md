@@ -9,13 +9,10 @@ Compares the two generation paths in `SIDGRModel`:
 
 ## Requirements
 
-Runs inside the recsys-examples Docker container (needs `commons` + `dynamicemb` + `megatron` + `torchrec` to import). The CuTe kernel must be importable:
-
-```bash
-pip install quack-kernels>=0.3.3 nvidia-cutlass-dsl==4.4.1 apache-tvm-ffi
-```
-
-`gr-decode_atten` must be on `PYTHONPATH`.
+Runs inside the recsys-examples Docker container, which provides `commons`,
+`dynamicemb`, `megatron`, `torchrec`, and the vendored `beam_decode_attn`
+kernel at `corelib/gr_decode_atten/` (auto-added to `PYTHONPATH` by the
+Dockerfile — no extra setup needed).
 
 ## Usage
 
@@ -23,8 +20,7 @@ pip install quack-kernels>=0.3.3 nvidia-cutlass-dsl==4.4.1 apache-tvm-ffi
 
 ```bash
 cd examples/sid_gr
-PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
-  torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
+torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
   --batch_size 4 --max_hist_len 128 --beam_width 10 \
   --num_hierarchies 3 --num_layers 4
 ```
@@ -33,8 +29,7 @@ PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
 
 ```bash
 cd examples/sid_gr
-PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
-  torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
+torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
   --sweep --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 \
   --num_layers 4
 ```
@@ -50,15 +45,15 @@ breakdown for the latter two):
 
 ```bash
 cd examples/sid_gr
-PYTHONPATH=/path/to/gr-decode_atten:$PYTHONPATH \
-  torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
+torchrun --nproc_per_node 1 benchmark/benchmark_beam_decode.py \
   --compare_kv_modes --sweep_hist 32,64,128,256 --sweep_beam 4,10,20 \
   --sweep_dtype bf16 --num_warmup 10 --num_iter 50
 ```
 
-The `--use_jagged_kv` mode requires the `cu_seqlens_k` patch in
-`gr-decode_atten/interface.py`. The benchmark probes for it at
-runtime and raises a clear error otherwise.
+`--use_jagged_kv` and `--compare_kv_modes` rely on the `cu_seqlens_k`
+kernel entry point. The vendored kernel at `corelib/gr_decode_atten/`
+already includes it; the benchmark also probes for it at runtime and
+raises a clear error if the resolved kernel cannot be verified.
 
 ## Tunable arguments
 

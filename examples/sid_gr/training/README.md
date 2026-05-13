@@ -93,6 +93,7 @@ The FA backend flattens all batch sequences into a single sequence (B=1) and enc
 - **Beam search**: `generate()` does not use a KV cache and re-runs
   the transformer prefix at every hierarchy step. `generate_beam_decode()`
   uses a prefill-plus-KV-cache path via `beam_decode_attn`, but requires
-  `use_jagged_flash_attn=True` and a compatible `gr-decode_atten` kernel
-  install (see `benchmark/RESULTS.md` for the required kernel patches).
+  `use_jagged_flash_attn=True` and the vendored CuTe kernel at
+  `corelib/gr_decode_atten/` (the Docker image puts it on `PYTHONPATH`
+  automatically).
 - **Performance**: Not fully optimized

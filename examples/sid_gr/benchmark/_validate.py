@@ -51,9 +51,12 @@ def _check_shapes(*tensors):
 
 
 def validate_compare_outputs(
-    sids_a: torch.Tensor, lp_a: torch.Tensor,
-    sids_b: torch.Tensor, lp_b: torch.Tensor,
-    sids_c: torch.Tensor, lp_c: torch.Tensor,
+    sids_a: torch.Tensor,
+    lp_a: torch.Tensor,
+    sids_b: torch.Tensor,
+    lp_b: torch.Tensor,
+    sids_c: torch.Tensor,
+    lp_c: torch.Tensor,
 ) -> Tuple[bool, str]:
     """Validate that three beam-search outputs agree within bf16 noise.
 
@@ -139,8 +142,10 @@ def validate_compare_outputs(
 
 
 def validate_pair_outputs(
-    sids_a: torch.Tensor, lp_a: torch.Tensor,
-    sids_b: torch.Tensor, lp_b: torch.Tensor,
+    sids_a: torch.Tensor,
+    lp_a: torch.Tensor,
+    sids_b: torch.Tensor,
+    lp_b: torch.Tensor,
 ) -> Tuple[bool, str]:
     """Two-path version of ``validate_compare_outputs`` for
     ``run_sweep`` (A vs B only). Same thresholds, single pair.

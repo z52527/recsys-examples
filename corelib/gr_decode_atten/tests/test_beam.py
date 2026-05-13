@@ -30,17 +30,17 @@ import math
 
 import pytest
 import torch
-
-from tests.reference import beam_sparse_attention_ref, generate_test_data
 from interface import _beam_sparse_attention
-
+from tests.reference import beam_sparse_attention_ref, generate_test_data
 
 # ---------------------------------------------------------------------------
 # Reference (native dtype baseline for FA-style tolerance)
 # ---------------------------------------------------------------------------
 
-def _sparse_attention_ref_native(q, k_beam, v_beam, topk_indices, decode_nums,
-                                 softmax_scale):
+
+def _sparse_attention_ref_native(
+    q, k_beam, v_beam, topk_indices, decode_nums, softmax_scale
+):
     """Native-dtype baseline: same algorithm as ref but softmax in native dtype."""
     batch, seqlen_q, beam_width, head_q, dim = q.shape
     head_kv = k_beam.shape[2]
@@ -61,10 +61,9 @@ def _sparse_attention_ref_native(q, k_beam, v_beam, topk_indices, decode_nums,
     k_gathered = k_f[b_idx, idx, h_idx]
     v_gathered = v_f[b_idx, idx, h_idx]
 
-    scores = torch.einsum('bqwhd,bqwhnd->bqwhn',
-                          q.float() * softmax_scale, k_gathered)
+    scores = torch.einsum("bqwhd,bqwhnd->bqwhn", q.float() * softmax_scale, k_gathered)
     attn = torch.softmax(scores, dim=-1).to(q.dtype).float()
-    out = torch.einsum('bqwhn,bqwhnd->bqwhd', attn, v_gathered)
+    out = torch.einsum("bqwhn,bqwhnd->bqwhd", attn, v_gathered)
 
     return out
 
@@ -73,35 +72,56 @@ def _sparse_attention_ref_native(q, k_beam, v_beam, topk_indices, decode_nums,
 # Single test case
 # ---------------------------------------------------------------------------
 
-def _test_single(batch, beam_width, head_q, head_kv, dim, decode_nums,
-                 dtype=torch.bfloat16):
+
+def _test_single(
+    batch, beam_width, head_q, head_kv, dim, decode_nums, dtype=torch.bfloat16
+):
     device = "cuda"
     softmax_scale = 1.0 / math.sqrt(dim)
     torch.manual_seed(42)
     torch.cuda.empty_cache()
 
     q, _, _, k_beam, v_beam, topk_indices, dn = generate_test_data(
-        batch=batch, seqlen_q=1, beam_width=beam_width, head_q=head_q,
-        head_kv=head_kv, dim=dim, seqlen_context=0, decode_nums=decode_nums,
-        max_decode_nums=decode_nums, dtype=dtype, device=device,
+        batch=batch,
+        seqlen_q=1,
+        beam_width=beam_width,
+        head_q=head_q,
+        head_kv=head_kv,
+        dim=dim,
+        seqlen_context=0,
+        decode_nums=decode_nums,
+        max_decode_nums=decode_nums,
+        dtype=dtype,
+        device=device,
     )
 
     # fp32 reference (golden)
     out_ref, lse_ref = beam_sparse_attention_ref(
-        q, k_beam, v_beam, topk_indices, dn, softmax_scale,
+        q,
+        k_beam,
+        v_beam,
+        topk_indices,
+        dn,
+        softmax_scale,
     )
 
     # Native dtype baseline (precision baseline for tolerance)
     out_pt = _sparse_attention_ref_native(
-        q, k_beam, v_beam, topk_indices, dn, softmax_scale,
+        q,
+        k_beam,
+        v_beam,
+        topk_indices,
+        dn,
+        softmax_scale,
     )
 
     # Kernel under test: through interface
     B, _, W, Hq, D = q.shape
-    out = torch.empty(B, W, Hq, D, device='cuda', dtype=torch.float32)
-    lse = torch.empty(B, Hq, W, device='cuda', dtype=torch.float32)
-    _beam_sparse_attention(q, k_beam, v_beam, topk_indices, dn, softmax_scale,
-                           out=out, lse=lse)
+    out = torch.empty(B, W, Hq, D, device="cuda", dtype=torch.float32)
+    lse = torch.empty(B, Hq, W, device="cuda", dtype=torch.float32)
+    _beam_sparse_attention(
+        q, k_beam, v_beam, topk_indices, dn, softmax_scale, out=out, lse=lse
+    )
     out = out.unsqueeze(1)  # → [B, 1, W, Hq, D]
     lse = lse.transpose(-1, -2).unsqueeze(1)  # → [B, 1, W, Hq]
 
@@ -115,8 +135,7 @@ def _test_single(batch, beam_width, head_q, head_kv, dim, decode_nums,
     # LSE correctness
     finite_mask = lse.isfinite() & lse_ref.isfinite()
     lse_diff = (
-        (lse - lse_ref).abs()[finite_mask].max().item()
-        if finite_mask.any() else 0.0
+        (lse - lse_ref).abs()[finite_mask].max().item() if finite_mask.any() else 0.0
     )
     lse_tol = 1e-3
 
@@ -139,6 +158,7 @@ def _test_single(batch, beam_width, head_q, head_kv, dim, decode_nums,
 # Pytest parametrized tests (384 cases: 2 dim × 3 hkv × 4 bw × 16 dn)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("dim", [64, 128], ids=lambda d: f"d{d}")
 @pytest.mark.parametrize("head_kv", [1, 4, 16], ids=lambda h: f"hkv{h}")
 @pytest.mark.parametrize("beam_width", [128, 256, 512, 1024], ids=lambda w: f"bw{w}")
@@ -160,13 +180,13 @@ if __name__ == "__main__":
 
     configs = [
         # (batch, beam_width, head_q, head_kv, dim, decode_nums)
-        (4, 128,  16, 16, 128, 1),
-        (4, 256,  16, 16,  64, 8),
-        (4, 512,  16, 16, 128, 16),
-        (4, 128,  16, 4, 128, 4),
-        (4, 1024, 16, 4,  64, 16),
-        (4, 256,  16, 1, 128, 1),
-        (4, 512,  16, 1,  64, 8),
+        (4, 128, 16, 16, 128, 1),
+        (4, 256, 16, 16, 64, 8),
+        (4, 512, 16, 16, 128, 16),
+        (4, 128, 16, 4, 128, 4),
+        (4, 1024, 16, 4, 64, 16),
+        (4, 256, 16, 1, 128, 1),
+        (4, 512, 16, 1, 64, 8),
         (4, 1024, 16, 1, 128, 16),
     ]
     for batch, bw, hq, hkv, d, dn in configs:

@@ -21,7 +21,7 @@ composition (not inheritance).
 """
 
 import math
-from typing import Type, Optional
+from typing import Optional, Type
 
 import cutlass
 from cutlass import Float32, Int32, const_expr

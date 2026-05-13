@@ -929,9 +929,7 @@ class SIDGRModel(MegatronModule):
         # non-"3kernel" string as the fused/dsl path, so reject typos
         # here rather than letting them slip through.
         if backend not in ("3kernel", "dsl"):
-            raise ValueError(
-                f"backend must be '3kernel' or 'dsl', got {backend!r}"
-            )
+            raise ValueError(f"backend must be '3kernel' or 'dsl', got {backend!r}")
 
         # use_jagged_kv requires the pipelined backend. The fused path
         # doesn't consume cu_seqlens_k; silently routing through dense
@@ -987,9 +985,12 @@ class SIDGRModel(MegatronModule):
         #       NotImplementedError on use.
         if use_jagged_kv:
             import inspect
+
             from .jagged_flash_attn_block import (
-                _get_beam_decode_attn, _beam_decode_attn_reference,
+                _beam_decode_attn_reference,
+                _get_beam_decode_attn,
             )
+
             kernel = _get_beam_decode_attn()
             if kernel is _beam_decode_attn_reference:
                 raise RuntimeError(
@@ -1042,7 +1043,7 @@ class SIDGRModel(MegatronModule):
             batch, add_bos_to_history=False, is_generation=True
         )
         batch_size = batch.actual_batch_size
-        input_offsets = input_offsets[:batch_size + 1]
+        input_offsets = input_offsets[: batch_size + 1]
 
         # Access the inner JaggedFlashAttnBlock through the decoder helper.
         fa_block = self.decoder.get_jagged_flash_attn_block()
@@ -1077,8 +1078,8 @@ class SIDGRModel(MegatronModule):
             jagged_arbitrary_func = build_jagged_causal_arbitrary_func(
                 input_offsets, total_tokens
             )
-            flat_history = (
-                history_embeddings.unsqueeze(0).to(self._training_dtype)
+            flat_history = history_embeddings.unsqueeze(0).to(
+                self._training_dtype
             )  # [1, total_tokens, D]
             prefill_output, context_kv_caches = fa_block.prefill(
                 flat_history,
@@ -1126,9 +1127,9 @@ class SIDGRModel(MegatronModule):
             if not self.share_lm_head_across_hierarchies
             else self._decoder_mlp
         )
-        tuple_or_tensor: Union[
-            Tuple[torch.Tensor, torch.Tensor], torch.Tensor
-        ] = mlp(bos_hidden)
+        tuple_or_tensor: Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor] = mlp(
+            bos_hidden
+        )
         candidates_logits = (
             tuple_or_tensor[0]
             if isinstance(tuple_or_tensor, tuple)
@@ -1169,21 +1170,24 @@ class SIDGRModel(MegatronModule):
                     batch.history_feature_name,
                 ],
                 values=step_codes_flat,
-                lengths=torch.cat([
-                    torch.full(
-                        (batch_size,), current_topk,
-                        device=step_codes_flat.device, dtype=torch.long,
-                    ),
-                    torch.zeros(
-                        (batch_size,),
-                        device=step_codes_flat.device, dtype=torch.long,
-                    ),
-                ]),
+                lengths=torch.cat(
+                    [
+                        torch.full(
+                            (batch_size,),
+                            current_topk,
+                            device=step_codes_flat.device,
+                            dtype=torch.long,
+                        ),
+                        torch.zeros(
+                            (batch_size,),
+                            device=step_codes_flat.device,
+                            dtype=torch.long,
+                        ),
+                    ]
+                ),
             )
             code_embeddings = (
-                self._codebooks_collection(codes_kjt)[
-                    batch.candidate_feature_name
-                ]
+                self._codebooks_collection(codes_kjt)[batch.candidate_feature_name]
                 .values()
                 .to(self._training_dtype)
             )  # [B * current_topk, D]
@@ -1194,7 +1198,8 @@ class SIDGRModel(MegatronModule):
             # Build topk_indices for this decode step
             decode_nums = d + 1  # include self
             topk_indices = self.beam_search.build_beam_topk_indices(
-                decode_step=d, num_heads=num_heads,
+                decode_step=d,
+                num_heads=num_heads,
             )
 
             # Decode through all layers

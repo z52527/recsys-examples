@@ -13,19 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Type
+import math
 from dataclasses import dataclass
+from typing import Type
 
 import cutlass
 import cutlass.cute as cute
-from cutlass.cute.nvgpu import cpasync
 from cutlass import Int32, const_expr
+from cutlass.cute import FastDivmodDivisor
+from cutlass.cute.nvgpu import cpasync
+from quack.cute_dsl_utils import ParamsBase
 
 from . import utils
-from quack.cute_dsl_utils import ParamsBase
-from cutlass.cute import FastDivmodDivisor
-
-import math
 
 
 @dataclass
@@ -99,7 +98,9 @@ class PagedKVManager(ParamsBase):
             order=(1, 0),
         )
         val_layout = cute.make_layout((1, async_copy_elems))
-        gmem_tiled_copy_KV = cute.make_tiled_copy_tv(atom_async_copy, thr_layout, val_layout)
+        gmem_tiled_copy_KV = cute.make_tiled_copy_tv(
+            atom_async_copy, thr_layout, val_layout
+        )
         gmem_thr_copy_KV = gmem_tiled_copy_KV.get_slice(thread_idx)
         page_entry_per_thread = n_block_size // num_threads
 
@@ -120,7 +121,9 @@ class PagedKVManager(ParamsBase):
             cV = cute.make_identity_tensor((n_block_size, head_dim_v_padded))
             tVcV = gmem_thr_copy_KV.partition_S(cV)
             # When V is transposed in gmem, dv is shape[0]; otherwise dv is shape[1] (same as K)
-            tVpV = utils.predicate_k(tVcV, limit=mV_paged.shape[0 if v_gmem_transposed else 1])
+            tVpV = utils.predicate_k(
+                tVcV, limit=mV_paged.shape[0 if v_gmem_transposed else 1]
+            )
 
         return PagedKVManager(
             mPageTable,
@@ -158,10 +161,13 @@ class PagedKVManager(ParamsBase):
             )
             row_idx = n_block * self.n_block_size + row
 
-            page_idx, page_offset = divmod(row_idx + self.leftpad_k, self.page_size_divmod)
+            page_idx, page_offset = divmod(
+                row_idx + self.leftpad_k, self.page_size_divmod
+            )
 
             is_valid = (
-                (i + 1) * self.num_threads <= self.n_block_size or row < self.n_block_size
+                (i + 1) * self.num_threads <= self.n_block_size
+                or row < self.n_block_size
             ) and row_idx < self.seqlen_k
             page = self.mPageTable[page_idx] if is_valid else 0
 
@@ -207,16 +213,24 @@ class PagedKVManager(ParamsBase):
 
             if const_expr(K_or_V == "V"):
                 # Transpose smem V to match transposed gmem layout
-                sX_pi = cute.make_tensor(sX_pi.iterator, cute.select(sX_pi.layout, mode=[1, 0]))
+                sX_pi = cute.make_tensor(
+                    sX_pi.iterator, cute.select(sX_pi.layout, mode=[1, 0])
+                )
 
-        head_dim = self.head_dim_v_padded if const_expr(K_or_V == "V") else self.head_dim_padded
+        head_dim = (
+            self.head_dim_v_padded
+            if const_expr(K_or_V == "V")
+            else self.head_dim_padded
+        )
         cX = cute.make_identity_tensor((self.n_block_size, head_dim))
         tXsX = self.gmem_thr_copy_KV.partition_D(sX_pi)
         tXcX = self.gmem_thr_copy_KV.partition_S(cX)
         tXc0X = self.gmem_thr_copy_KV.get_slice(0).partition_S(cX)
 
         seqlenk_row_limit = (
-            self.seqlen_k - n_block * self.n_block_size - tXcX[0][0] if n_block >= 0 else 0
+            self.seqlen_k - n_block * self.n_block_size - tXcX[0][0]
+            if n_block >= 0
+            else 0
         )
         for m in cutlass.range_constexpr(cute.size(tXsX, mode=[1])):
             row_valid = tXc0X[0, m, 0][0] < seqlenk_row_limit
@@ -229,10 +243,15 @@ class PagedKVManager(ParamsBase):
                 width=self.gmem_threads_per_row,
             )
             x_gmem_ptr = cute.make_ptr(
-                self.mK_paged.element_type, x_ptr_i64, cute.AddressSpace.gmem, assumed_align=16
+                self.mK_paged.element_type,
+                x_ptr_i64,
+                cute.AddressSpace.gmem,
+                assumed_align=16,
             )
             mX_paged_cur = cute.make_tensor(x_gmem_ptr, cute.make_layout((head_dim,)))
-            mX_paged_cur_copy = cute.tiled_divide(mX_paged_cur, (self.async_copy_elems,))
+            mX_paged_cur_copy = cute.tiled_divide(
+                mX_paged_cur, (self.async_copy_elems,)
+            )
 
             for k in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                 ki = tXcX[0, 0, k][1] // self.async_copy_elems

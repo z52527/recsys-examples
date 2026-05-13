@@ -25,20 +25,27 @@ Usage:
     pytest tests/test_fwd.py -v                        # all (672 cases)
 """
 
-import math
 
 import pytest
 import torch
-
-from tests.reference import beam_attention_ref, generate_test_data
 from interface import beam_decode_attn
-
+from tests.reference import beam_attention_ref, generate_test_data
 
 # ============== Correctness helper ==============
 
-def _test_single(batch, seqlen_q, beam_width, head_q, head_kv, dim,
-                 seqlen_context, decode_nums, dtype=torch.bfloat16,
-                 backend="dsl"):
+
+def _test_single(
+    batch,
+    seqlen_q,
+    beam_width,
+    head_q,
+    head_kv,
+    dim,
+    seqlen_context,
+    decode_nums,
+    dtype=torch.bfloat16,
+    backend="dsl",
+):
     """Run a single correctness test through the interface.
 
     Compares beam_decode_attn (interface API) against beam_attention_ref
@@ -50,25 +57,52 @@ def _test_single(batch, seqlen_q, beam_width, head_q, head_kv, dim,
 
     max_decode_nums = max(decode_nums + 16, decode_nums)
     data = generate_test_data(
-        batch=batch, seqlen_q=seqlen_q, beam_width=beam_width,
-        head_q=head_q, head_kv=head_kv, dim=dim,
-        seqlen_context=seqlen_context, decode_nums=decode_nums,
-        max_decode_nums=max_decode_nums, dtype=dtype, device=device,
+        batch=batch,
+        seqlen_q=seqlen_q,
+        beam_width=beam_width,
+        head_q=head_q,
+        head_kv=head_kv,
+        dim=dim,
+        seqlen_context=seqlen_context,
+        decode_nums=decode_nums,
+        max_decode_nums=max_decode_nums,
+        dtype=dtype,
+        device=device,
     )
     q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, dn = data
 
     # Ground truth: fp32 single-pass reference
     out_ref, lse_ref = beam_attention_ref(
-        q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, dn,
+        q,
+        k_ctx,
+        v_ctx,
+        k_beam,
+        v_beam,
+        topk_idx,
+        dn,
     )
     # bf16 precision baseline (same algorithm, native dtype)
     out_pt, _ = beam_attention_ref(
-        q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, dn, upcast=False,
+        q,
+        k_ctx,
+        v_ctx,
+        k_beam,
+        v_beam,
+        topk_idx,
+        dn,
+        upcast=False,
     )
 
     # Kernel under test
     out, lse = beam_decode_attn(
-        q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, dn, return_lse=True,
+        q,
+        k_ctx,
+        v_ctx,
+        k_beam,
+        v_beam,
+        topk_idx,
+        dn,
+        return_lse=True,
         backend=backend,
     )
 
@@ -82,8 +116,7 @@ def _test_single(batch, seqlen_q, beam_width, head_q, head_kv, dim,
     # LSE correctness (fp32 vs fp32, combine step adds ~1e-4 rounding)
     finite_mask = lse.isfinite() & lse_ref.isfinite()
     lse_diff = (
-        (lse - lse_ref).abs()[finite_mask].max().item()
-        if finite_mask.any() else 0.0
+        (lse - lse_ref).abs()[finite_mask].max().item() if finite_mask.any() else 0.0
     )
     lse_tol = 1e-3
 
@@ -105,37 +138,58 @@ def _test_single(batch, seqlen_q, beam_width, head_q, head_kv, dim,
 
 # ============== 3-kernel Pytest (288 cases) ==============
 
+
 @pytest.mark.parametrize("dim", [64, 128], ids=lambda d: f"d{d}")
 @pytest.mark.parametrize("head_kv", [1, 4, 16], ids=lambda h: f"hkv{h}")
 @pytest.mark.parametrize("beam_width", [128, 256, 512, 1024], ids=lambda w: f"bw{w}")
 @pytest.mark.parametrize("decode_nums", [1, 4, 8, 16], ids=lambda n: f"dn{n}")
-@pytest.mark.parametrize("seqlen_context", [256, 1024, 2048],
-                         ids=lambda s: f"ctx{s}")
+@pytest.mark.parametrize("seqlen_context", [256, 1024, 2048], ids=lambda s: f"ctx{s}")
 def test_beam_attention_3kernel(dim, head_kv, beam_width, decode_nums, seqlen_context):
     total_kv = seqlen_context + decode_nums * beam_width
     batch = 1 if total_kv * head_kv * dim * beam_width > 256 * 1024 * 1024 else 4
     head_q = 16
-    _test_single(batch, 1, beam_width, head_q, head_kv, dim,
-                 seqlen_context, decode_nums, backend="3kernel")
+    _test_single(
+        batch,
+        1,
+        beam_width,
+        head_q,
+        head_kv,
+        dim,
+        seqlen_context,
+        decode_nums,
+        backend="3kernel",
+    )
 
 
 # ============== Fused Pytest (384 cases, covers split-KV) ==============
+
 
 @pytest.mark.parametrize("dim", [64, 128], ids=lambda d: f"d{d}")
 @pytest.mark.parametrize("head_kv", [1, 4, 16], ids=lambda h: f"hkv{h}")
 @pytest.mark.parametrize("beam_width", [128, 256, 512, 1024], ids=lambda w: f"bw{w}")
 @pytest.mark.parametrize("decode_nums", [1, 4, 8, 16], ids=lambda n: f"dn{n}")
-@pytest.mark.parametrize("seqlen_context", [256, 1024, 2048, 4096],
-                         ids=lambda s: f"ctx{s}")
+@pytest.mark.parametrize(
+    "seqlen_context", [256, 1024, 2048, 4096], ids=lambda s: f"ctx{s}"
+)
 def test_beam_attention_fused(dim, head_kv, beam_width, decode_nums, seqlen_context):
     total_kv = seqlen_context + decode_nums * beam_width
     batch = 1 if total_kv * head_kv * dim * beam_width > 256 * 1024 * 1024 else 4
     head_q = 16
-    _test_single(batch, 1, beam_width, head_q, head_kv, dim,
-                 seqlen_context, decode_nums, backend="dsl")
+    _test_single(
+        batch,
+        1,
+        beam_width,
+        head_q,
+        head_kv,
+        dim,
+        seqlen_context,
+        decode_nums,
+        backend="dsl",
+    )
 
 
 # ============== Quick test (python tests/test_fwd.py) ==============
+
 
 def run_quick_tests():
     print("Quick correctness tests")
@@ -143,23 +197,23 @@ def run_quick_tests():
     configs = [
         # (batch, seqlen_q, beam_width, head_q, head_kv, dim, seqlen_ctx, decode_nums, backend)
         # 3-kernel: basic coverage
-        (4, 1, 128,  16, 16, 128, 256,  1,  "3kernel"),
-        (4, 1, 256,  16, 16, 128, 256,  8,  "3kernel"),
-        (4, 1, 512,  16, 16,  64, 256,  16, "3kernel"),
-        (4, 1, 128,  16, 4,  128, 256,  4,  "3kernel"),
-        (4, 1, 1024, 16, 4,   64, 256,  16, "3kernel"),
+        (4, 1, 128, 16, 16, 128, 256, 1, "3kernel"),
+        (4, 1, 256, 16, 16, 128, 256, 8, "3kernel"),
+        (4, 1, 512, 16, 16, 64, 256, 16, "3kernel"),
+        (4, 1, 128, 16, 4, 128, 256, 4, "3kernel"),
+        (4, 1, 1024, 16, 4, 64, 256, 16, "3kernel"),
         # Fused: no split (small ctx)
-        (4, 1, 128,  16, 16, 128, 256,  1,  "dsl"),
-        (4, 1, 256,  16, 4,  128, 256,  8,  "dsl"),
+        (4, 1, 128, 16, 16, 128, 256, 1, "dsl"),
+        (4, 1, 256, 16, 4, 128, 256, 8, "dsl"),
         # Fused: split-KV (large ctx)
-        (4, 1, 128,  16, 16, 128, 1024, 3,  "dsl"),
-        (4, 1, 128,  16, 4,  128, 2048, 3,  "dsl"),
-        (4, 1, 128,  16, 1,  128, 2048, 3,  "dsl"),
-        (4, 1, 256,  16, 4,  128, 4096, 8,  "dsl"),
-        (4, 1, 128,  16, 4,   64, 1024, 1,  "dsl"),
+        (4, 1, 128, 16, 16, 128, 1024, 3, "dsl"),
+        (4, 1, 128, 16, 4, 128, 2048, 3, "dsl"),
+        (4, 1, 128, 16, 1, 128, 2048, 3, "dsl"),
+        (4, 1, 256, 16, 4, 128, 4096, 8, "dsl"),
+        (4, 1, 128, 16, 4, 64, 1024, 1, "dsl"),
         # Edge: decode_nums=0
-        (4, 1, 128,  16, 4,  128, 256,  0,  "3kernel"),
-        (4, 1, 128,  16, 4,  128, 1024, 0,  "dsl"),
+        (4, 1, 128, 16, 4, 128, 256, 0, "3kernel"),
+        (4, 1, 128, 16, 4, 128, 1024, 0, "dsl"),
     ]
     for batch, sq, bw, hq, hk, d, ctx, dn, backend in configs:
         _test_single(batch, sq, bw, hq, hk, d, ctx, dn, backend=backend)

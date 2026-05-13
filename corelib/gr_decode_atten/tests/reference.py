@@ -30,18 +30,27 @@ Three kernels:
 """
 
 import math
-import torch
 from typing import Optional, Tuple
 
+import torch
 
 # ---------------------------------------------------------------------------
 # Test data generation
 # ---------------------------------------------------------------------------
 
+
 def generate_test_data(
-    batch, seqlen_q, beam_width, head_q, head_kv, dim,
-    seqlen_context, decode_nums, max_decode_nums=None,
-    dtype=torch.bfloat16, device="cuda",
+    batch,
+    seqlen_q,
+    beam_width,
+    head_q,
+    head_kv,
+    dim,
+    seqlen_context,
+    decode_nums,
+    max_decode_nums=None,
+    dtype=torch.bfloat16,
+    device="cuda",
 ):
     """Generate random tensors for beam attention testing.
 
@@ -70,27 +79,32 @@ def generate_test_data(
     if max_decode_nums is None:
         max_decode_nums = decode_nums + 16
 
-    q = torch.randn(batch, seqlen_q, beam_width, head_q, dim,
-                     dtype=dtype, device=device)
-    k_context = torch.randn(batch, seqlen_context, head_kv, dim,
-                            dtype=dtype, device=device)
-    v_context = torch.randn(batch, seqlen_context, head_kv, dim,
-                            dtype=dtype, device=device)
+    q = torch.randn(
+        batch, seqlen_q, beam_width, head_q, dim, dtype=dtype, device=device
+    )
+    k_context = torch.randn(
+        batch, seqlen_context, head_kv, dim, dtype=dtype, device=device
+    )
+    v_context = torch.randn(
+        batch, seqlen_context, head_kv, dim, dtype=dtype, device=device
+    )
 
     seqlen_beam = decode_nums * beam_width
-    k_beam = torch.randn(batch, seqlen_beam, head_kv, dim,
-                         dtype=dtype, device=device)
-    v_beam = torch.randn(batch, seqlen_beam, head_kv, dim,
-                         dtype=dtype, device=device)
+    k_beam = torch.randn(batch, seqlen_beam, head_kv, dim, dtype=dtype, device=device)
+    v_beam = torch.randn(batch, seqlen_beam, head_kv, dim, dtype=dtype, device=device)
 
     # topk_indices: same GQA group shares identical indices (beam search invariant).
     qhead_per_kv = head_q // head_kv
     topk_kv = torch.randint(
-        0, max(seqlen_beam, 1),
+        0,
+        max(seqlen_beam, 1),
         (batch, seqlen_q, head_kv, max_decode_nums, beam_width),
-        dtype=torch.int32, device=device,
+        dtype=torch.int32,
+        device=device,
     )
-    topk_indices = topk_kv if qhead_per_kv == 1 else topk_kv.repeat_interleave(qhead_per_kv, dim=2)
+    topk_indices = (
+        topk_kv if qhead_per_kv == 1 else topk_kv.repeat_interleave(qhead_per_kv, dim=2)
+    )
 
     return q, k_context, v_context, k_beam, v_beam, topk_indices, decode_nums
 
@@ -98,6 +112,7 @@ def generate_test_data(
 # ---------------------------------------------------------------------------
 # Kernel 1: Context Attention (dense, tensor-core friendly)
 # ---------------------------------------------------------------------------
+
 
 def beam_context_attention_ref(
     q: torch.Tensor,
@@ -125,10 +140,21 @@ def beam_context_attention_ref(
         softmax_scale = 1.0 / math.sqrt(dim)
 
     if seqlen_context == 0:
-        out = torch.zeros(batch, seqlen_q, beam_width, head_q, dim,
-                          device=q.device, dtype=torch.float32)
-        lse = torch.full((batch, seqlen_q, beam_width, head_q), float('-inf'),
-                         device=q.device, dtype=torch.float32)
+        out = torch.zeros(
+            batch,
+            seqlen_q,
+            beam_width,
+            head_q,
+            dim,
+            device=q.device,
+            dtype=torch.float32,
+        )
+        lse = torch.full(
+            (batch, seqlen_q, beam_width, head_q),
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
         return out, lse
 
     q_f = q.float()
@@ -140,11 +166,11 @@ def beam_context_attention_ref(
         v_f = v_f.repeat_interleave(ngroups, dim=2)
 
     # scores: [batch, seqlen_q, beam_width, head_q, seqlen_context]
-    scores = torch.einsum('bqwhd,bshd->bqwhs', q_f * softmax_scale, k_f)
+    scores = torch.einsum("bqwhd,bshd->bqwhs", q_f * softmax_scale, k_f)
 
     lse = torch.logsumexp(scores, dim=-1)
     attn = torch.softmax(scores, dim=-1)
-    out = torch.einsum('bqwhs,bshd->bqwhd', attn, v_f)
+    out = torch.einsum("bqwhs,bshd->bqwhd", attn, v_f)
 
     return out, lse
 
@@ -152,6 +178,7 @@ def beam_context_attention_ref(
 # ---------------------------------------------------------------------------
 # Kernel 2: Sparse Beam Attention (CUDA-core, gather via topK)
 # ---------------------------------------------------------------------------
+
 
 def beam_sparse_attention_ref(
     q: torch.Tensor,
@@ -182,10 +209,21 @@ def beam_sparse_attention_ref(
         softmax_scale = 1.0 / math.sqrt(dim)
 
     if decode_nums == 0:
-        out = torch.zeros(batch, seqlen_q, beam_width, head_q, dim,
-                          device=q.device, dtype=torch.float32)
-        lse = torch.full((batch, seqlen_q, beam_width, head_q), float('-inf'),
-                         device=q.device, dtype=torch.float32)
+        out = torch.zeros(
+            batch,
+            seqlen_q,
+            beam_width,
+            head_q,
+            dim,
+            device=q.device,
+            dtype=torch.float32,
+        )
+        lse = torch.full(
+            (batch, seqlen_q, beam_width, head_q),
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
         return out, lse
 
     q_f = q.float()
@@ -206,14 +244,14 @@ def beam_sparse_attention_ref(
     b_idx = torch.arange(batch, device=q.device)[:, None, None, None, None]
     h_idx = torch.arange(head_q, device=q.device)[None, None, None, :, None]
 
-    k_gathered = k_f[b_idx, idx, h_idx]   # [B, Sq, W, Hq, Dn, D]
+    k_gathered = k_f[b_idx, idx, h_idx]  # [B, Sq, W, Hq, Dn, D]
     v_gathered = v_f[b_idx, idx, h_idx]
 
-    scores = torch.einsum('bqwhd,bqwhnd->bqwhn', q_f * softmax_scale, k_gathered)
+    scores = torch.einsum("bqwhd,bqwhnd->bqwhn", q_f * softmax_scale, k_gathered)
 
     lse = torch.logsumexp(scores, dim=-1)
     attn = torch.softmax(scores, dim=-1)
-    out = torch.einsum('bqwhn,bqwhnd->bqwhd', attn, v_gathered)
+    out = torch.einsum("bqwhn,bqwhnd->bqwhd", attn, v_gathered)
 
     return out, lse
 
@@ -221,6 +259,7 @@ def beam_sparse_attention_ref(
 # ---------------------------------------------------------------------------
 # Kernel 3: Combine (log-sum-exp merge)
 # ---------------------------------------------------------------------------
+
 
 def beam_attention_combine_ref(
     out1: torch.Tensor,
@@ -250,7 +289,7 @@ def beam_attention_combine_ref(
     s = exp1 + exp2
 
     lse = safe_m + torch.log(s)
-    lse = torch.where(s == 0, torch.full_like(lse, float('-inf')), lse)
+    lse = torch.where(s == 0, torch.full_like(lse, float("-inf")), lse)
 
     inv_s = torch.where(s == 0, torch.zeros_like(s), 1.0 / s)
     scale1 = (exp1 * inv_s).unsqueeze(-1)
@@ -263,6 +302,7 @@ def beam_attention_combine_ref(
 # ---------------------------------------------------------------------------
 # Golden reference: single-pass attention (for correctness validation)
 # ---------------------------------------------------------------------------
+
 
 def beam_attention_ref(
     q: torch.Tensor,
@@ -314,11 +354,13 @@ def beam_attention_ref(
 
     # Context KV -> [batch, 1, 1, head_q, seqlen_context, dim]
     k_ctx_exp = k_ctx_f.permute(0, 2, 1, 3).unsqueeze(1).unsqueeze(2)
-    k_ctx_exp = k_ctx_exp.expand(batch, seqlen_q, beam_width, head_q,
-                                 seqlen_context, dim)
+    k_ctx_exp = k_ctx_exp.expand(
+        batch, seqlen_q, beam_width, head_q, seqlen_context, dim
+    )
     v_ctx_exp = v_ctx_f.permute(0, 2, 1, 3).unsqueeze(1).unsqueeze(2)
-    v_ctx_exp = v_ctx_exp.expand(batch, seqlen_q, beam_width, head_q,
-                                 seqlen_context, dim)
+    v_ctx_exp = v_ctx_exp.expand(
+        batch, seqlen_q, beam_width, head_q, seqlen_context, dim
+    )
 
     if decode_nums > 0:
         idx = topk_indices[:, :, :, :decode_nums, :]
@@ -338,13 +380,17 @@ def beam_attention_ref(
 
     if k_all.shape[4] == 0:
         out = torch.zeros_like(q_f)
-        lse = torch.full((batch, seqlen_q, beam_width, head_q), float('-inf'),
-                         device=q.device, dtype=torch.float32)
+        lse = torch.full(
+            (batch, seqlen_q, beam_width, head_q),
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
         return out, lse
 
-    scores = torch.einsum('bqwhd,bqwhsd->bqwhs', q_f * softmax_scale, k_all)
+    scores = torch.einsum("bqwhd,bqwhsd->bqwhs", q_f * softmax_scale, k_all)
     lse = torch.logsumexp(scores, dim=-1)
     attn = torch.softmax(scores, dim=-1)
-    out = torch.einsum('bqwhs,bqwhsd->bqwhd', attn, v_all)
+    out = torch.einsum("bqwhs,bqwhsd->bqwhd", attn, v_all)
 
     return out, lse

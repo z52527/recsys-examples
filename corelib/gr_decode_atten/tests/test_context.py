@@ -29,17 +29,17 @@ import math
 
 import pytest
 import torch
-
-from tests.reference import beam_context_attention_ref, generate_test_data
 from interface import _context_attention
-
+from tests.reference import beam_context_attention_ref, generate_test_data
 
 # ---------------------------------------------------------------------------
 # Single test case
 # ---------------------------------------------------------------------------
 
-def _test_single(batch, beam_width, seqlen_context, head_q, head_kv, dim,
-                 dtype=torch.bfloat16):
+
+def _test_single(
+    batch, beam_width, seqlen_context, head_q, head_kv, dim, dtype=torch.bfloat16
+):
     """Run a single correctness test through the interface."""
     device = "cuda"
     torch.manual_seed(42)
@@ -47,13 +47,22 @@ def _test_single(batch, beam_width, seqlen_context, head_q, head_kv, dim,
     softmax_scale = 1.0 / math.sqrt(dim)
 
     q, k_context, v_context, _, _, _, _ = generate_test_data(
-        batch=batch, seqlen_q=1, beam_width=beam_width, head_q=head_q,
-        head_kv=head_kv, dim=dim, seqlen_context=seqlen_context,
-        decode_nums=0, dtype=dtype, device=device,
+        batch=batch,
+        seqlen_q=1,
+        beam_width=beam_width,
+        head_q=head_q,
+        head_kv=head_kv,
+        dim=dim,
+        seqlen_context=seqlen_context,
+        decode_nums=0,
+        dtype=dtype,
+        device=device,
     )
 
     # fp32 reference (ground truth)
-    out_ref, lse_ref = beam_context_attention_ref(q, k_context, v_context, softmax_scale)
+    out_ref, lse_ref = beam_context_attention_ref(
+        q, k_context, v_context, softmax_scale
+    )
 
     # Kernel under test: through interface (auto arch dispatch)
     B, _, W, Hq, D = q.shape
@@ -73,17 +82,16 @@ def _test_single(batch, beam_width, seqlen_context, head_q, head_kv, dim,
     if ngroups > 1:
         k_f = k_f.repeat_interleave(ngroups, dim=2)
         v_f = v_f.repeat_interleave(ngroups, dim=2)
-    scores_pt = torch.einsum('bqwhd,bshd->bqwhs', q.float() * softmax_scale, k_f)
+    scores_pt = torch.einsum("bqwhd,bshd->bqwhs", q.float() * softmax_scale, k_f)
     attn_pt = torch.softmax(scores_pt, dim=-1).to(dtype).float()
-    out_pt = torch.einsum('bqwhs,bshd->bqwhd', attn_pt, v_f)
+    out_pt = torch.einsum("bqwhs,bshd->bqwhd", attn_pt, v_f)
     pt_diff = (out_pt - out_ref).abs().max().item()
     fwd_tol = rtol * pt_diff + fwd_atol
 
     # LSE check
     finite_mask = lse.isfinite() & lse_ref.isfinite()
     lse_diff = (
-        (lse - lse_ref).abs()[finite_mask].max().item()
-        if finite_mask.any() else 0.0
+        (lse - lse_ref).abs()[finite_mask].max().item() if finite_mask.any() else 0.0
     )
     lse_tol = 1e-3
 
@@ -105,11 +113,13 @@ def _test_single(batch, beam_width, seqlen_context, head_q, head_kv, dim,
 # Pytest parametrized tests (144 cases: 2 dim × 3 hkv × 4 bw × 6 ctx)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("dim", [64, 128], ids=lambda d: f"d{d}")
 @pytest.mark.parametrize("head_kv", [1, 4, 16], ids=lambda h: f"hkv{h}")
 @pytest.mark.parametrize("beam_width", [128, 256, 512, 1024], ids=lambda w: f"bw{w}")
-@pytest.mark.parametrize("seqlen_context", [1000, 1024, 2000, 2048, 4000, 4096],
-                         ids=lambda s: f"ctx{s}")
+@pytest.mark.parametrize(
+    "seqlen_context", [1000, 1024, 2000, 2048, 4000, 4096], ids=lambda s: f"ctx{s}"
+)
 def test_context_attention(dim, head_kv, beam_width, seqlen_context):
     batch = 4
     head_q = 16
@@ -127,14 +137,14 @@ if __name__ == "__main__":
 
     configs = [
         # (batch, beam_width, seqlen_context, head_q, head_kv, dim)
-        (4, 128,  1024, 16, 16, 128),
-        (4, 256,  2048, 16, 16,  64),
-        (4, 512,  4096, 16, 16, 128),
-        (4, 128,  1000, 16, 4, 128),
-        (4, 1024, 2000, 16, 4,  64),
-        (4, 256,  4000, 16, 4, 128),
-        (4, 512,  1024, 16, 1, 128),
-        (4, 1024, 4096, 16, 1,  64),
+        (4, 128, 1024, 16, 16, 128),
+        (4, 256, 2048, 16, 16, 64),
+        (4, 512, 4096, 16, 16, 128),
+        (4, 128, 1000, 16, 4, 128),
+        (4, 1024, 2000, 16, 4, 64),
+        (4, 256, 4000, 16, 4, 128),
+        (4, 512, 1024, 16, 1, 128),
+        (4, 1024, 4096, 16, 1, 64),
     ]
     for batch, bw, ctx, hq, hkv, d in configs:
         _test_single(batch, bw, ctx, hq, hkv, d)

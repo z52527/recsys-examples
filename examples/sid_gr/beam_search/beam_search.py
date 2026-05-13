@@ -213,18 +213,14 @@ class BeamSearch:
         # using the ACTUAL topk count at each step (parent_indices.shape[1]).
         step_offsets = [0]
         for s in range(d):
-            step_offsets.append(
-                step_offsets[-1] + self.parent_indices[s].shape[1]
-            )
+            step_offsets.append(step_offsets[-1] + self.parent_indices[s].shape[1])
         # step_offsets has length decode_nums (covers steps 0..d).
 
         # Trace ancestors backward from step d
         # ancestor_at[s] has shape [B, W_d]: which beam at step s is the
         # ancestor of each current beam at step d.
         ancestor_at = [None] * decode_nums
-        ancestor_at[d] = (
-            torch.arange(W_d, device=device).unsqueeze(0).expand(B, -1)
-        )
+        ancestor_at[d] = torch.arange(W_d, device=device).unsqueeze(0).expand(B, -1)
         pos = ancestor_at[d]
         for s in range(d, 0, -1):
             pos = torch.gather(self.parent_indices[s], dim=1, index=pos)

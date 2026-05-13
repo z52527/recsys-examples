@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 from dataclasses import dataclass
+from typing import Optional
 
 import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, const_expr
-
 from quack import copy_utils
 
 """
@@ -57,7 +56,9 @@ class SeqlenInfo:
             seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]
         else:
             seqlen = seqlen_static
-        return SeqlenInfo(offset, offset_padded, seqlen, has_cu_seqlens=cu_seqlens is not None)
+        return SeqlenInfo(
+            offset, offset_padded, seqlen, has_cu_seqlens=cu_seqlens is not None
+        )
 
     def offset_batch(
         self,
@@ -72,7 +73,9 @@ class SeqlenInfo:
             idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mT) - 1 - dim)
             return mT[idx]
         else:
-            off = multiple * (self.offset if const_expr(not padded) else self.offset_padded)
+            off = multiple * (
+                self.offset if const_expr(not padded) else self.offset_padded
+            )
             offset = off if const_expr(cute.rank(mT.shape[0]) == 1) else (0, off)
             idx = (offset,) + (None,) * (cute.rank(mT) - 1)
             return cute.domain_offset(idx, mT)
@@ -108,12 +111,16 @@ class SeqlenInfoQK:
         padded_offset_q = (
             0
             if const_expr(mCuSeqlensQ is None)
-            else cute.assume((offset_q + batch_idx * tile_m) // tile_m * tile_m, divby=tile_m)
+            else cute.assume(
+                (offset_q + batch_idx * tile_m) // tile_m * tile_m, divby=tile_m
+            )
         )
         padded_offset_k = (
             0
             if const_expr(mCuSeqlensK is None)
-            else cute.assume((offset_k + batch_idx * tile_n) // tile_n * tile_n, divby=tile_n)
+            else cute.assume(
+                (offset_k + batch_idx * tile_n) // tile_n * tile_n, divby=tile_n
+            )
         )
         if const_expr(mSeqUsedQ is not None):
             seqlen_q = mSeqUsedQ[batch_idx]
@@ -158,8 +165,14 @@ class SeqlenInfoQK:
                 idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mQ) - 1 - dim)
                 return mQ[idx]
             else:
-                offset_q = self.offset_q if const_expr(not padded) else self.padded_offset_q
-                offset_q = offset_q if const_expr(cute.rank(mQ.shape[0]) == 1) else (None, offset_q)
+                offset_q = (
+                    self.offset_q if const_expr(not padded) else self.padded_offset_q
+                )
+                offset_q = (
+                    offset_q
+                    if const_expr(cute.rank(mQ.shape[0]) == 1)
+                    else (None, offset_q)
+                )
                 idx = (offset_q,) + (None,) * (cute.rank(mQ) - 1)
                 return cute.domain_offset(idx, mQ)
         else:
@@ -168,7 +181,9 @@ class SeqlenInfoQK:
                 idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mQ) - 1 - dim)
                 mQ = mQ[idx]
             else:
-                offset_q = self.offset_q if const_expr(not padded) else self.padded_offset_q
+                offset_q = (
+                    self.offset_q if const_expr(not padded) else self.padded_offset_q
+                )
             if const_expr(cute.rank(mQ.shape[0]) == 1):
                 return copy_utils.offset_ragged_tensor(
                     mQ, offset_q, self.seqlen_q, ragged_dim=0, ptr_shift=True
@@ -198,7 +213,9 @@ class SeqlenInfoQK:
                 idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mK) - 1 - dim)
                 return mK[idx]
             else:
-                offset_k = self.offset_k if const_expr(not padded) else self.padded_offset_k
+                offset_k = (
+                    self.offset_k if const_expr(not padded) else self.padded_offset_k
+                )
                 offset_k *= multiple
                 idx = (offset_k,) + (None,) * (cute.rank(mK) - 1)
                 return cute.domain_offset(idx, mK)
@@ -208,7 +225,9 @@ class SeqlenInfoQK:
                 idx = (None,) * dim + (batch_idx,) + (None,) * (cute.rank(mK) - 1 - dim)
                 mK = mK[idx]
             else:
-                offset_k = self.offset_k if const_expr(not padded) else self.padded_offset_k
+                offset_k = (
+                    self.offset_k if const_expr(not padded) else self.padded_offset_k
+                )
                 offset_k *= multiple
             return copy_utils.offset_ragged_tensor(
                 mK, offset_k, self.seqlen_k, ragged_dim=0, ptr_shift=True
@@ -258,7 +277,9 @@ class SeqlenInfoQKNewK:
             offset_k = mCuSeqlensK[batch_idx] + leftpad_k
         else:
             offset_k = leftpad_k if const_expr(mCuSeqlensQ is not None) else 0
-        offset_k_new = 0 if const_expr(mCuSeqlensKNew is None) else mCuSeqlensKNew[batch_idx]
+        offset_k_new = (
+            0 if const_expr(mCuSeqlensKNew is None) else mCuSeqlensKNew[batch_idx]
+        )
         # seqlen_q
         if const_expr(mSeqUsedQ is not None):
             seqlen_q = mSeqUsedQ[batch_idx]
@@ -270,7 +291,9 @@ class SeqlenInfoQKNewK:
         if const_expr(mSeqUsedK is not None):
             seqlen_k_og = mSeqUsedK[batch_idx] - leftpad_k
         elif const_expr(mCuSeqlensK is not None):
-            seqlen_k_og = mCuSeqlensK[batch_idx + 1] - mCuSeqlensK[batch_idx] - leftpad_k
+            seqlen_k_og = (
+                mCuSeqlensK[batch_idx + 1] - mCuSeqlensK[batch_idx] - leftpad_k
+            )
         else:
             seqlen_k_og = (
                 seqlen_k_static - leftpad_k
@@ -282,7 +305,11 @@ class SeqlenInfoQKNewK:
             seqlen_k_new = 0 if const_expr(mCuSeqlensQ is None) else shape_K_new_0
         else:
             seqlen_k_new = mCuSeqlensKNew[batch_idx + 1] - mCuSeqlensKNew[batch_idx]
-        seqlen_k = seqlen_k_og if const_expr(mCuSeqlensQ is None) else seqlen_k_og + seqlen_k_new
+        seqlen_k = (
+            seqlen_k_og
+            if const_expr(mCuSeqlensQ is None)
+            else seqlen_k_og + seqlen_k_new
+        )
 
         # seqlen_rotary: defaults to seqlen_k_og + leftpad_k unless explicitly provided
         if const_expr(mSeqlensRotary is not None):

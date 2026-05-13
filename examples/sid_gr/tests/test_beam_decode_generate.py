@@ -30,7 +30,6 @@ from typing import List
 
 import pytest
 import torch
-
 from beam_search.beam_search import BeamSearch
 
 # Import jagged_flash_attn_block directly to avoid model/__init__.py
@@ -53,10 +52,7 @@ def _try_import_e2e_deps():
     try:
         import commons.utils as init  # noqa
         from commons.checkpoint import get_unwrapped_module  # noqa
-        from commons.datasets.gpt_sid_batch import (  # noqa
-            FeatureConfig,
-            GPTSIDBatch,
-        )
+        from commons.datasets.gpt_sid_batch import FeatureConfig, GPTSIDBatch  # noqa
         from commons.modules.embedding import ShardedEmbeddingConfig  # noqa
         from commons.ops.length_to_offsets import length_to_complete_offsets  # noqa
         from tests.test_utils import create_sid_gr_model_and_optimizer  # noqa
@@ -262,11 +258,15 @@ class TestBeamSearchParentIndices:
 class TestJaggedGPTLayerPrefillDecode:
     @pytest.fixture
     def layer(self):
-        return JaggedGPTLayer(
-            hidden_size=64,
-            num_attention_heads=4,
-            ffn_hidden_size=128,
-        ).cuda().bfloat16()
+        return (
+            JaggedGPTLayer(
+                hidden_size=64,
+                num_attention_heads=4,
+                ffn_hidden_size=128,
+            )
+            .cuda()
+            .bfloat16()
+        )
 
     def test_prefill_returns_kv_cache(self, layer):
         B, S, D = 2, 16, 64
@@ -288,12 +288,21 @@ class TestJaggedGPTLayerPrefillDecode:
         v_ctx = torch.randn(B, S_ctx, H, D_head, device="cuda", dtype=torch.bfloat16)
 
         # First decode step: no previous beam KV
-        topk = torch.arange(W, device="cuda").view(1, 1, 1, 1, W).expand(B, 1, H, 1, W).to(torch.int32)
+        topk = (
+            torch.arange(W, device="cuda")
+            .view(1, 1, 1, 1, W)
+            .expand(B, 1, H, 1, W)
+            .to(torch.int32)
+        )
 
         out, (k_new, v_new) = layer.decode_beam(
-            x, k_ctx, v_ctx,
-            k_beam=None, v_beam=None,
-            topk_indices=topk, decode_nums=1,
+            x,
+            k_ctx,
+            v_ctx,
+            k_beam=None,
+            v_beam=None,
+            topk_indices=topk,
+            decode_nums=1,
         )
         assert out.shape == (B, W, D)
         assert k_new.shape == (B, W, H, D_head)
@@ -319,36 +328,71 @@ class TestVariableLengthHistory:
         valid_seqlen = 8
         torch.manual_seed(123)
 
-        valid_k = torch.randn(B, valid_seqlen, H, D_head, device="cuda", dtype=torch.bfloat16)
-        valid_v = torch.randn(B, valid_seqlen, H, D_head, device="cuda", dtype=torch.bfloat16)
+        valid_k = torch.randn(
+            B, valid_seqlen, H, D_head, device="cuda", dtype=torch.bfloat16
+        )
+        valid_v = torch.randn(
+            B, valid_seqlen, H, D_head, device="cuda", dtype=torch.bfloat16
+        )
         q = torch.randn(B, 1, W, H, D_head, device="cuda", dtype=torch.bfloat16)
 
         decode_nums = 1
-        k_beam = torch.randn(B, decode_nums * W, H, D_head, device="cuda", dtype=torch.bfloat16)
-        v_beam = torch.randn(B, decode_nums * W, H, D_head, device="cuda", dtype=torch.bfloat16)
-        topk = torch.arange(W, device="cuda").view(1, 1, 1, 1, W).expand(B, 1, H, 1, W).to(torch.int32)
+        k_beam = torch.randn(
+            B, decode_nums * W, H, D_head, device="cuda", dtype=torch.bfloat16
+        )
+        v_beam = torch.randn(
+            B, decode_nums * W, H, D_head, device="cuda", dtype=torch.bfloat16
+        )
+        topk = (
+            torch.arange(W, device="cuda")
+            .view(1, 1, 1, 1, W)
+            .expand(B, 1, H, 1, W)
+            .to(torch.int32)
+        )
 
         # Run 1: exactly valid_seqlen tokens (no padding)
-        seqused_a = torch.tensor([valid_seqlen, valid_seqlen], device="cuda", dtype=torch.int32)
+        seqused_a = torch.tensor(
+            [valid_seqlen, valid_seqlen], device="cuda", dtype=torch.int32
+        )
 
         # Run 2: padded to 16, extra positions contain garbage values
         max_padded = 16
-        k_padded = torch.randn(B, max_padded, H, D_head, device="cuda", dtype=torch.bfloat16)
-        v_padded = torch.randn(B, max_padded, H, D_head, device="cuda", dtype=torch.bfloat16)
+        k_padded = torch.randn(
+            B, max_padded, H, D_head, device="cuda", dtype=torch.bfloat16
+        )
+        v_padded = torch.randn(
+            B, max_padded, H, D_head, device="cuda", dtype=torch.bfloat16
+        )
         k_padded[:, :valid_seqlen] = valid_k
         v_padded[:, :valid_seqlen] = valid_v
-        seqused_b = torch.tensor([valid_seqlen, valid_seqlen], device="cuda", dtype=torch.int32)
+        seqused_b = torch.tensor(
+            [valid_seqlen, valid_seqlen], device="cuda", dtype=torch.int32
+        )
 
         kernel_fn = _get_beam_decode_attn()
         if kernel_fn is _beam_decode_attn_reference:
             pytest.skip("CuTe kernel needed for seqused_k masking")
         out_a, _ = kernel_fn(
-            q, valid_k, valid_v, k_beam, v_beam, topk, decode_nums,
-            backend="3kernel", seqused_k=seqused_a,
+            q,
+            valid_k,
+            valid_v,
+            k_beam,
+            v_beam,
+            topk,
+            decode_nums,
+            backend="3kernel",
+            seqused_k=seqused_a,
         )
         out_b, _ = kernel_fn(
-            q, k_padded, v_padded, k_beam, v_beam, topk, decode_nums,
-            backend="3kernel", seqused_k=seqused_b,
+            q,
+            k_padded,
+            v_padded,
+            k_beam,
+            v_beam,
+            topk,
+            decode_nums,
+            backend="3kernel",
+            seqused_k=seqused_b,
         )
 
         diff = (out_a.float() - out_b.float()).abs().max().item()
@@ -415,8 +459,14 @@ def _generate_random_batch(
 @pytest.mark.parametrize("codebook_sizes", [[128, 128, 128]])
 @pytest.mark.parametrize("batchsize", [4])
 def test_generate_beam_decode_e2e(
-    dtype, hidden_size, num_attention_heads, kv_channels, num_layers,
-    max_history_length, codebook_sizes, batchsize,
+    dtype,
+    hidden_size,
+    num_attention_heads,
+    kv_channels,
+    num_layers,
+    max_history_length,
+    codebook_sizes,
+    batchsize,
 ):
     """End-to-end: generate_beam_decode runs through full SIDGRModel."""
     init = _E2E_DEPS["init"]
@@ -471,9 +521,11 @@ def test_generate_beam_decode_e2e(
         top_k = model_unwrapped.top_k_for_generation
 
         # Shape checks
-        assert generated_sids.shape == (actual_bs, top_k, num_hierarchies), (
-            f"got {generated_sids.shape}"
-        )
+        assert generated_sids.shape == (
+            actual_bs,
+            top_k,
+            num_hierarchies,
+        ), f"got {generated_sids.shape}"
         assert log_probs.shape == (actual_bs, top_k)
 
         # SIDs must be within their codebook ranges
@@ -492,7 +544,11 @@ def test_generate_beam_decode_e2e(
 @pytest.mark.parametrize("codebook_sizes", [[128, 128, 128]])
 @pytest.mark.parametrize("batchsize", [4])
 def test_generate_vs_generate_beam_decode_regression_guard(
-    dtype, max_history_length, num_layers, codebook_sizes, batchsize,
+    dtype,
+    max_history_length,
+    num_layers,
+    codebook_sizes,
+    batchsize,
 ):
     """Regression guard between generate() and generate_beam_decode().
 
@@ -627,7 +683,11 @@ def test_generate_vs_generate_beam_decode_regression_guard(
 @pytest.mark.parametrize("codebook_sizes", [[128, 128, 128]])
 @pytest.mark.parametrize("batchsize", [4])
 def test_generate_beam_decode_jagged_kv_matches_dense(
-    dtype, max_history_length, num_layers, codebook_sizes, batchsize,
+    dtype,
+    max_history_length,
+    num_layers,
+    codebook_sizes,
+    batchsize,
 ):
     """Cross-check use_jagged_kv=True vs the default dense+seqused_k path.
 
@@ -760,10 +820,14 @@ def test_use_jagged_kv_with_dsl_backend_rejected_at_entry():
         )
         batch.to(torch.cuda.current_device())
 
-        with pytest.raises(ValueError, match="use_jagged_kv=True requires backend='3kernel'"):
+        with pytest.raises(
+            ValueError, match="use_jagged_kv=True requires backend='3kernel'"
+        ):
             with torch.no_grad():
                 model_unwrapped.generate_beam_decode(
-                    batch, backend="dsl", use_jagged_kv=True,
+                    batch,
+                    backend="dsl",
+                    use_jagged_kv=True,
                 )
 
 
@@ -785,6 +849,7 @@ def test_use_jagged_kv_with_reference_fallback_rejected_at_entry(monkeypatch):
     # module object in sys.modules, so patching that wouldn't affect the
     # one the probe actually reads. Pull the right one out of sys.modules.
     import sys as _sys
+
     jfab = _sys.modules.get("model.jagged_flash_attn_block")
     assert jfab is not None, (
         "model.jagged_flash_attn_block not loaded; the test's "
@@ -837,13 +902,17 @@ def test_use_jagged_kv_with_reference_fallback_rejected_at_entry(monkeypatch):
         # installed. _get_beam_decode_attn caches at the module level on
         # the _beam_decode_attn name, so patch that directly.
         monkeypatch.setattr(
-            jfab, "_beam_decode_attn", jfab._beam_decode_attn_reference,
+            jfab,
+            "_beam_decode_attn",
+            jfab._beam_decode_attn_reference,
         )
 
         with pytest.raises(RuntimeError, match="reference fallback does not implement"):
             with torch.no_grad():
                 model_unwrapped.generate_beam_decode(
-                    batch, backend="3kernel", use_jagged_kv=True,
+                    batch,
+                    backend="3kernel",
+                    use_jagged_kv=True,
                 )
 
 
@@ -861,6 +930,7 @@ def test_use_jagged_kv_uninspectable_signature_rejected_at_entry(monkeypatch):
 
     import inspect as _inspect
     import sys as _sys
+
     jfab = _sys.modules.get("model.jagged_flash_attn_block")
     assert jfab is not None
 
@@ -912,6 +982,7 @@ def test_use_jagged_kv_uninspectable_signature_rejected_at_entry(monkeypatch):
             raise AssertionError(
                 "kernel must not be called — the probe should reject earlier"
             )
+
         monkeypatch.setattr(jfab, "_beam_decode_attn", _stub_kernel)
 
         # Force inspect.signature to raise TypeError for this stub,
@@ -925,12 +996,15 @@ def test_use_jagged_kv_uninspectable_signature_rejected_at_entry(monkeypatch):
             if obj is _stub_kernel:
                 raise TypeError("simulated uninspectable signature")
             return orig_signature(obj, *args, **kwargs)
+
         monkeypatch.setattr(_inspect, "signature", _raising_signature)
 
         with pytest.raises(RuntimeError, match="signature is not inspectable"):
             with torch.no_grad():
                 model_unwrapped.generate_beam_decode(
-                    batch, backend="3kernel", use_jagged_kv=True,
+                    batch,
+                    backend="3kernel",
+                    use_jagged_kv=True,
                 )
 
 
@@ -942,9 +1016,7 @@ def test_compare_kv_modes_default_raises_on_validation_failure():
     then replicate the post-sweep raise block so the test stays
     dependency-light (no benchmark runtime, no GPU).
     """
-    bench_dir = os.path.join(
-        os.path.dirname(__file__), "..", "benchmark"
-    )
+    bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmark")
     sys.path.insert(0, bench_dir)
     from _validate import validate_compare_outputs  # noqa: E402
 
@@ -959,7 +1031,12 @@ def test_compare_kv_modes_default_raises_on_validation_failure():
     lp_c = lp_a.clone()
 
     passed, summary = validate_compare_outputs(
-        sids_a, lp_a, sids_b, lp_b, sids_c, lp_c,
+        sids_a,
+        lp_a,
+        sids_b,
+        lp_b,
+        sids_c,
+        lp_c,
     )
     assert not passed, "synthetic mismatch should fail validation"
     assert "top-1 mismatch" in summary
@@ -1006,11 +1083,13 @@ class TestBeamIsolationMask:
 
         history_seqlen = torch.tensor([4, 4], device="cuda")
         max_history_seqlen = 6
-        num_target_region = 3       # 3 beams
+        num_target_region = 3  # 3 beams
         target_max_seqlen_per_region = 2
         mask = padded_target_aware_causal_mask(
-            history_seqlen, max_history_seqlen,
-            num_target_region, target_max_seqlen_per_region,
+            history_seqlen,
+            max_history_seqlen,
+            num_target_region,
+            target_max_seqlen_per_region,
         )
         # padded_target_aware_causal_mask returns ~mask (invalid mask convention)
         valid = ~mask  # True = can attend
@@ -1025,9 +1104,9 @@ class TestBeamIsolationMask:
                 b_end = b_start + target_max_seqlen_per_region
                 # No row in beam-a should be able to attend to any column in beam-b
                 cross = valid[:, 0, a_start:a_end, b_start:b_end]
-                assert not cross.any(), (
-                    f"beam {b_a} can see beam {b_b}: {cross.any(dim=-1)}"
-                )
+                assert (
+                    not cross.any()
+                ), f"beam {b_a} can see beam {b_b}: {cross.any(dim=-1)}"
 
     def test_target_regions_attend_history(self):
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "model"))
@@ -1041,18 +1120,22 @@ class TestBeamIsolationMask:
         num_target_region = 2
         target_max_seqlen_per_region = 2
         mask = padded_target_aware_causal_mask(
-            history_seqlen, max_history_seqlen,
-            num_target_region, target_max_seqlen_per_region,
+            history_seqlen,
+            max_history_seqlen,
+            num_target_region,
+            target_max_seqlen_per_region,
         )
         valid = ~mask
         # All target tokens (positions max_history_seqlen..) should attend to all history (0..3)
         for region in range(num_target_region):
             for offset in range(target_max_seqlen_per_region):
-                target_pos = max_history_seqlen + region * target_max_seqlen_per_region + offset
-                hist_visible = valid[0, 0, target_pos, :max_history_seqlen]
-                assert hist_visible.all(), (
-                    f"target at pos {target_pos} can't see all history: {hist_visible.tolist()}"
+                target_pos = (
+                    max_history_seqlen + region * target_max_seqlen_per_region + offset
                 )
+                hist_visible = valid[0, 0, target_pos, :max_history_seqlen]
+                assert (
+                    hist_visible.all()
+                ), f"target at pos {target_pos} can't see all history: {hist_visible.tolist()}"
 
 
 def _arbitrary_func_to_dense_jagged(
@@ -1101,7 +1184,7 @@ def test_jagged_target_aware_builder_matches_dense(
         sys.path.pop(0)
 
     device = "cuda"
-    B = len(history_seqlens)
+    len(history_seqlens)
     cl = candidate_length
     W = num_target_region
 
@@ -1110,7 +1193,8 @@ def test_jagged_target_aware_builder_matches_dense(
     sample_lens = [hl + W * cl for hl in history_seqlens]
     offsets = torch.tensor(
         [0] + list(torch.tensor(sample_lens).cumsum(0).tolist()),
-        device=device, dtype=torch.long,
+        device=device,
+        dtype=torch.long,
     )
     total_tokens = int(offsets[-1].item())
     history_t = torch.tensor(history_seqlens, device=device, dtype=torch.long)
@@ -1129,11 +1213,16 @@ def test_jagged_target_aware_builder_matches_dense(
     # so we pad each sample to max(history_seqlens) + W*cl.
     max_hist = max(history_seqlens)
     dense_mask = padded_target_aware_causal_mask(
-        history_t, max_hist, W, cl,
+        history_t,
+        max_hist,
+        W,
+        cl,
     )
     valid_dense = ~dense_mask  # [B, 1, max_hist+W*cl, max_hist+W*cl]
     af_ref = dense_mask_to_jagged_arbitrary_func(
-        valid_dense, offsets, total_tokens,
+        valid_dense,
+        offsets,
+        total_tokens,
     )
 
     fast_dense = _arbitrary_func_to_dense_jagged(af_fast, total_tokens)
@@ -1166,15 +1255,23 @@ def test_generate_is_deterministic():
     cs = [128, 128, 128]
     hidden = 256
     cfg = ShardedEmbeddingConfig(
-        feature_names=["hist_sids", "cand_sids"], table_name="codebook",
-        vocab_size=sum(cs), dim=hidden, sharding_type="data_parallel",
+        feature_names=["hist_sids", "cand_sids"],
+        table_name="codebook",
+        vocab_size=sum(cs),
+        dim=hidden,
+        sharding_type="data_parallel",
     )
 
     with init.auto_destroy_global_state():
         model, opt = create_sid_gr_model_and_optimizer(
-            dtype=torch.bfloat16, hidden_size=hidden, num_attention_heads=4,
-            kv_channels=64, num_layers=2, num_hierarchies=3,
-            codebook_embedding_config=cfg, codebook_sizes=cs,
+            dtype=torch.bfloat16,
+            hidden_size=hidden,
+            num_attention_heads=4,
+            kv_channels=64,
+            num_layers=2,
+            num_hierarchies=3,
+            codebook_embedding_config=cfg,
+            codebook_sizes=cs,
             use_jagged_flash_attn=True,
         )
         opt.reload_model_params()
@@ -1187,9 +1284,9 @@ def test_generate_is_deterministic():
         with torch.no_grad():
             sids_a, _ = m.generate(batch)
             sids_b, _ = m.generate(batch)
-        assert torch.equal(sids_a, sids_b), (
-            "generate is non-deterministic, perturbation test would be invalid"
-        )
+        assert torch.equal(
+            sids_a, sids_b
+        ), "generate is non-deterministic, perturbation test would be invalid"
 
         # Test: replace each beam's first-step code with a different code and
         # verify the other beams' final SIDs don't change. We simulate this

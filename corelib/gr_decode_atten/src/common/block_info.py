@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
-from typing import Tuple, Optional
 from dataclasses import dataclass
+
+# Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+from typing import Tuple
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Int32, const_expr
+from cutlass import Int32
 
 from .seqlen_info import SeqlenInfoQK, SeqlenInfoQKNewK
 
@@ -53,11 +54,15 @@ class BlockInfo:
             rem = total - base * num_splits
             orig_min = n_block_min
             n_block_min = orig_min + split_idx * base + cutlass.min(split_idx, rem)
-            n_block_max = orig_min + (split_idx + 1) * base + cutlass.min(split_idx + 1, rem)
+            n_block_max = (
+                orig_min + (split_idx + 1) * base + cutlass.min(split_idx + 1, rem)
+            )
         return n_block_min, n_block_max
 
     @cute.jit
-    def get_m_block_min_max(self, seqlen_info: SeqlenInfoQK, n_block: Int32) -> Tuple[Int32, Int32]:
+    def get_m_block_min_max(
+        self, seqlen_info: SeqlenInfoQK, n_block: Int32
+    ) -> Tuple[Int32, Int32]:
         m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
         m_block_min = 0
         return m_block_min, m_block_max
@@ -77,9 +82,12 @@ class BlockInfo:
             split_idx,
             num_splits,
         )
-        idx_k_new_min = cutlass.max(n_block_min * self.tile_n - seqlen_info.seqlen_k_og, 0)
+        idx_k_new_min = cutlass.max(
+            n_block_min * self.tile_n - seqlen_info.seqlen_k_og, 0
+        )
         idx_k_new_max = cutlass.min(
-            n_block_max * self.tile_n - seqlen_info.seqlen_k_og, seqlen_info.seqlen_k_new
+            n_block_max * self.tile_n - seqlen_info.seqlen_k_og,
+            seqlen_info.seqlen_k_new,
         )
         n_block_new_min = idx_k_new_min // self.tile_n
         n_block_new_max = (

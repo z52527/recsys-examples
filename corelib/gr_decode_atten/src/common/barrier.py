@@ -16,8 +16,8 @@
 import cutlass
 import cutlass.cute as cute
 from cutlass import Int32
-from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import T, dsl_user_op
 
 
 @dsl_user_op
@@ -68,7 +68,9 @@ def red_release(
 
 
 @cute.jit
-def wait_eq(lock_ptr: cute.Pointer, thread_idx: int | Int32, flag_offset: int, val: Int32) -> None:
+def wait_eq(
+    lock_ptr: cute.Pointer, thread_idx: int | Int32, flag_offset: int, val: Int32
+) -> None:
     flag_ptr = lock_ptr + flag_offset
     if thread_idx == 0:
         read_val = Int32(0)
@@ -78,7 +80,10 @@ def wait_eq(lock_ptr: cute.Pointer, thread_idx: int | Int32, flag_offset: int, v
 
 @cute.jit
 def arrive_inc(
-    lock_ptr: cute.Pointer, thread_idx: int | Int32, flag_offset: int, val: cutlass.Constexpr[Int32]
+    lock_ptr: cute.Pointer,
+    thread_idx: int | Int32,
+    flag_offset: int,
+    val: cutlass.Constexpr[Int32],
 ) -> None:
     flag_ptr = lock_ptr + flag_offset
     if thread_idx == 0:

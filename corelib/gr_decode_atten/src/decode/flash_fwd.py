@@ -26,14 +26,13 @@ import operator
 from typing import Optional
 
 import cuda.bindings.driver as cuda
-
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync
 
-from ..common.kernel_config import KernelConfig
 from ..common import utils
+from ..common.kernel_config import KernelConfig
 
 
 class FlashAttentionForwardDecode:
@@ -93,10 +92,10 @@ class FlashAttentionForwardDecode:
     @cute.jit
     def __call__(
         self,
-        mQ: cute.Tensor,   # dense: (b, 1, h, d); sparse: (b*W, 1, h, d)
-        mK: cute.Tensor,   # (b, s_k, h_k, d)
-        mV: cute.Tensor,   # (b, s_k, h_k, d_v)
-        mO: cute.Tensor,   # dense: (b, 1, h, d_v); sparse: (b*W, 1, h, d_v)
+        mQ: cute.Tensor,  # dense: (b, 1, h, d); sparse: (b*W, 1, h, d)
+        mK: cute.Tensor,  # (b, s_k, h_k, d)
+        mV: cute.Tensor,  # (b, s_k, h_k, d_v)
+        mO: cute.Tensor,  # dense: (b, 1, h, d_v); sparse: (b*W, 1, h, d_v)
         mLSE: Optional[cute.Tensor],  # dense: (b, h); sparse: (b*W, h)
         softmax_scale: Float32,
         mTopkIdxs: Optional[cute.Tensor] = None,  # sparse: (b, h_k, dn, W)
@@ -112,7 +111,17 @@ class FlashAttentionForwardDecode:
         KernelConfig.check_type(
             *(
                 t.element_type if t is not None else None
-                for t in (mQ, mK, mV, mO, mLSE, mCuSeqlensQ, mCuSeqlensK, mSeqUsedQ, mSeqUsedK)
+                for t in (
+                    mQ,
+                    mK,
+                    mV,
+                    mO,
+                    mLSE,
+                    mCuSeqlensQ,
+                    mCuSeqlensK,
+                    mSeqUsedQ,
+                    mSeqUsedK,
+                )
             )
         )
         self.o_dtype = mO.element_type
@@ -147,6 +156,7 @@ class FlashAttentionForwardDecode:
 
         # Assume aligned for 128-bit cp.async
         from ..common.cute_dsl_utils import assume_tensor_aligned
+
         mQ, mK, mV, mO = [assume_tensor_aligned(t) for t in (mQ, mK, mV, mO)]
 
         # Layout transposes: (b, s, h, d) → (s, d, h, b)
@@ -164,9 +174,14 @@ class FlashAttentionForwardDecode:
         seqlen_k = decode_nums if const_expr(self.is_sparse) else mK.shape[0]
 
         self.kernel(
-            mQ, mK, mV, mO, mLSE,
+            mQ,
+            mK,
+            mV,
+            mO,
+            mLSE,
             softmax_scale_log2,
-            sK_layout, sV_layout,
+            sK_layout,
+            sV_layout,
             tiled_copy_KV,
             seqlen_k,
             mTopkIdxs,
@@ -180,10 +195,10 @@ class FlashAttentionForwardDecode:
     @cute.jit
     def _gather_load_tile(
         self,
-        gKV: cute.Tensor,           # (s_k, d) global KV for this (batch, kv_head)
-        sKV: cute.Tensor,           # (kv_tile_rows, d, stages) shared memory
-        gTopk: cute.Tensor,         # (decode_nums,) topk indices for this (batch, kv_head, beam)
-        kv_base: Int32,             # starting row within decode_nums
+        gKV: cute.Tensor,  # (s_k, d) global KV for this (batch, kv_head)
+        sKV: cute.Tensor,  # (kv_tile_rows, d, stages) shared memory
+        gTopk: cute.Tensor,  # (decode_nums,) topk indices for this (batch, kv_head, beam)
+        kv_base: Int32,  # starting row within decode_nums
         decode_nums: Int32,
         tidx: Int32,
         stage_idx: Int32,
@@ -216,10 +231,10 @@ class FlashAttentionForwardDecode:
     @cute.kernel
     def kernel(
         self,
-        mQ: cute.Tensor,       # (s_q, d, h, b) after transpose
-        mK: cute.Tensor,       # (s_k, d, h_k, b) after transpose
-        mV: cute.Tensor,       # (s_k, d_v, h_k, b) after transpose
-        mO: cute.Tensor,       # (s_q, d_v, h, b) after transpose
+        mQ: cute.Tensor,  # (s_q, d, h, b) after transpose
+        mK: cute.Tensor,  # (s_k, d, h_k, b) after transpose
+        mV: cute.Tensor,  # (s_k, d_v, h_k, b) after transpose
+        mO: cute.Tensor,  # (s_q, d_v, h, b) after transpose
         mLSE: Optional[cute.Tensor],
         softmax_scale_log2: Float32,
         sK_layout: cute.Layout,
@@ -249,10 +264,14 @@ class FlashAttentionForwardDecode:
         sK = smem.allocate_tensor(self.dtype, sK_layout, 128)
         sV = smem.allocate_tensor(self.dtype, sV_layout, 128)
         smem_o = smem.allocate_tensor(
-            Float32, cute.make_layout((self.bdz * self.bdy, self.head_dim_v)), 4,
+            Float32,
+            cute.make_layout((self.bdz * self.bdy, self.head_dim_v)),
+            4,
         )
         smem_md = smem.allocate_tensor(
-            Float32, cute.make_layout((self.bdz * self.bdy, 2)), 4,
+            Float32,
+            cute.make_layout((self.bdz * self.bdy, 2)),
+            4,
         )
 
         # =====================================================================
@@ -319,11 +338,19 @@ class FlashAttentionForwardDecode:
                 seqlen_limit = seqlen_k - stage * self.kv_per_iter - tKcK[0][0]
                 for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
                     if t0KcK[0, n, 0][0] < seqlen_limit:
-                        cute.copy(tiled_copy_KV, tKgK[None, n, None, stage], tKsK[None, n, None, stage])
+                        cute.copy(
+                            tiled_copy_KV,
+                            tKgK[None, n, None, stage],
+                            tKsK[None, n, None, stage],
+                        )
                 cute.arch.cp_async_commit_group()
                 for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
                     if t0KcK[0, n, 0][0] < seqlen_limit:
-                        cute.copy(tiled_copy_KV, tVgV[None, n, None, stage], tVsV[None, n, None, stage])
+                        cute.copy(
+                            tiled_copy_KV,
+                            tVgV[None, n, None, stage],
+                            tVsV[None, n, None, stage],
+                        )
                 cute.arch.cp_async_commit_group()
 
         # =====================================================================
@@ -340,7 +367,13 @@ class FlashAttentionForwardDecode:
             # === Sparse: gather load K tile into sK (synchronous) ===
             if const_expr(self.is_sparse):
                 self._gather_load_tile(
-                    gK, sK, gTopk, kv_base, seqlen_k, tidx, stage_idx,
+                    gK,
+                    sK,
+                    gTopk,
+                    kv_base,
+                    seqlen_k,
+                    tidx,
+                    stage_idx,
                 )
 
             # === PHASE 1: wait K → compute QK ===
@@ -381,13 +414,23 @@ class FlashAttentionForwardDecode:
                     seqlen_limit = seqlen_k - next_block * self.kv_per_iter - tKcK[0][0]
                     for n in cutlass.range_constexpr(cute.size(tKsK.shape[1])):
                         if t0KcK[0, n, 0][0] < seqlen_limit:
-                            cute.copy(tiled_copy_KV, tKgK[None, n, None, next_block], tKsK[None, n, None, stage_idx])
+                            cute.copy(
+                                tiled_copy_KV,
+                                tKgK[None, n, None, next_block],
+                                tKsK[None, n, None, stage_idx],
+                            )
                 cute.arch.cp_async_commit_group()
 
             # === Sparse: gather load V tile into sV (synchronous) ===
             if const_expr(self.is_sparse):
                 self._gather_load_tile(
-                    gV, sV, gTopk, kv_base, seqlen_k, tidx, stage_idx,
+                    gV,
+                    sV,
+                    gTopk,
+                    kv_base,
+                    seqlen_k,
+                    tidx,
+                    stage_idx,
                 )
 
             # === PHASE 3: wait V → compute PV ===
@@ -405,10 +448,16 @@ class FlashAttentionForwardDecode:
             # === Dense: prefetch next V ===
             if const_expr(not self.is_sparse):
                 if next_block < num_iters:
-                    seqlen_limit_v = seqlen_k - next_block * self.kv_per_iter - tKcK[0][0]
+                    seqlen_limit_v = (
+                        seqlen_k - next_block * self.kv_per_iter - tKcK[0][0]
+                    )
                     for n in cutlass.range_constexpr(cute.size(tVsV.shape[1])):
                         if t0KcK[0, n, 0][0] < seqlen_limit_v:
-                            cute.copy(tiled_copy_KV, tVgV[None, n, None, next_block], tVsV[None, n, None, stage_idx])
+                            cute.copy(
+                                tiled_copy_KV,
+                                tVgV[None, n, None, next_block],
+                                tVsV[None, n, None, stage_idx],
+                            )
                 cute.arch.cp_async_commit_group()
 
             # === ADVANCE stage (dense only, sparse always uses stage 0) ===
@@ -460,7 +509,9 @@ class FlashAttentionForwardDecode:
         if is_writer:
             # Guard zero/NaN row_sum (same as FA softmax.finalize)
             st_d_is_zero_or_nan = (st_d == Float32(0.0)) or (st_d != st_d)
-            inv_d = cute.arch.rcp_approx(st_d if not st_d_is_zero_or_nan else Float32(1.0))
+            inv_d = cute.arch.rcp_approx(
+                st_d if not st_d_is_zero_or_nan else Float32(1.0)
+            )
             for i in cutlass.range_constexpr(self.vec_size):
                 o_reg[i] = o_reg[i] * inv_d
 
@@ -474,6 +525,7 @@ class FlashAttentionForwardDecode:
                     #   (row_max * scale_log2 + log2(row_sum)) * LN2
                     # Here st_m already contains row_max * scale_log2.
                     import math as _math
+
                     LN2 = _math.log(2.0)
                     lse_val = (
                         (st_m + cute.math.log2(st_d, fastmath=True)) * LN2

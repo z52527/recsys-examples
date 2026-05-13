@@ -31,15 +31,13 @@ import math
 import time
 
 import torch
-
-from tests.reference import generate_test_data
 from interface import (
-    _context_attention,
     _beam_sparse_attention,
     _combine,
+    _context_attention,
     beam_decode_attn,
 )
-
+from tests.reference import generate_test_data
 
 # ---------------------------------------------------------------------------
 # Config
@@ -58,6 +56,7 @@ DTYPE = torch.bfloat16
 # ---------------------------------------------------------------------------
 # Timing helper
 # ---------------------------------------------------------------------------
+
 
 def benchmark_fn(fn, warmup=5, iters=20):
     for _ in range(warmup):
@@ -79,6 +78,7 @@ def benchmark_fn(fn, warmup=5, iters=20):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def run(mode, decode_nums_list):
     device = "cuda"
     softmax_scale = 1.0 / math.sqrt(DIM)
@@ -86,8 +86,10 @@ def run(mode, decode_nums_list):
     gpu_name = torch.cuda.get_device_name()
 
     print(f"GPU: {gpu_name} (SM{cc}0)")
-    print(f"Config: bs={BATCH} bw={BEAM_WIDTH} ctx={SEQLEN_CONTEXT} "
-          f"hq=hkv={HEAD_Q} d={DIM}")
+    print(
+        f"Config: bs={BATCH} bw={BEAM_WIDTH} ctx={SEQLEN_CONTEXT} "
+        f"hq=hkv={HEAD_Q} d={DIM}"
+    )
 
     if mode == "benchmark":
         # Per-kernel timing (dn=1)
@@ -95,47 +97,91 @@ def run(mode, decode_nums_list):
         print("-" * 40)
         torch.manual_seed(42)
         q0, k_ctx0, v_ctx0, k_beam0, v_beam0, topk0, _ = generate_test_data(
-            batch=BATCH, seqlen_q=SEQLEN_Q, beam_width=BEAM_WIDTH,
-            head_q=HEAD_Q, head_kv=HEAD_KV, dim=DIM,
-            seqlen_context=SEQLEN_CONTEXT, decode_nums=1, max_decode_nums=1,
-            dtype=DTYPE, device=device,
+            batch=BATCH,
+            seqlen_q=SEQLEN_Q,
+            beam_width=BEAM_WIDTH,
+            head_q=HEAD_Q,
+            head_kv=HEAD_KV,
+            dim=DIM,
+            seqlen_context=SEQLEN_CONTEXT,
+            decode_nums=1,
+            max_decode_nums=1,
+            dtype=DTYPE,
+            device=device,
         )
         B_, W_, Hq_, D__ = BATCH, BEAM_WIDTH, HEAD_Q, DIM
         op0 = torch.empty(2, B_, W_, Hq_, D__, device=device, dtype=torch.float32)
         lr0 = torch.empty(2, B_, Hq_, W_, device=device, dtype=torch.float32)
         oo0 = torch.empty(B_, W_, Hq_, D__, device=device, dtype=torch.bfloat16)
-        lo0 = torch.empty(B_, Hq_, W_, device=device, dtype=torch.float32).transpose(-1, -2)
+        lo0 = torch.empty(B_, Hq_, W_, device=device, dtype=torch.float32).transpose(
+            -1, -2
+        )
         lp0 = lr0.transpose(-1, -2)
 
-        t_k1 = benchmark_fn(lambda: _context_attention(q0, k_ctx0, v_ctx0, softmax_scale,
-                                                        out=op0[0], lse=lr0[0]))
-        t_k2 = benchmark_fn(lambda: _beam_sparse_attention(q0, k_beam0, v_beam0, topk0, 1,
-                                                            softmax_scale, out=op0[1], lse=lr0[1]))
+        t_k1 = benchmark_fn(
+            lambda: _context_attention(
+                q0, k_ctx0, v_ctx0, softmax_scale, out=op0[0], lse=lr0[0]
+            )
+        )
+        t_k2 = benchmark_fn(
+            lambda: _beam_sparse_attention(
+                q0, k_beam0, v_beam0, topk0, 1, softmax_scale, out=op0[1], lse=lr0[1]
+            )
+        )
         t_k3 = benchmark_fn(lambda: _combine(op0, lp0, oo0, lo0))
         print(f"  K1 Context:  {t_k1:7.3f} ms")
         print(f"  K2 Sparse:   {t_k2:7.3f} ms")
         print(f"  K3 Combine:  {t_k3:7.3f} ms")
 
         # Comparison table header
-        print(f"\n{'dn':>4s} | {'3-Kernel':>10s} | {'Fused(dsl)':>10s} | {'Speedup':>8s}")
+        print(
+            f"\n{'dn':>4s} | {'3-Kernel':>10s} | {'Fused(dsl)':>10s} | {'Speedup':>8s}"
+        )
         print("-" * 44)
 
     for dn in decode_nums_list:
         torch.manual_seed(42)
         q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, _ = generate_test_data(
-            batch=BATCH, seqlen_q=SEQLEN_Q, beam_width=BEAM_WIDTH,
-            head_q=HEAD_Q, head_kv=HEAD_KV, dim=DIM,
-            seqlen_context=SEQLEN_CONTEXT, decode_nums=dn,
-            max_decode_nums=dn, dtype=DTYPE, device=device,
+            batch=BATCH,
+            seqlen_q=SEQLEN_Q,
+            beam_width=BEAM_WIDTH,
+            head_q=HEAD_Q,
+            head_kv=HEAD_KV,
+            dim=DIM,
+            seqlen_context=SEQLEN_CONTEXT,
+            decode_nums=dn,
+            max_decode_nums=dn,
+            dtype=DTYPE,
+            device=device,
         )
 
         def run_3kernel():
-            beam_decode_attn(q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, dn,
-                             softmax_scale, return_lse=True, backend="3kernel")
+            beam_decode_attn(
+                q,
+                k_ctx,
+                v_ctx,
+                k_beam,
+                v_beam,
+                topk_idx,
+                dn,
+                softmax_scale,
+                return_lse=True,
+                backend="3kernel",
+            )
 
         def run_fused():
-            beam_decode_attn(q, k_ctx, v_ctx, k_beam, v_beam, topk_idx, dn,
-                             softmax_scale, return_lse=True, backend="dsl")
+            beam_decode_attn(
+                q,
+                k_ctx,
+                v_ctx,
+                k_beam,
+                v_beam,
+                topk_idx,
+                dn,
+                softmax_scale,
+                return_lse=True,
+                backend="dsl",
+            )
 
         if mode == "profile":
             print(f"\ndn={dn}:")
@@ -156,8 +202,9 @@ def run(mode, decode_nums_list):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Beam decode attention benchmark")
     parser.add_argument("--mode", choices=["profile", "benchmark"], default="benchmark")
-    parser.add_argument("--decode_nums", type=int, nargs="+",
-                        default=list(range(1, 17)))
+    parser.add_argument(
+        "--decode_nums", type=int, nargs="+", default=list(range(1, 17))
+    )
     args = parser.parse_args()
 
     run(args.mode, args.decode_nums)

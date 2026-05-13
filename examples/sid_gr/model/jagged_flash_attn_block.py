@@ -133,14 +133,12 @@ def _beam_decode_attn_reference(
         ctx_pos = torch.arange(Sk, device=q.device)
         valid_ctx = ctx_pos[None, :] < seqused_k.to(torch.long)[:, None]  # [B, Sk]
         if decode_nums > 0:
-            valid_beam = torch.ones(
-                B, decode_nums, dtype=torch.bool, device=q.device
-            )
+            valid_beam = torch.ones(B, decode_nums, dtype=torch.bool, device=q.device)
             valid = torch.cat([valid_ctx, valid_beam], dim=1)  # [B, Sk + dn]
         else:
             valid = valid_ctx
         mask = ~valid[:, None, None, None, :]  # [B, 1, 1, 1, Sk(+dn)]
-        scores = scores.masked_fill(mask, float('-inf'))
+        scores = scores.masked_fill(mask, float("-inf"))
 
     attn = torch.softmax(scores, dim=-1)
     out = torch.einsum("bqwhs,bqwhsd->bqwhd", attn, v_all)
@@ -472,7 +470,9 @@ class JaggedGPTLayer(nn.Module):
 
         if arbitrary_func is not None:
             attn_out, _ = flash_attn_func(
-                q, k, v,
+                q,
+                k,
+                v,
                 softmax_scale=self.head_dim ** (-0.5),
                 causal=False,
                 arbitrary=True,
@@ -482,7 +482,9 @@ class JaggedGPTLayer(nn.Module):
             )
         else:
             attn_out, _ = flash_attn_func(
-                q, k, v,
+                q,
+                k,
+                v,
                 softmax_scale=self.head_dim ** (-0.5),
                 causal=True,
             )
@@ -554,21 +556,25 @@ class JaggedGPTLayer(nn.Module):
             k_new = k_new.bfloat16()
             v_new = v_new.bfloat16()
         # Sanity: cached tensors must already be fp16/bf16.
-        assert k_context.dtype in (torch.float16, torch.bfloat16), (
-            f"k_context must be fp16/bf16, got {k_context.dtype}"
-        )
-        assert v_context.dtype in (torch.float16, torch.bfloat16), (
-            f"v_context must be fp16/bf16, got {v_context.dtype}"
-        )
+        assert k_context.dtype in (
+            torch.float16,
+            torch.bfloat16,
+        ), f"k_context must be fp16/bf16, got {k_context.dtype}"
+        assert v_context.dtype in (
+            torch.float16,
+            torch.bfloat16,
+        ), f"v_context must be fp16/bf16, got {v_context.dtype}"
 
         if k_beam is not None:
             assert v_beam is not None, "k_beam and v_beam must be paired"
-            assert k_beam.dtype in (torch.float16, torch.bfloat16), (
-                f"k_beam must be fp16/bf16, got {k_beam.dtype}"
-            )
-            assert v_beam.dtype in (torch.float16, torch.bfloat16), (
-                f"v_beam must be fp16/bf16, got {v_beam.dtype}"
-            )
+            assert k_beam.dtype in (
+                torch.float16,
+                torch.bfloat16,
+            ), f"k_beam must be fp16/bf16, got {k_beam.dtype}"
+            assert v_beam.dtype in (
+                torch.float16,
+                torch.bfloat16,
+            ), f"v_beam must be fp16/bf16, got {v_beam.dtype}"
             k_beam_full = torch.cat([k_beam, k_new], dim=1)
             v_beam_full = torch.cat([v_beam, v_new], dim=1)
         else:
@@ -598,9 +604,7 @@ class JaggedGPTLayer(nn.Module):
                     f"got backend={backend!r}"
                 )
             if seqused_k is not None:
-                raise ValueError(
-                    "cu_seqlens_k and seqused_k are mutually exclusive"
-                )
+                raise ValueError("cu_seqlens_k and seqused_k are mutually exclusive")
             kernel_kwargs["cu_seqlens_k"] = cu_seqlens_k
         attn_out, _ = beam_decode_attn(
             q_5d,
@@ -789,9 +793,12 @@ class JaggedFlashAttnBlock(nn.Module):
             v_beam = beam_kv_caches[i][1] if beam_kv_caches[i] is not None else None
             hidden_states, kv_new = layer.decode_beam(
                 hidden_states,
-                k_context, v_context,
-                k_beam, v_beam,
-                topk_indices, decode_nums,
+                k_context,
+                v_context,
+                k_beam,
+                v_beam,
+                topk_indices,
+                decode_nums,
                 seqused_k=seqused_k,
                 cu_seqlens_k=cu_seqlens_k,
                 backend=backend,

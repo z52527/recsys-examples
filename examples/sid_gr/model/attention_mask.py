@@ -359,7 +359,7 @@ def build_jagged_target_aware_arbitrary_func(
         arbitrary_func: [1, 1, n_func, total_tokens + padding] int32 tensor.
     """
     device = history_seqlen.device
-    B = history_seqlen.shape[0]
+    history_seqlen.shape[0]
     W = num_target_region
     cl = target_max_seqlen_per_region
 
@@ -374,12 +374,12 @@ def build_jagged_target_aware_arbitrary_func(
     )
 
     # Per-position metadata in flattened coordinates.
-    pos = torch.arange(total_tokens, device=device)              # [N]
-    batch_id = torch.searchsorted(offsets[1:], pos, right=True)   # [N] in [0,B)
-    batch_start = offsets[batch_id]                                # [N]
-    local_q = pos - batch_start                                    # [N]
+    pos = torch.arange(total_tokens, device=device)  # [N]
+    batch_id = torch.searchsorted(offsets[1:], pos, right=True)  # [N] in [0,B)
+    batch_start = offsets[batch_id]  # [N]
+    local_q = pos - batch_start  # [N]
 
-    hist_per_pos = history_seqlen[batch_id]                        # [N]
+    hist_per_pos = history_seqlen[batch_id]  # [N]
     is_history = local_q < hist_per_pos
     # Position relative to beginning of beam region (>=0 only when not history)
     target_offset = (local_q - hist_per_pos).clamp(min=0)
@@ -389,14 +389,14 @@ def build_jagged_target_aware_arbitrary_func(
     # F1, F2 — full-history interval (always batch_start..batch_start+hist_len).
     # For history rows we set this to (batch_start, batch_start+local_q+1) so
     # the row only sees itself and earlier history.
-    f1_hist = batch_start                                          # [N]
-    f2_hist = batch_start + local_q + 1                            # [N]  causal
+    f1_hist = batch_start  # [N]
+    f2_hist = batch_start + local_q + 1  # [N]  causal
 
-    f1_region = batch_start                                        # [N]
-    f2_region = batch_start + hist_per_pos                         # [N]
+    f1_region = batch_start  # [N]
+    f2_region = batch_start + hist_per_pos  # [N]
 
-    f3_region = region_start                                       # [N]
-    f4_region = batch_start + local_q + 1                          # [N]
+    f3_region = region_start  # [N]
+    f4_region = batch_start + local_q + 1  # [N]
 
     # Pick the right fields per row
     f1 = torch.where(is_history, f1_hist, f1_region)

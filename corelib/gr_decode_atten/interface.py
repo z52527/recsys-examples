@@ -31,21 +31,18 @@ External tensor shapes:
 """
 
 import math
-import torch
 from typing import Optional, Tuple
 
-import cuda.bindings.driver as cuda_driver
 import cutlass
 import cutlass.cute as cute
-
-from src.common.kernel_config import KernelConfig
+import torch
 from src.common.cute_dsl_utils import to_cute_tensor
+from src.common.kernel_config import KernelConfig
+from src.decode.flash_fwd import FlashAttentionForwardDecode
 from src.sm80.flash_fwd import FlashAttentionForwardSm80
 from src.sm90.flash_fwd import FlashAttentionForwardSm90
 from src.sm100.flash_fwd import FlashAttentionForwardSm100
 from src.sm120.flash_fwd import FlashAttentionForwardSm120
-from src.decode.flash_fwd import FlashAttentionForwardDecode
-
 
 TORCH_TO_CUTLASS = {
     torch.float16: cutlass.Float16,
@@ -60,8 +57,16 @@ _compile_cache: dict = {}
 # num_splits heuristic (ported from FA Hopper C++ heuristics.h)
 # ---------------------------------------------------------------------------
 
-def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks,
-                         size_one_kv_head, is_causal_or_local=False, max_splits=128):
+
+def num_splits_heuristic(
+    total_mblocks,
+    num_SMs,
+    num_n_blocks,
+    num_m_blocks,
+    size_one_kv_head,
+    is_causal_or_local=False,
+    max_splits=128,
+):
     """Determine optimal number of KV splits for SM occupancy.
 
     Ported from flash-attention/hopper/heuristics.h.
@@ -79,8 +84,11 @@ def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks,
     # If SMs are ≥80% utilized, don't split (unless KV exceeds L2 cache)
     if total_mblocks >= 0.8 * num_SMs:
         size_l2 = 50 * 1024 * 1024  # 50MB assumed L2 size
-        if (size_one_kv_head > size_l2 and num_m_blocks >= num_SMs * 2
-                and not is_causal_or_local):
+        if (
+            size_one_kv_head > size_l2
+            and num_m_blocks >= num_SMs * 2
+            and not is_causal_or_local
+        ):
             return min((size_one_kv_head + size_l2 - 1) // size_l2, max_splits)
         return 1
     # Too few KV blocks to benefit from splitting
@@ -101,9 +109,16 @@ def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks,
     return 1
 
 
-
-def _validate_inputs(q, k_context, v_context, k_beam, v_beam, topk_indices, decode_nums,
-                     jagged_k_context=False):
+def _validate_inputs(
+    q,
+    k_context,
+    v_context,
+    k_beam,
+    v_beam,
+    topk_indices,
+    decode_nums,
+    jagged_k_context=False,
+):
     """Validate shapes, dtypes, and device placement.
 
     When jagged_k_context=True, k_context/v_context are 3-D
@@ -122,16 +137,21 @@ def _validate_inputs(q, k_context, v_context, k_beam, v_beam, topk_indices, deco
         head_kv = k_context.shape[1]
         assert k_context.shape[2] == dim
     else:
-        assert k_context.dim() == 4, f"k_context must be 4-D [B, Sk, Hkv, D], got {k_context.dim()}-D"
+        assert (
+            k_context.dim() == 4
+        ), f"k_context must be 4-D [B, Sk, Hkv, D], got {k_context.dim()}-D"
         assert v_context.shape == k_context.shape
         assert k_context.shape[0] == batch
         head_kv = k_context.shape[2]
         assert k_context.shape[3] == dim
 
     seqlen_beam = decode_nums * beam_width
-    assert k_beam.shape == (batch, seqlen_beam, head_kv, dim), (
-        f"k_beam shape: expected {(batch, seqlen_beam, head_kv, dim)}, got {tuple(k_beam.shape)}"
-    )
+    assert k_beam.shape == (
+        batch,
+        seqlen_beam,
+        head_kv,
+        dim,
+    ), f"k_beam shape: expected {(batch, seqlen_beam, head_kv, dim)}, got {tuple(k_beam.shape)}"
     assert v_beam.shape == k_beam.shape
 
     assert topk_indices.dim() == 5
@@ -158,6 +178,7 @@ def _num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, max_splits=128):
 # Kernel 1: Context Attention
 # ---------------------------------------------------------------------------
 
+
 def _get_compute_capability():
     return torch.cuda.get_device_capability()[0]
 
@@ -166,13 +187,22 @@ _KERNEL_CLS_MAP = {
     8: FlashAttentionForwardSm80,
     9: FlashAttentionForwardSm90,
     10: FlashAttentionForwardSm100,
-    11: FlashAttentionForwardSm100,   # SM100 supports SM10.x ~ SM11.x
+    11: FlashAttentionForwardSm100,  # SM100 supports SM10.x ~ SM11.x
     12: FlashAttentionForwardSm120,
 }
 
 
-def _context_attention(q, k_context, v_context, softmax_scale, out, lse,
-                       num_splits=1, seqused_k=None, cu_seqlens_k=None):
+def _context_attention(
+    q,
+    k_context,
+    v_context,
+    softmax_scale,
+    out,
+    lse,
+    num_splits=1,
+    seqused_k=None,
+    cu_seqlens_k=None,
+):
     """K1: Q × Context KV.
 
     When num_splits=1: out is (B, W, Hq, D) fp32, lse is (B, Hq, W) fp32.
@@ -208,7 +238,7 @@ def _context_attention(q, k_context, v_context, softmax_scale, out, lse,
 
     if empty:
         out.fill_(0)
-        lse.fill_(float('-inf'))
+        lse.fill_(float("-inf"))
         return
 
     cc = _get_compute_capability()
@@ -232,37 +262,67 @@ def _context_attention(q, k_context, v_context, softmax_scale, out, lse,
     # uses const_expr branches and switches its expected mK layout from
     # 4-D dense to 3-D jagged). Include both presence flags in the cache
     # key so the specializations don't alias.
-    key = ("k1", cc, D, qhead_per_kvhead, cutlass_dtype,
-           num_splits > 1, has_seqused_k, has_cu_seqlens_k)
+    key = (
+        "k1",
+        cc,
+        D,
+        qhead_per_kvhead,
+        cutlass_dtype,
+        num_splits > 1,
+        has_seqused_k,
+        has_cu_seqlens_k,
+    )
     if key not in _compile_cache:
         config = KernelConfig(
-            head_dim=D, qhead_per_kvhead=qhead_per_kvhead,
-            pack_gqa=False, tile_m=tile_m, tile_n=tile_n,
+            head_dim=D,
+            qhead_per_kvhead=qhead_per_kvhead,
+            pack_gqa=False,
+            tile_m=tile_m,
+            tile_n=tile_n,
         )
         kernel = kernel_cls(config, dtype=cutlass_dtype, is_split_kv=True)
         _compile_cache[key] = cute.compile(
             kernel,
-            to_cute_tensor(q_flat), to_cute_tensor(k_context),
-            to_cute_tensor(v_context), to_cute_tensor(out),
+            to_cute_tensor(q_flat),
+            to_cute_tensor(k_context),
+            to_cute_tensor(v_context),
+            to_cute_tensor(out),
             to_cute_tensor(lse, assumed_align=4),
             softmax_scale,
-            None, cu_seqlens_k_arg, None, seqused_k_arg, None,  # cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, page_table
-            None, None, None, None, 0, 0,  # beam params (mQ_beam, mK_beam, mV_beam, topk, bw, dn)
+            None,
+            cu_seqlens_k_arg,
+            None,
+            seqused_k_arg,
+            None,  # cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, page_table
+            None,
+            None,
+            None,
+            None,
+            0,
+            0,  # beam params (mQ_beam, mK_beam, mV_beam, topk, bw, dn)
             num_splits,
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
 
     _compile_cache[key](
-        q_flat.detach(), k_context.detach(), v_context.detach(),
-        out.detach(), lse,
+        q_flat.detach(),
+        k_context.detach(),
+        v_context.detach(),
+        out.detach(),
+        lse,
         softmax_scale,
         None,
         cu_seqlens_k.detach() if has_cu_seqlens_k else None,
         None,
         seqused_k.detach() if has_seqused_k else None,
         None,
-        None, None, None, None, 0, 0,
+        None,
+        None,
+        None,
+        None,
+        0,
+        0,
         num_splits,
     )
 
@@ -271,8 +331,10 @@ def _context_attention(q, k_context, v_context, softmax_scale, out, lse,
 # Kernel 2: Beam Sparse Attention
 # ---------------------------------------------------------------------------
 
-def _beam_sparse_attention(q, k_beam, v_beam, topk_indices, decode_nums,
-                           softmax_scale, out, lse):
+
+def _beam_sparse_attention(
+    q, k_beam, v_beam, topk_indices, decode_nums, softmax_scale, out, lse
+):
     """K2: Q × Beam KV[topK]. Writes fp32 out (B, W, Hq, D) and lse (B, Hq, W)."""
     B = q.shape[0]
     W = q.shape[2]
@@ -282,7 +344,7 @@ def _beam_sparse_attention(q, k_beam, v_beam, topk_indices, decode_nums,
 
     if decode_nums == 0:
         out.fill_(0)
-        lse.fill_(float('-inf'))
+        lse.fill_(float("-inf"))
         return
 
     # Flatten Q: [B, 1, W, Hq, D] → [B*W, 1, Hq, D] (zero-copy view)
@@ -303,35 +365,60 @@ def _beam_sparse_attention(q, k_beam, v_beam, topk_indices, decode_nums,
     key = ("k2", D, qhead_per_kv, cutlass_dtype)
     if key not in _compile_cache:
         config = KernelConfig(
-            head_dim=D, qhead_per_kvhead=qhead_per_kv,
-            pack_gqa=False, tile_m=1, tile_n=decode_nums,
+            head_dim=D,
+            qhead_per_kvhead=qhead_per_kv,
+            pack_gqa=False,
+            tile_m=1,
+            tile_n=decode_nums,
         )
         kernel = FlashAttentionForwardDecode(
-            config, dtype=cutlass_dtype, num_threads=num_threads, is_sparse=True,
+            config,
+            dtype=cutlass_dtype,
+            num_threads=num_threads,
+            is_sparse=True,
         )
         _compile_cache[key] = cute.compile(
             kernel,
-            to_cute_tensor(q_flat), to_cute_tensor(k_beam), to_cute_tensor(v_beam),
-            to_cute_tensor(out_flat), to_cute_tensor(lse, assumed_align=4),
+            to_cute_tensor(q_flat),
+            to_cute_tensor(k_beam),
+            to_cute_tensor(v_beam),
+            to_cute_tensor(out_flat),
+            to_cute_tensor(lse, assumed_align=4),
             softmax_scale,
-            to_cute_tensor(topk_kv), W, decode_nums,
-            None, None, None, None, None,
+            to_cute_tensor(topk_kv),
+            W,
+            decode_nums,
+            None,
+            None,
+            None,
+            None,
+            None,
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
 
     _compile_cache[key](
-        q_flat.detach(), k_beam.detach(), v_beam.detach(),
-        out_flat.detach(), lse,
+        q_flat.detach(),
+        k_beam.detach(),
+        v_beam.detach(),
+        out_flat.detach(),
+        lse,
         softmax_scale,
-        topk_kv, W, decode_nums,
-        None, None, None, None, None,
+        topk_kv,
+        W,
+        decode_nums,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
 
 # ---------------------------------------------------------------------------
 # Kernel 3: Combine
 # ---------------------------------------------------------------------------
+
 
 def _combine(o_partial, lse_partial, o_out, lse_out):
     """K3: Log-sum-exp merge. Reads pre-allocated partials, writes output."""
@@ -364,32 +451,54 @@ def _combine(o_partial, lse_partial, o_out, lse_out):
             log_max_splits=log_max_splits,
             use_pdl=use_pdl,
         )
-        num_splits, batch, sq, nheads = (
-            cute.sym_int64() for _ in range(4)
-        )
+        num_splits, batch, sq, nheads = (cute.sym_int64() for _ in range(4))
         div = 128 // cutlass.Float32.width
         mO_partial = make_fake_tensor(
-            cutlass.Float32, (num_splits, batch, sq, nheads, D), divisibility=div,
+            cutlass.Float32,
+            (num_splits, batch, sq, nheads, D),
+            divisibility=div,
         )
         mLSE_partial = make_fake_tensor(
-            cutlass.Float32, (num_splits, batch, sq, nheads), divisibility=1, leading_dim=2,
+            cutlass.Float32,
+            (num_splits, batch, sq, nheads),
+            divisibility=1,
+            leading_dim=2,
         )
-        mO = make_fake_tensor(cutlass.BFloat16, (batch, sq, nheads, D), divisibility=div)
+        mO = make_fake_tensor(
+            cutlass.BFloat16, (batch, sq, nheads, D), divisibility=div
+        )
         mLSE = make_fake_tensor(
-            cutlass.Float32, (batch, sq, nheads), divisibility=1, leading_dim=1,
+            cutlass.Float32,
+            (batch, sq, nheads),
+            divisibility=1,
+            leading_dim=1,
         )
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         _compile_cache[key] = cute.compile(
             kernel,
-            mO_partial, mLSE_partial, mO, mLSE,
-            None, None, None, None, None,
+            mO_partial,
+            mLSE_partial,
+            mO,
+            mLSE,
+            None,
+            None,
+            None,
+            None,
+            None,
             stream,
             options="--enable-tvm-ffi",
         )
 
     _compile_cache[key](
-        o_partial, lse_partial, o_out, lse_out,
-        None, None, None, None, None,
+        o_partial,
+        lse_partial,
+        o_out,
+        lse_out,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
 
@@ -397,8 +506,21 @@ def _combine(o_partial, lse_partial, o_out, lse_out):
 # Fused context + beam kernel
 # ---------------------------------------------------------------------------
 
-def _fused_context_beam(q, k_context, v_context, k_beam, v_beam, topk_indices,
-                        decode_nums, softmax_scale, num_splits, is_split_kv, out, lse):
+
+def _fused_context_beam(
+    q,
+    k_context,
+    v_context,
+    k_beam,
+    v_beam,
+    topk_indices,
+    decode_nums,
+    softmax_scale,
+    num_splits,
+    is_split_kv,
+    out,
+    lse,
+):
     """Run fused context + beam kernel (auto SM80/SM90 dispatch).
 
     Args:
@@ -424,42 +546,79 @@ def _fused_context_beam(q, k_context, v_context, k_beam, v_beam, topk_indices,
     key = ("fused", cc, D, qhead_per_kv, cutlass_dtype, is_split_kv)
     if key not in _compile_cache:
         config = KernelConfig(
-            head_dim=D, qhead_per_kvhead=qhead_per_kv,
-            pack_gqa=False, tile_m=tile_m, tile_n=tile_n,
+            head_dim=D,
+            qhead_per_kvhead=qhead_per_kv,
+            pack_gqa=False,
+            tile_m=tile_m,
+            tile_n=tile_n,
         )
         kernel_cls = _KERNEL_CLS_MAP.get(cc)
         assert kernel_cls is not None, f"Unsupported compute capability: {cc}"
         if cc == 9:
-            kernel = kernel_cls(config, dtype=cutlass_dtype,
-                                is_split_kv=is_split_kv, has_beam_sparse=True)
+            kernel = kernel_cls(
+                config,
+                dtype=cutlass_dtype,
+                is_split_kv=is_split_kv,
+                has_beam_sparse=True,
+            )
         elif cc in (10, 11):
-            kernel = kernel_cls(config, dtype=cutlass_dtype,
-                                is_split_kv=is_split_kv, has_beam_sparse=True)
+            kernel = kernel_cls(
+                config,
+                dtype=cutlass_dtype,
+                is_split_kv=is_split_kv,
+                has_beam_sparse=True,
+            )
         else:
-            kernel = kernel_cls(config, dtype=cutlass_dtype,
-                                num_stages=1, num_threads=256,
-                                is_split_kv=is_split_kv, has_beam_sparse=True)
+            kernel = kernel_cls(
+                config,
+                dtype=cutlass_dtype,
+                num_stages=1,
+                num_threads=256,
+                is_split_kv=is_split_kv,
+                has_beam_sparse=True,
+            )
         _compile_cache[key] = cute.compile(
             kernel,
-            to_cute_tensor(q_flat), to_cute_tensor(k_context),
-            to_cute_tensor(v_context), to_cute_tensor(out),
+            to_cute_tensor(q_flat),
+            to_cute_tensor(k_context),
+            to_cute_tensor(v_context),
+            to_cute_tensor(out),
             to_cute_tensor(lse, assumed_align=4),
             softmax_scale,
-            None, None, None, None, None,  # cu_seqlens, seqused, page_table
-            to_cute_tensor(q_flat),        # mQ_beam
-            to_cute_tensor(k_beam), to_cute_tensor(v_beam),
-            to_cute_tensor(topk_kv), W, decode_nums,
+            None,
+            None,
+            None,
+            None,
+            None,  # cu_seqlens, seqused, page_table
+            to_cute_tensor(q_flat),  # mQ_beam
+            to_cute_tensor(k_beam),
+            to_cute_tensor(v_beam),
+            to_cute_tensor(topk_kv),
+            W,
+            decode_nums,
             num_splits,
             cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
             options="--enable-tvm-ffi",
         )
 
     _compile_cache[key](
-        q_flat.detach(), k_context.detach(), v_context.detach(),
-        out.detach(), lse,
+        q_flat.detach(),
+        k_context.detach(),
+        v_context.detach(),
+        out.detach(),
+        lse,
         softmax_scale,
-        None, None, None, None, None,
-        q_flat.detach(), k_beam.detach(), v_beam.detach(), topk_kv, W, decode_nums,
+        None,
+        None,
+        None,
+        None,
+        None,
+        q_flat.detach(),
+        k_beam.detach(),
+        v_beam.detach(),
+        topk_kv,
+        W,
+        decode_nums,
         num_splits,
     )
 
@@ -467,6 +626,7 @@ def _fused_context_beam(q, k_context, v_context, k_beam, v_beam, topk_indices,
 # ---------------------------------------------------------------------------
 # BeamDecodeAttn (torch.autograd.Function)
 # ---------------------------------------------------------------------------
+
 
 class BeamDecodeAttn(torch.autograd.Function):
     """Beam search decode attention with dynamic num_splits.
@@ -496,10 +656,12 @@ class BeamDecodeAttn(torch.autograd.Function):
         assert Sq == 1, "Decode mode: seqlen_q must be 1"
         if cu_seqlens_k is not None:
             # Jagged k_context: [total_k, Hkv, D]
-            Hkv = k_context.shape[1]
-            Sk = -1  # not used in this branch; per-sample length comes from cu_seqlens_k
+            k_context.shape[1]
+            Sk = (
+                -1
+            )  # not used in this branch; per-sample length comes from cu_seqlens_k
         else:
-            Hkv = k_context.shape[2]
+            k_context.shape[2]
             Sk = k_context.shape[1]
 
         cc = _get_compute_capability()
@@ -517,11 +679,16 @@ class BeamDecodeAttn(torch.autograd.Function):
                 ns = 1
             else:
                 num_n_blocks = math.ceil(Sk / tile_n) if Sk > 0 else 0
-                total_mblocks = B * Hq * num_m_blocks  # Hq not Hkv: grid dispatches per Q head
+                total_mblocks = (
+                    B * Hq * num_m_blocks
+                )  # Hq not Hkv: grid dispatches per Q head
                 size_one_kv_head = Sk * D * 2 * 2
-                num_SMs = torch.cuda.get_device_properties(q.device).multi_processor_count
-                ns = num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks,
-                                          num_m_blocks, size_one_kv_head)
+                num_SMs = torch.cuda.get_device_properties(
+                    q.device
+                ).multi_processor_count
+                ns = num_splits_heuristic(
+                    total_mblocks, num_SMs, num_n_blocks, num_m_blocks, size_one_kv_head
+                )
                 if ns > 1 and num_n_blocks > 0:
                     ns = min(ns, num_n_blocks)
                 # FIXME: split-KV (num_splits>1) + seqused_k currently hangs
@@ -532,26 +699,52 @@ class BeamDecodeAttn(torch.autograd.Function):
                     ns = 1
 
             total_splits = ns + 1  # ns for K1 splits, 1 for K2
-            o_partial = torch.empty(total_splits, B, W, Hq, D, device=q.device, dtype=torch.float32)
-            lse_partial_raw = torch.empty(total_splits, B, Hq, W, device=q.device, dtype=torch.float32)
+            o_partial = torch.empty(
+                total_splits, B, W, Hq, D, device=q.device, dtype=torch.float32
+            )
+            lse_partial_raw = torch.empty(
+                total_splits, B, Hq, W, device=q.device, dtype=torch.float32
+            )
             o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=torch.bfloat16)
-            lse_out = torch.empty(B, Hq, W, device=q.device, dtype=torch.float32).transpose(-1, -2)
+            lse_out = torch.empty(
+                B, Hq, W, device=q.device, dtype=torch.float32
+            ).transpose(-1, -2)
 
             # K1: context attention with split-KV
             if ns > 1:
-                _context_attention(q, k_context, v_context, softmax_scale,
-                                   out=o_partial[:ns], lse=lse_partial_raw[:ns],
-                                   num_splits=ns, seqused_k=seqused_k,
-                                   cu_seqlens_k=cu_seqlens_k)
+                _context_attention(
+                    q,
+                    k_context,
+                    v_context,
+                    softmax_scale,
+                    out=o_partial[:ns],
+                    lse=lse_partial_raw[:ns],
+                    num_splits=ns,
+                    seqused_k=seqused_k,
+                    cu_seqlens_k=cu_seqlens_k,
+                )
             else:
-                _context_attention(q, k_context, v_context, softmax_scale,
-                                   out=o_partial[0], lse=lse_partial_raw[0],
-                                   seqused_k=seqused_k,
-                                   cu_seqlens_k=cu_seqlens_k)
+                _context_attention(
+                    q,
+                    k_context,
+                    v_context,
+                    softmax_scale,
+                    out=o_partial[0],
+                    lse=lse_partial_raw[0],
+                    seqused_k=seqused_k,
+                    cu_seqlens_k=cu_seqlens_k,
+                )
             # K2: beam sparse attention
-            _beam_sparse_attention(q, k_beam, v_beam, topk_indices, decode_nums,
-                                   softmax_scale,
-                                   out=o_partial[ns], lse=lse_partial_raw[ns])
+            _beam_sparse_attention(
+                q,
+                k_beam,
+                v_beam,
+                topk_indices,
+                decode_nums,
+                softmax_scale,
+                out=o_partial[ns],
+                lse=lse_partial_raw[ns],
+            )
             # K3: combine all partials
             lse_partial = lse_partial_raw.transpose(-1, -2)
             _combine(o_partial, lse_partial, o_out, lse_out)
@@ -565,8 +758,9 @@ class BeamDecodeAttn(torch.autograd.Function):
         total_mblocks = B * Hq * num_m_blocks  # Hq not Hkv: grid dispatches per Q head
         size_one_kv_head = Sk * D * 2 * 2  # K+V bf16 bytes
         num_SMs = torch.cuda.get_device_properties(q.device).multi_processor_count
-        ns = num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks,
-                                  num_m_blocks, size_one_kv_head)
+        ns = num_splits_heuristic(
+            total_mblocks, num_SMs, num_n_blocks, num_m_blocks, size_one_kv_head
+        )
         # Floor-based splitting: cap num_splits to num_n_blocks so every
         # split gets at least floor(n/ns) >= 1 block.
         if ns > 1 and num_n_blocks > 0:
@@ -574,14 +768,31 @@ class BeamDecodeAttn(torch.autograd.Function):
         is_split_kv = ns > 1
 
         if is_split_kv:
-            o_partial = torch.empty(ns, B, W, Hq, D, device=q.device, dtype=torch.float32)
-            lse_partial_raw = torch.empty(ns, B, Hq, W, device=q.device, dtype=torch.float32)
+            o_partial = torch.empty(
+                ns, B, W, Hq, D, device=q.device, dtype=torch.float32
+            )
+            lse_partial_raw = torch.empty(
+                ns, B, Hq, W, device=q.device, dtype=torch.float32
+            )
             o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=torch.bfloat16)
-            lse_out = torch.empty(B, Hq, W, device=q.device, dtype=torch.float32).transpose(-1, -2)
+            lse_out = torch.empty(
+                B, Hq, W, device=q.device, dtype=torch.float32
+            ).transpose(-1, -2)
 
-            _fused_context_beam(q, k_context, v_context, k_beam, v_beam, topk_indices,
-                                decode_nums, softmax_scale, ns, True,
-                                out=o_partial, lse=lse_partial_raw)
+            _fused_context_beam(
+                q,
+                k_context,
+                v_context,
+                k_beam,
+                v_beam,
+                topk_indices,
+                decode_nums,
+                softmax_scale,
+                ns,
+                True,
+                out=o_partial,
+                lse=lse_partial_raw,
+            )
 
             lse_partial = lse_partial_raw.transpose(-1, -2)
             _combine(o_partial, lse_partial, o_out, lse_out)
@@ -591,9 +802,20 @@ class BeamDecodeAttn(torch.autograd.Function):
             o_out = torch.empty(B, W, Hq, D, device=q.device, dtype=torch.bfloat16)
             lse_out = torch.empty(B, Hq, W, device=q.device, dtype=torch.float32)
 
-            _fused_context_beam(q, k_context, v_context, k_beam, v_beam, topk_indices,
-                                decode_nums, softmax_scale, 1, False,
-                                out=o_out, lse=lse_out)
+            _fused_context_beam(
+                q,
+                k_context,
+                v_context,
+                k_beam,
+                v_beam,
+                topk_indices,
+                decode_nums,
+                softmax_scale,
+                1,
+                False,
+                out=o_out,
+                lse=lse_out,
+            )
             return o_out.unsqueeze(1), lse_out.transpose(-1, -2).unsqueeze(1)
 
     @staticmethod
@@ -604,6 +826,7 @@ class BeamDecodeAttn(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 # Functional interface
 # ---------------------------------------------------------------------------
+
 
 def beam_decode_attn(
     q: torch.Tensor,
@@ -650,16 +873,24 @@ def beam_decode_attn(
         out: [batch, seqlen_q, beam_width, head_q, dim]  same dtype as q
         lse: [batch, seqlen_q, beam_width, head_q]  fp32, or None
     """
-    _validate_inputs(q, k_context, v_context, k_beam, v_beam, topk_indices, decode_nums,
-                     jagged_k_context=cu_seqlens_k is not None)
+    _validate_inputs(
+        q,
+        k_context,
+        v_context,
+        k_beam,
+        v_beam,
+        topk_indices,
+        decode_nums,
+        jagged_k_context=cu_seqlens_k is not None,
+    )
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(q.shape[-1])
 
     if seqused_k is not None:
-        assert seqused_k.dim() == 1 and seqused_k.shape[0] == q.shape[0], (
-            f"seqused_k must be [B={q.shape[0]}], got {tuple(seqused_k.shape)}"
-        )
+        assert (
+            seqused_k.dim() == 1 and seqused_k.shape[0] == q.shape[0]
+        ), f"seqused_k must be [B={q.shape[0]}], got {tuple(seqused_k.shape)}"
         assert seqused_k.dtype == torch.int32, "seqused_k must be int32"
         assert backend == "3kernel", (
             "seqused_k is currently only supported with backend='3kernel' "
@@ -669,9 +900,9 @@ def beam_decode_attn(
         )
 
     if cu_seqlens_k is not None:
-        assert cu_seqlens_k.dim() == 1 and cu_seqlens_k.shape[0] == q.shape[0] + 1, (
-            f"cu_seqlens_k must be [B+1={q.shape[0] + 1}], got {tuple(cu_seqlens_k.shape)}"
-        )
+        assert (
+            cu_seqlens_k.dim() == 1 and cu_seqlens_k.shape[0] == q.shape[0] + 1
+        ), f"cu_seqlens_k must be [B+1={q.shape[0] + 1}], got {tuple(cu_seqlens_k.shape)}"
         assert cu_seqlens_k.dtype == torch.int32, "cu_seqlens_k must be int32"
         assert backend == "3kernel", (
             "cu_seqlens_k is currently only supported with backend='3kernel' "
@@ -685,8 +916,17 @@ def beam_decode_attn(
         )
 
     out_raw, lse = BeamDecodeAttn.apply(
-        q, k_context, v_context, k_beam, v_beam,
-        topk_indices, decode_nums, softmax_scale, backend, seqused_k, cu_seqlens_k,
+        q,
+        k_context,
+        v_context,
+        k_beam,
+        v_beam,
+        topk_indices,
+        decode_nums,
+        softmax_scale,
+        backend,
+        seqused_k,
+        cu_seqlens_k,
     )
 
     if out is not None:

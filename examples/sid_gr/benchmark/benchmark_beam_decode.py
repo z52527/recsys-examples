@@ -34,7 +34,7 @@ import os
 import statistics
 import sys
 import time
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List
 
 import torch
 
@@ -47,12 +47,12 @@ _BENCH_DIR = os.path.dirname(__file__)
 if _BENCH_DIR not in sys.path:
     sys.path.insert(0, _BENCH_DIR)
 
+# Heavy imports — require the full Docker stack
+import commons.utils as init  # noqa: E402
+
 # Lightweight (no benchmark runtime deps) — imported before the heavy stack
 # so the test suite can also pull validate_compare_outputs from _validate.
 from _validate import validate_compare_outputs, validate_pair_outputs  # noqa: E402
-
-# Heavy imports — require the full Docker stack
-import commons.utils as init  # noqa: E402
 from commons.checkpoint import get_unwrapped_module  # noqa: E402
 from commons.datasets.gpt_sid_batch import FeatureConfig, GPTSIDBatch  # noqa: E402
 from commons.modules.embedding import ShardedEmbeddingConfig  # noqa: E402
@@ -133,7 +133,9 @@ _DTYPE_MAP = {
 
 def _resolve_dtype(name: str) -> torch.dtype:
     if name not in _DTYPE_MAP:
-        raise ValueError(f"Unknown dtype '{name}'. Choose from {list(_DTYPE_MAP.keys())}")
+        raise ValueError(
+            f"Unknown dtype '{name}'. Choose from {list(_DTYPE_MAP.keys())}"
+        )
     return _DTYPE_MAP[name]
 
 
@@ -174,8 +176,11 @@ def build_model(args, dtype: torch.dtype):
 
 
 def measure_phase_breakdown(
-    model_unwrapped, batch, num_iter: int,
-    backend: str = "3kernel", use_jagged_kv: bool = False,
+    model_unwrapped,
+    batch,
+    num_iter: int,
+    backend: str = "3kernel",
+    use_jagged_kv: bool = False,
 ) -> Dict[str, float]:
     """Average prefill_ms and decode_loop_ms across num_iter calls."""
     prefill = []
@@ -184,7 +189,9 @@ def measure_phase_breakdown(
         phase: Dict[str, float] = {}
         with torch.no_grad():
             model_unwrapped.generate_beam_decode(
-                batch, backend=backend, use_jagged_kv=use_jagged_kv,
+                batch,
+                backend=backend,
+                use_jagged_kv=use_jagged_kv,
                 phase_times=phase,
             )
         prefill.append(phase["prefill_ms"])
@@ -210,16 +217,18 @@ def run_one_config(args) -> None:
     @torch.no_grad()
     def run_beam_decode():
         sids, _ = model_unwrapped.generate_beam_decode(
-            batch, backend=args.backend, use_jagged_kv=args.use_jagged_kv,
+            batch,
+            backend=args.backend,
+            use_jagged_kv=args.use_jagged_kv,
         )
         return sids
 
     # Sanity: both produce valid outputs
     sids_a = run_original()
     sids_b = run_beam_decode()
-    assert sids_a.shape == sids_b.shape, (
-        f"shape mismatch: orig={sids_a.shape}, decode={sids_b.shape}"
-    )
+    assert (
+        sids_a.shape == sids_b.shape
+    ), f"shape mismatch: orig={sids_a.shape}, decode={sids_b.shape}"
 
     print("=" * 80)
     print(
@@ -234,10 +243,12 @@ def run_one_config(args) -> None:
 
     print("[1/2] Timing generate() (arbitrary-mask FlashAttention)...")
     stats_orig = time_fn(run_original, args.num_warmup, args.num_iter)
-    print(f"  median={stats_orig['median_ms']:.3f} ms, "
-          f"mean={stats_orig['mean_ms']:.3f} ms, "
-          f"p95={stats_orig['p95_ms']:.3f} ms, "
-          f"stdev={stats_orig['stdev_ms']:.3f} ms")
+    print(
+        f"  median={stats_orig['median_ms']:.3f} ms, "
+        f"mean={stats_orig['mean_ms']:.3f} ms, "
+        f"p95={stats_orig['p95_ms']:.3f} ms, "
+        f"stdev={stats_orig['stdev_ms']:.3f} ms"
+    )
 
     kv_label = "jagged+cu_seqlens_k" if args.use_jagged_kv else "dense+seqused_k"
     print(
@@ -245,18 +256,25 @@ def run_one_config(args) -> None:
         f"(backend={args.backend}, {kv_label})..."
     )
     stats_decode = time_fn(run_beam_decode, args.num_warmup, args.num_iter)
-    print(f"  median={stats_decode['median_ms']:.3f} ms, "
-          f"mean={stats_decode['mean_ms']:.3f} ms, "
-          f"p95={stats_decode['p95_ms']:.3f} ms, "
-          f"stdev={stats_decode['stdev_ms']:.3f} ms")
+    print(
+        f"  median={stats_decode['median_ms']:.3f} ms, "
+        f"mean={stats_decode['mean_ms']:.3f} ms, "
+        f"p95={stats_decode['p95_ms']:.3f} ms, "
+        f"stdev={stats_decode['stdev_ms']:.3f} ms"
+    )
 
     # Phase breakdown for the beam_decode path
     phase = measure_phase_breakdown(
-        model_unwrapped, batch, num_iter=args.num_iter,
-        backend=args.backend, use_jagged_kv=args.use_jagged_kv,
+        model_unwrapped,
+        batch,
+        num_iter=args.num_iter,
+        backend=args.backend,
+        use_jagged_kv=args.use_jagged_kv,
     )
-    print(f"  phase breakdown: prefill={phase['prefill_ms_median']:.3f} ms, "
-          f"decode_loop={phase['decode_loop_ms_median']:.3f} ms")
+    print(
+        f"  phase breakdown: prefill={phase['prefill_ms_median']:.3f} ms, "
+        f"decode_loop={phase['decode_loop_ms_median']:.3f} ms"
+    )
 
     speedup = stats_orig["median_ms"] / stats_decode["median_ms"]
     print("-" * 80)
@@ -296,18 +314,20 @@ def run_sweep(base_args) -> None:
                     with torch.no_grad():
                         sids_a, lp_a = model_unwrapped.generate(batch)
                         sids_b, lp_b = model_unwrapped.generate_beam_decode(
-                            batch, backend=cfg.backend,
+                            batch,
+                            backend=cfg.backend,
                             use_jagged_kv=cfg.use_jagged_kv,
                         )
                     val_ok, val_msg = validate_pair_outputs(
-                        sids_a, lp_a, sids_b, lp_b,
+                        sids_a,
+                        lp_a,
+                        sids_b,
+                        lp_b,
                     )
                     if val_ok:
                         val_passes += 1
                     else:
-                        val_fails.append(
-                            f"[{dtype_name} hist={hl} bw={bw}] {val_msg}"
-                        )
+                        val_fails.append(f"[{dtype_name} hist={hl} bw={bw}] {val_msg}")
 
                 @torch.no_grad()
                 def run_orig():
@@ -316,14 +336,19 @@ def run_sweep(base_args) -> None:
                 @torch.no_grad()
                 def run_decode():
                     model_unwrapped.generate_beam_decode(
-                        batch, backend=cfg.backend, use_jagged_kv=cfg.use_jagged_kv,
+                        batch,
+                        backend=cfg.backend,
+                        use_jagged_kv=cfg.use_jagged_kv,
                     )
 
                 stats_o = time_fn(run_orig, cfg.num_warmup, cfg.num_iter)
                 stats_d = time_fn(run_decode, cfg.num_warmup, cfg.num_iter)
                 phase = measure_phase_breakdown(
-                    model_unwrapped, batch, num_iter=cfg.num_iter,
-                    backend=cfg.backend, use_jagged_kv=cfg.use_jagged_kv,
+                    model_unwrapped,
+                    batch,
+                    num_iter=cfg.num_iter,
+                    backend=cfg.backend,
+                    use_jagged_kv=cfg.use_jagged_kv,
                 )
                 rows.append(
                     {
@@ -383,8 +408,10 @@ def run_sweep(base_args) -> None:
         total = val_passes + len(val_fails)
         print()
         if val_fails:
-            print(f"## Validation: {val_passes}/{total} configs PASS, "
-                  f"{len(val_fails)} FAIL")
+            print(
+                f"## Validation: {val_passes}/{total} configs PASS, "
+                f"{len(val_fails)} FAIL"
+            )
             for line in val_fails:
                 print(f"  - {line}")
             if not getattr(base_args, "allow_validation_fail", False):
@@ -395,9 +422,11 @@ def run_sweep(base_args) -> None:
                     f"to continue anyway."
                 )
         else:
-            print(f"## Validation: {val_passes}/{total} configs PASS "
-                  f"(top-1 exact match, |lp delta| < 0.15, "
-                  f"top-K overlap >= 70%)")
+            print(
+                f"## Validation: {val_passes}/{total} configs PASS "
+                f"(top-1 exact match, |lp delta| < 0.15, "
+                f"top-K overlap >= 70%)"
+            )
 
 
 def run_compare_kv_modes(base_args) -> None:
@@ -436,20 +465,27 @@ def run_compare_kv_modes(base_args) -> None:
                 with torch.no_grad():
                     sids_a, lp_a = model_unwrapped.generate(batch)
                     sids_b, lp_b = model_unwrapped.generate_beam_decode(
-                        batch, backend="3kernel", use_jagged_kv=False,
+                        batch,
+                        backend="3kernel",
+                        use_jagged_kv=False,
                     )
                     sids_c, lp_c = model_unwrapped.generate_beam_decode(
-                        batch, backend="3kernel", use_jagged_kv=True,
+                        batch,
+                        backend="3kernel",
+                        use_jagged_kv=True,
                     )
                 val_ok, val_msg = validate_compare_outputs(
-                    sids_a, lp_a, sids_b, lp_b, sids_c, lp_c,
+                    sids_a,
+                    lp_a,
+                    sids_b,
+                    lp_b,
+                    sids_c,
+                    lp_c,
                 )
                 if val_ok:
                     val_passes += 1
                 else:
-                    val_fails.append(
-                        f"[{dtype_name} hist={hl} bw={bw}] {val_msg}"
-                    )
+                    val_fails.append(f"[{dtype_name} hist={hl} bw={bw}] {val_msg}")
 
                 @torch.no_grad()
                 def run_a():  # generate()
@@ -458,34 +494,50 @@ def run_compare_kv_modes(base_args) -> None:
                 @torch.no_grad()
                 def run_b():  # dense + seqused_k
                     model_unwrapped.generate_beam_decode(
-                        batch, backend="3kernel", use_jagged_kv=False,
+                        batch,
+                        backend="3kernel",
+                        use_jagged_kv=False,
                     )
 
                 @torch.no_grad()
                 def run_c():  # jagged + cu_seqlens_k
                     model_unwrapped.generate_beam_decode(
-                        batch, backend="3kernel", use_jagged_kv=True,
+                        batch,
+                        backend="3kernel",
+                        use_jagged_kv=True,
                     )
 
                 ms_a = time_fn(run_a, cfg.num_warmup, cfg.num_iter)["median_ms"]
                 ms_b = time_fn(run_b, cfg.num_warmup, cfg.num_iter)["median_ms"]
                 ms_c = time_fn(run_c, cfg.num_warmup, cfg.num_iter)["median_ms"]
                 phase_b = measure_phase_breakdown(
-                    model_unwrapped, batch, num_iter=cfg.num_iter,
-                    backend="3kernel", use_jagged_kv=False,
+                    model_unwrapped,
+                    batch,
+                    num_iter=cfg.num_iter,
+                    backend="3kernel",
+                    use_jagged_kv=False,
                 )
                 phase_c = measure_phase_breakdown(
-                    model_unwrapped, batch, num_iter=cfg.num_iter,
-                    backend="3kernel", use_jagged_kv=True,
+                    model_unwrapped,
+                    batch,
+                    num_iter=cfg.num_iter,
+                    backend="3kernel",
+                    use_jagged_kv=True,
                 )
-                rows.append({
-                    "dtype": dtype_name, "hist_len": hl, "beam_w": bw,
-                    "ms_a": ms_a, "ms_b": ms_b, "ms_c": ms_c,
-                    "pre_b": phase_b["prefill_ms_median"],
-                    "dec_b": phase_b["decode_loop_ms_median"],
-                    "pre_c": phase_c["prefill_ms_median"],
-                    "dec_c": phase_c["decode_loop_ms_median"],
-                })
+                rows.append(
+                    {
+                        "dtype": dtype_name,
+                        "hist_len": hl,
+                        "beam_w": bw,
+                        "ms_a": ms_a,
+                        "ms_b": ms_b,
+                        "ms_c": ms_c,
+                        "pre_b": phase_b["prefill_ms_median"],
+                        "dec_b": phase_b["decode_loop_ms_median"],
+                        "pre_c": phase_c["prefill_ms_median"],
+                        "dec_c": phase_c["decode_loop_ms_median"],
+                    }
+                )
                 val_tag = "PASS" if val_ok else "FAIL"
                 print(
                     f"[{dtype_name} hist={hl:>3} bw={bw:>2}] "
@@ -522,8 +574,10 @@ def run_compare_kv_modes(base_args) -> None:
     total = val_passes + len(val_fails)
     print()
     if val_fails:
-        print(f"## Validation: {val_passes}/{total} configs PASS, "
-              f"{len(val_fails)} FAIL")
+        print(
+            f"## Validation: {val_passes}/{total} configs PASS, "
+            f"{len(val_fails)} FAIL"
+        )
         for line in val_fails:
             print(f"  - {line}")
         if not getattr(base_args, "allow_validation_fail", False):
@@ -534,9 +588,11 @@ def run_compare_kv_modes(base_args) -> None:
                 f"validation block above for per-config diagnostics."
             )
     else:
-        print(f"## Validation: {val_passes}/{total} configs PASS "
-              f"(top-1 exact match, |lp delta| < 0.15, "
-              f"top-K overlap >= 70% on all 3 pairs)")
+        print(
+            f"## Validation: {val_passes}/{total} configs PASS "
+            f"(top-1 exact match, |lp delta| < 0.15, "
+            f"top-K overlap >= 70% on all 3 pairs)"
+        )
 
 
 def main():
@@ -557,39 +613,71 @@ def main():
     parser.add_argument("--num_iter", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     # Sweep
-    parser.add_argument("--sweep", action="store_true",
-                        help="Run a sweep over (hist_len, beam_w, dtype) and print a markdown table.")
-    parser.add_argument("--sweep_hist", default="32,64,128,256",
-                        help="Comma-separated hist_len values for sweep.")
-    parser.add_argument("--sweep_beam", default="4,10,20",
-                        help="Comma-separated beam_width values for sweep.")
-    parser.add_argument("--sweep_dtype", default="bf16,fp16",
-                        help="Comma-separated dtype names (bf16/fp16) for sweep.")
-    parser.add_argument("--dtype", default="bf16", choices=list(_DTYPE_MAP.keys()),
-                        help="Model + activation dtype (bf16 or fp16).")
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Run a sweep over (hist_len, beam_w, dtype) and print a markdown table.",
+    )
+    parser.add_argument(
+        "--sweep_hist",
+        default="32,64,128,256",
+        help="Comma-separated hist_len values for sweep.",
+    )
+    parser.add_argument(
+        "--sweep_beam",
+        default="4,10,20",
+        help="Comma-separated beam_width values for sweep.",
+    )
+    parser.add_argument(
+        "--sweep_dtype",
+        default="bf16,fp16",
+        help="Comma-separated dtype names (bf16/fp16) for sweep.",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="bf16",
+        choices=list(_DTYPE_MAP.keys()),
+        help="Model + activation dtype (bf16 or fp16).",
+    )
     # Backend / KV-mode
-    parser.add_argument("--backend", default="3kernel", choices=["3kernel", "dsl"],
-                        help="beam_decode_attn backend. '3kernel' supports "
-                             "variable-length history; 'dsl' requires uniform.")
-    parser.add_argument("--use_jagged_kv", action="store_true",
-                        help="Use the jagged-native prefill + cu_seqlens_k path. "
-                             "Only valid with backend='3kernel'. Needs the "
-                             "cu_seqlens_k kernel entry point (already present "
-                             "in the vendored corelib/gr_decode_atten). "
-                             "See RESULTS.md for the perf trade-off.")
-    parser.add_argument("--compare_kv_modes", action="store_true",
-                        help="Time generate(), generate_beam_decode(use_jagged_kv=False) "
-                             "and generate_beam_decode(use_jagged_kv=True) side by side. "
-                             "Implies sweep semantics; uses --sweep_hist/--sweep_beam.")
-    parser.add_argument("--validate_outputs", action="store_true",
-                        help="In --sweep mode, also run an untimed A-vs-B "
-                             "output-equivalence check per config (top-1 exact, "
-                             "|lp delta| < 0.15, top-K overlap >= 70%). "
-                             "Off by default to keep the headline timings fast.")
-    parser.add_argument("--allow_validation_fail", action="store_true",
-                        help="Allow --compare_kv_modes / --validate_outputs to "
-                             "exit successfully even when validation fails. "
-                             "Default: validation failures raise RuntimeError.")
+    parser.add_argument(
+        "--backend",
+        default="3kernel",
+        choices=["3kernel", "dsl"],
+        help="beam_decode_attn backend. '3kernel' supports "
+        "variable-length history; 'dsl' requires uniform.",
+    )
+    parser.add_argument(
+        "--use_jagged_kv",
+        action="store_true",
+        help="Use the jagged-native prefill + cu_seqlens_k path. "
+        "Only valid with backend='3kernel'. Needs the "
+        "cu_seqlens_k kernel entry point (already present "
+        "in the vendored corelib/gr_decode_atten). "
+        "See RESULTS.md for the perf trade-off.",
+    )
+    parser.add_argument(
+        "--compare_kv_modes",
+        action="store_true",
+        help="Time generate(), generate_beam_decode(use_jagged_kv=False) "
+        "and generate_beam_decode(use_jagged_kv=True) side by side. "
+        "Implies sweep semantics; uses --sweep_hist/--sweep_beam.",
+    )
+    parser.add_argument(
+        "--validate_outputs",
+        action="store_true",
+        help="In --sweep mode, also run an untimed A-vs-B "
+        "output-equivalence check per config (top-1 exact, "
+        "|lp delta| < 0.15, top-K overlap >= 70%). "
+        "Off by default to keep the headline timings fast.",
+    )
+    parser.add_argument(
+        "--allow_validation_fail",
+        action="store_true",
+        help="Allow --compare_kv_modes / --validate_outputs to "
+        "exit successfully even when validation fails. "
+        "Default: validation failures raise RuntimeError.",
+    )
     args = parser.parse_args()
 
     init.initialize_distributed()

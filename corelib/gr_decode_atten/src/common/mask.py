@@ -15,14 +15,14 @@
 
 # Copyright (c) 2025, Tri Dao.
 
-from typing import Optional, Callable, TypeAlias
 from dataclasses import dataclass
+from typing import Callable, TypeAlias
 
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32, Int32, Uint32, const_expr
-
 from quack import layout_utils
+
 from . import utils as utils
 from .seqlen_info import SeqlenInfoQK
 
@@ -64,7 +64,9 @@ def mask_r2p_lambda(
         Returns a 32-bit bitmask for the chunk. Bit i set means column
         chunk_idx * chunk_size + i is KEPT; bit i clear means masked to -inf.
     """
-    ncol = const_expr(cute.size(X.shape[cute.rank(X) - 1]) if not rank1 else cute.size(X.shape))
+    ncol = const_expr(
+        cute.size(X.shape[cute.rank(X) - 1]) if not rank1 else cute.size(X.shape)
+    )
     # 32-column chunks. The mask_gen_fn returns a Uint32 bitmask (1=keep).
     CHUNK_SIZE = MASK_R2P_CHUNK_SIZE
     for s in cutlass.range_constexpr(cute.ceil_div(ncol, CHUNK_SIZE)):
@@ -119,7 +121,9 @@ class AttentionMask:
     tile_m: cutlass.Constexpr[int]
     tile_n: cutlass.Constexpr[int]
     seqlen_info: SeqlenInfoQK
-    qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1  # only pass in if we're doing PackGQA
+    qhead_per_kvhead_packgqa: cutlass.Constexpr[
+        int
+    ] = 1  # only pass in if we're doing PackGQA
     swap_AB: cutlass.Constexpr[bool] = False
 
     @property
@@ -144,8 +148,12 @@ class AttentionMask:
         """Apply seqlen-only masking (no causal, no local, no mask_mod)."""
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S, transpose=self.swap_AB)
         acc_shape = (self.tile_m, self.tile_n)
-        cS = cute.make_identity_tensor(acc_shape if not self.swap_AB else acc_shape[::-1])
-        tScS_mn = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cS), transpose=self.swap_AB)
+        cS = cute.make_identity_tensor(
+            acc_shape if not self.swap_AB else acc_shape[::-1]
+        )
+        tScS_mn = layout_utils.reshape_acc_to_mn(
+            thr_mma.partition_C(cS), transpose=self.swap_AB
+        )
         t0ScS_mn = layout_utils.reshape_acc_to_mn(
             thr_mma.get_slice(0).partition_C(cS), transpose=self.swap_AB
         )
@@ -159,11 +167,15 @@ class AttentionMask:
             if const_expr(not r2p):
                 for c in cutlass.range(cute.size(tScS_mn.shape[1]), unroll_full=True):
                     oob = t0ScS_mn[0, c][COL] >= seqlenk_col_limit
-                    for r in cutlass.range(cute.size(tScS_mn.shape[0]), unroll_full=True):
+                    for r in cutlass.range(
+                        cute.size(tScS_mn.shape[0]), unroll_full=True
+                    ):
                         acc_S_mn[r, c] = -Float32.inf if oob else acc_S_mn[r, c]
             else:
                 seqlenk_col_limit_r2p = sm90_col_to_r2p_idx(seqlenk_col_limit)
-                mask_r2p_lambda(acc_S_mn, lambda s: r2p_bitmask_below(seqlenk_col_limit_r2p, s))
+                mask_r2p_lambda(
+                    acc_S_mn, lambda s: r2p_bitmask_below(seqlenk_col_limit_r2p, s)
+                )
 
     @cute.jit
     def apply_mask_sm100(
@@ -181,10 +193,12 @@ class AttentionMask:
     ) -> None:
         """Apply seqlen-only masking for SM100."""
         acc_shape = (self.tile_m, self.tile_n)
-        cS = cute.make_identity_tensor(acc_shape if not self.swap_AB else acc_shape[::-1])
+        cS = cute.make_identity_tensor(
+            acc_shape if not self.swap_AB else acc_shape[::-1]
+        )
         tScS = thr_mma.partition_C(cS)
         tScS = tScS[(None, None), 0, 0]
-        tScS_t2r = thr_tmem_load.partition_D(tScS)
+        thr_tmem_load.partition_D(tScS)
         if n_block < 0:
             n_block = 0
         seqlenk_col_limit = self.seqlen_k - n_block * self.tile_n

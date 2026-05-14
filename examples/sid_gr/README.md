@@ -83,31 +83,73 @@ The SID-GR model performs retrieval through beam search generation. To retrieve 
 
 These two characteristics necessitate different performance optimization strategies compared to LLM inference.
 
-The diagram below illustrates one full generation for `H=3` hierarchies and `beam_width=4`. Each `propagate` call applies top-K over the cross product of surviving parents and the next codebook; pruned beams (dashed) drop out, and a surviving parent can be cloned into multiple children:
+The diagram below walks through one full generation for `H=3` hierarchies, `beam_width=4`, and `codebook_size=256` (the per-hierarchy SID vocabulary). Each step expands every surviving parent over the next 256-way codebook — so step 2 / step 3 search a `4 × 256 = 1024` space — and keeps the top 4 children. Children are grouped by their parent; a group tagged `cloned` means that parent contributed multiple children. Dashed nodes were pruned (their descendants didn't make top-K next step).
 
 ```mermaid
 graph TD
     BOS["history + BOS<br/>(prefill input)"]
 
-    BOS -->|"propagate #1<br/>topk over 256"| b00["beam 0: (88)"]
-    BOS --> b01["beam 1: (89)"]:::pruned
-    BOS --> b02["beam 2: (12)"]
-    BOS --> b03["beam 3: (200)"]
+    subgraph step1["Step 1 · pick top 4 of 256"]
+        direction LR
+        S88["(88)"]
+        S89["(89)"]:::pruned
+        S12["(12)"]
+        S200["(200)"]
+    end
 
-    b02 -->|"propagate #2<br/>topk over 4×256"| b10["beam 0: (12, 30)"]
-    b02 --> b11["beam 1: (12, 28)"]
-    b00 --> b12["beam 2: (88, 50)"]:::pruned
-    b03 --> b13["beam 3: (200, 32)"]
+    subgraph step2["Step 2 · pick top 4 of 4 × 256 = 1024"]
+        direction LR
+        subgraph p88["from (88)"]
+            direction LR
+            S88_50["(88, 50)"]:::pruned
+        end
+        subgraph p12["from (12) — cloned"]
+            direction LR
+            S12_30["(12, 30)"]
+            S12_28["(12, 28)"]
+        end
+        subgraph p200["from (200)"]
+            direction LR
+            S200_32["(200, 32)"]
+        end
+    end
 
-    b10 -->|"propagate #3<br/>topk over 4×256"| b20["beam 0: (12, 30, 7)"]
-    b11 --> b21["beam 1: (12, 28, 100)"]
-    b10 --> b22["beam 2: (12, 30, 200)"]
-    b13 --> b23["beam 3: (200, 32, 88)"]
+    subgraph step3["Step 3 · pick top 4 of 4 × 256 = 1024"]
+        direction LR
+        subgraph p1230["from (12, 30) — cloned"]
+            direction LR
+            S12_30_7["(12, 30, 7)"]
+            S12_30_200["(12, 30, 200)"]
+        end
+        subgraph p1228["from (12, 28)"]
+            direction LR
+            S12_28_100["(12, 28, 100)"]
+        end
+        subgraph p20032["from (200, 32)"]
+            direction LR
+            S200_32_88["(200, 32, 88)"]
+        end
+    end
+
+    BOS --> S88
+    BOS --> S89
+    BOS --> S12
+    BOS --> S200
+
+    S88 --> S88_50
+    S12 --> S12_30
+    S12 --> S12_28
+    S200 --> S200_32
+
+    S12_30 --> S12_30_7
+    S12_30 --> S12_30_200
+    S12_28 --> S12_28_100
+    S200_32 --> S200_32_88
 
     classDef pruned stroke:#888,stroke-dasharray:4 4,color:#888;
 ```
 
-The four leaves are the recommended SID tuples for this sample.
+The four leaves at the bottom are the recommended SID tuples for this sample.
 
 ### Generation APIs
 

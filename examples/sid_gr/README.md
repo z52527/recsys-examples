@@ -178,6 +178,16 @@ The model exposes two generation entry points, both producing top-K beams of ful
 <td width="50%" align="center">
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#ffffff',
+    'primaryBorderColor': '#222222',
+    'primaryTextColor': '#111111',
+    'lineColor': '#555555',
+    'fontSize': '14px'
+  }
+}}%%
 flowchart TB
     N0["forward<br/>seqlen = 16<br/>(hist + BOS)<br/>recompute all K/V"]
     N1["forward<br/>seqlen = 20<br/>(hist + BOS + 4 codes)<br/>recompute all K/V"]
@@ -185,12 +195,24 @@ flowchart TB
     N0 -- "propagate → SID #1" --> N1
     N1 -- "propagate → SID #2" --> N2
     N2 -- "propagate → SID #3" --> Ne["done"]
+
+    linkStyle default stroke:#444,stroke-width:1.5px;
 ```
 
 </td>
 <td width="50%" align="center">
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#ffffff',
+    'primaryBorderColor': '#222222',
+    'primaryTextColor': '#111111',
+    'lineColor': '#555555',
+    'fontSize': '14px'
+  }
+}}%%
 flowchart TB
     F0["prefill<br/>seqlen = 16<br/>(hist + BOS)<br/>→ context_kv_caches"]
     F1["decode<br/>1 new token × W beams<br/>read ctx + own beam_kv"]
@@ -198,6 +220,8 @@ flowchart TB
     F0 -- "propagate → SID #1" --> F1
     F1 -- "propagate → SID #2" --> F2
     F2 -- "propagate → SID #3" --> Fe["done"]
+
+    linkStyle default stroke:#444,stroke-width:1.5px;
 ```
 
 </td>

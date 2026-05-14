@@ -65,7 +65,7 @@ RUN pip install --no-deps tensordict orjson && \
 # reproducible even if the upstream branch moves. Override via
 # `--build-arg FLASH_ATTN_ARBITRARY_MASK_COMMIT=<sha>` if needed.
 ARG FLASH_ATTN_ARBITRARY_MASK_COMMIT=b56db721d65afadd8cfe154cd12e83693bf0aba3
-RUN git clone https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
+RUN git clone -b arbitrary_mask https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_ARBITRARY_MASK_COMMIT} && \
     pip install --no-deps --no-build-isolation -e ./flash_attn/cute && \

@@ -36,35 +36,24 @@ RUN if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
     apt autoremove -y && apt clean && rm -rf /var/lib/apt/lists/*
 
 # -- Layer 2: pip dependencies + Megatron-LM ---
-# Bump from core_v0.12.1 -> core_v0.13.1 to pick up
-# d9608004f "Add an option to skip counting zeros in grad of ChainedOptimizer"
-# (gates ChainedOptimizer.count_zeros on log_num_zeros_in_grad). 0.12.x release
-# line still ships the unconditional count_zeros_fp32 call inside
-# ChainedOptimizer.step, which costs ~4 ms / step on HSTU bf16 even when the
-# stat is unused. Earliest tag containing the fix is core_v0.13.0; using 0.13.1
-# (latest 0.13.x patch) for stability.
-# The nvcr.io/nvidia/pytorch base image ships nvidia-cutlass-dsl=4.3.0 in
-# a way that survives `pip uninstall` (the `.pth`-injected python_packages
-# tree at /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl/
-# stays on sys.path even after pip "uninstalls" the dist-info). After
-# uninstall + reinstall to 4.4.1, `import cutlass.cute.arch` would still
-# resolve to the 4.3.0 files, missing 4.4-era symbols like ProxyKind /
-# SharedSpace that flash_attn.cute requires.
+# Megatron-LM core_v0.13.1: contains d9608004f which gates
+# ChainedOptimizer.count_zeros_fp32 on log_num_zeros_in_grad (~4 ms/step
+# saving on HSTU bf16); 0.12.x always pays the cost.
 #
-# Fix: pip-uninstall AND `rm -rf` the install tree before installing
-# 4.4.1, then immediately verify the upgrade took effect (catches a
-# silent re-shadow regression at Layer 2 instead of Layer 7).
+# nvidia-cutlass-dsl: base image ships 4.3.0 with a .pth that survives
+# pip uninstall, so we rm -rf the tree before installing 4.4.x (which
+# adds ProxyKind / SharedSpace, required by flash_attn.cute). The final
+# `python -c "from cutlass.cute.arch ..."` fails the build immediately
+# if the upgrade ever stops taking effect.
 RUN pip uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-cu13 || true && \
-    rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl \
-           /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl-*.dist-info \
-           /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl.pth && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl* && \
     git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
     pip install --no-deps -e ./megatron-lm && \
     pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers \
     cloudpickle triton==3.6.0 'nvidia-cutlass-dsl[cu13]==4.4.1' \
     'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.6' torch-c-dlpack-ext \
     --no-cache pre-commit && \
-    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace; print('cutlass-dsl 4.4 OK')"
+    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace"
 
 # -- Layer 3: FBGEMM (long build, own layer for caching) ---
 RUN pip install --no-cache-dir setuptools-git-versioning scikit-build && \
@@ -78,21 +67,15 @@ RUN pip install --no-deps tensordict orjson && \
     cd torchrec && \
     pip install --no-deps .
 
-# Install flash_attn.cute (the standalone CuTe DSL submodule of
-# jiayus-nvidia/flash-attention). The arbitrary-mask CuTe path is the
-# only thing this repo uses; installing the full flash-attention root
-# would trigger a heavy CUDA-extension build (flash_attn_2_cuda etc.)
-# that we don't need.
-#
-# Pin the arbitrary_mask branch to a known-good commit so builds are
-# reproducible even if the upstream branch moves. Override via
-# `--build-arg FLASH_ATTN_ARBITRARY_MASK_COMMIT=<sha>` if needed.
+# flash_attn.cute is shipped as a standalone subpackage (flash-attn-cute)
+# in jiayus-nvidia/flash-attention; install only that to skip the 30+ min
+# CUDA build the root package triggers. Pin via SHA for reproducibility.
 ARG FLASH_ATTN_ARBITRARY_MASK_COMMIT=b56db721d65afadd8cfe154cd12e83693bf0aba3
 RUN git clone -b arbitrary_mask https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_ARBITRARY_MASK_COMMIT} && \
-    pip install --no-deps --no-build-isolation -e ./flash_attn/cute && \
-    python -c "from flash_attn.cute.interface import flash_attn_func; print('flash_attn.cute OK')"
+    pip install --no-deps -e ./flash_attn/cute && \
+    python -c "from flash_attn.cute.interface import flash_attn_func"
 
 # Install fbgemm_gpu_hstu (package: fbgemm_gpu_hstu, import: hstu) from submodule
 COPY third_party/FBGEMM /workspace/deps/fbgemm_hstu
@@ -113,10 +96,8 @@ ARG TRITONSERVER_BUILD
 WORKDIR /workspace/recsys-examples
 COPY . .
 
-# Vendored beam-decode attention kernel (corelib/gr_decode_atten). The
-# package uses top-level imports like `from src.common...` and `from
-# interface import beam_decode_attn`, so its root must be on PYTHONPATH.
-# Source/provenance: corelib/gr_decode_atten/README.md.
+# corelib/gr_decode_atten uses top-level imports (`from src.common ...`,
+# `from interface import beam_decode_attn`); put its root on PYTHONPATH.
 ENV PYTHONPATH=/workspace/recsys-examples/corelib/gr_decode_atten
 
 RUN cd /workspace/recsys-examples/corelib/dynamicemb && \

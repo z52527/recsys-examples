@@ -68,7 +68,8 @@ ARG FLASH_ATTN_ARBITRARY_MASK_COMMIT=b56db721d65afadd8cfe154cd12e83693bf0aba3
 RUN git clone https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_ARBITRARY_MASK_COMMIT} && \
-    pip install --no-deps --no-build-isolation -e ./flash_attn/cute
+    pip install --no-deps --no-build-isolation -e ./flash_attn/cute && \
+    python -c "from flash_attn.cute.interface import flash_attn_func; print('flash_attn.cute OK')"
 
 # Install fbgemm_gpu_hstu (package: fbgemm_gpu_hstu, import: hstu) from submodule
 COPY third_party/FBGEMM /workspace/deps/fbgemm_hstu

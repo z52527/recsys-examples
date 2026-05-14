@@ -86,6 +86,18 @@ These two characteristics necessitate different performance optimization strateg
 The diagram below walks through one full generation for `H=3` hierarchies, `beam_width=4`, and `codebook_size=256` (the per-hierarchy SID vocabulary). Each step takes **every** beam from the previous step — including the dashed ones — runs the model on it to produce 256 candidate continuations, and then top-K selects the 4 to keep. Each step title shows the math explicitly: e.g. `top 4 of 4 (every Step 1 beam) × 256 = 1024`. Dashed style means "this beam's descendants didn't make top-K at the next step," **not** "this beam wasn't expanded" — the multiplier `4` always counts every prev-step beam.
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#ffffff',
+    'primaryBorderColor': '#222222',
+    'primaryTextColor': '#111111',
+    'lineColor': '#555555',
+    'fontSize': '14px',
+    'clusterBkg': '#f5f7fa',
+    'clusterBorder': '#888888'
+  }
+}}%%
 graph TD
     BOS["history + BOS<br/>(prefill input)"]
 
@@ -146,7 +158,9 @@ graph TD
     S12_28 --> S12_28_100
     S200_32 --> S200_32_88
 
-    classDef pruned stroke:#888,stroke-dasharray:4 4,color:#888;
+    classDef pruned stroke:#bbb,stroke-dasharray:5 4,color:#888;
+
+    linkStyle default stroke:#444,stroke-width:1.5px;
 ```
 
 The four leaves at the bottom are the recommended SID tuples for this sample.

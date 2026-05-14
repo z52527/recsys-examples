@@ -94,7 +94,7 @@ COPY . .
 # package uses top-level imports like `from src.common...` and `from
 # interface import beam_decode_attn`, so its root must be on PYTHONPATH.
 # Source/provenance: corelib/gr_decode_atten/README.md.
-ENV PYTHONPATH=/workspace/recsys-examples/corelib/gr_decode_atten:$PYTHONPATH
+ENV PYTHONPATH=/workspace/recsys-examples/corelib/gr_decode_atten
 
 RUN cd /workspace/recsys-examples/corelib/dynamicemb && \
     python setup.py install && \

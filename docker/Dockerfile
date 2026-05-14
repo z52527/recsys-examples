@@ -43,19 +43,28 @@ RUN if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
 # ChainedOptimizer.step, which costs ~4 ms / step on HSTU bf16 even when the
 # stat is unused. Earliest tag containing the fix is core_v0.13.0; using 0.13.1
 # (latest 0.13.x patch) for stability.
-# The nvcr.io/nvidia/pytorch base image ships nvidia-cutlass-dsl=4.3.0
-# via a `.pth` file that pip's `==4.4.1` upgrade does not fully replace
-# (the 4.3.0 site-packages tree stays on sys.path). Uninstall it
-# explicitly before installing 4.4.1. We need 4.4.x because
-# flash_attn.cute imports ProxyKind / SharedSpace, which are new symbols
-# in nvidia-cutlass-dsl 4.4.
+# The nvcr.io/nvidia/pytorch base image ships nvidia-cutlass-dsl=4.3.0 in
+# a way that survives `pip uninstall` (the `.pth`-injected python_packages
+# tree at /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl/
+# stays on sys.path even after pip "uninstalls" the dist-info). After
+# uninstall + reinstall to 4.4.1, `import cutlass.cute.arch` would still
+# resolve to the 4.3.0 files, missing 4.4-era symbols like ProxyKind /
+# SharedSpace that flash_attn.cute requires.
+#
+# Fix: pip-uninstall AND `rm -rf` the install tree before installing
+# 4.4.1, then immediately verify the upgrade took effect (catches a
+# silent re-shadow regression at Layer 2 instead of Layer 7).
 RUN pip uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-cu13 || true && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl \
+           /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl-*.dist-info \
+           /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl.pth && \
     git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
     pip install --no-deps -e ./megatron-lm && \
     pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers \
     cloudpickle triton==3.6.0 'nvidia-cutlass-dsl[cu13]==4.4.1' \
     'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.6' torch-c-dlpack-ext \
-    --no-cache pre-commit
+    --no-cache pre-commit && \
+    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace; print('cutlass-dsl 4.4 OK')"
 
 # -- Layer 3: FBGEMM (long build, own layer for caching) ---
 RUN pip install --no-cache-dir setuptools-git-versioning scikit-build && \

@@ -36,14 +36,14 @@ RUN if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
     apt autoremove -y && apt clean && rm -rf /var/lib/apt/lists/*
 
 # -- Layer 2: pip dependencies + Megatron-LM ---
-# The nvcr.io/nvidia/pytorch base image ships nvidia-cutlass-dsl=4.3.0
-# via a `.pth` file that pip's `==4.4.1` upgrade does not fully replace
-# (the 4.3.0 site-packages tree stays on sys.path). Uninstall it
-# explicitly before installing 4.4.1. We need 4.4.x because
-# flash_attn.cute imports ProxyKind / SharedSpace, which are new symbols
-# in nvidia-cutlass-dsl 4.4.
-RUN pip uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-cu13 || true && \
-    git clone -b core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
+# Bump from core_v0.12.1 -> core_v0.13.1 to pick up
+# d9608004f "Add an option to skip counting zeros in grad of ChainedOptimizer"
+# (gates ChainedOptimizer.count_zeros on log_num_zeros_in_grad). 0.12.x release
+# line still ships the unconditional count_zeros_fp32 call inside
+# ChainedOptimizer.step, which costs ~4 ms / step on HSTU bf16 even when the
+# stat is unused. Earliest tag containing the fix is core_v0.13.0; using 0.13.1
+# (latest 0.13.x patch) for stability.
+RUN git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
     pip install --no-deps -e ./megatron-lm && \
     pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers \
     cloudpickle triton==3.6.0 'nvidia-cutlass-dsl[cu13]==4.4.1' \

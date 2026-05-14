@@ -83,13 +83,13 @@ The SID-GR model performs retrieval through beam search generation. To retrieve 
 
 These two characteristics necessitate different performance optimization strategies compared to LLM inference.
 
-The diagram below walks through one full generation for `H=3` hierarchies, `beam_width=4`, and `codebook_size=256` (the per-hierarchy SID vocabulary). Each step expands every surviving parent over the next 256-way codebook — so step 2 / step 3 search a `4 × 256 = 1024` space — and keeps the top 4 children. Children are grouped by their parent; a group tagged `cloned` means that parent contributed multiple children. Dashed nodes were pruned (their descendants didn't make top-K next step).
+The diagram below walks through one full generation for `H=3` hierarchies, `beam_width=4`, and `codebook_size=256` (the per-hierarchy SID vocabulary). Each step takes **every** beam from the previous step — including the dashed ones — runs the model on it to produce 256 candidate continuations, and then top-K selects the 4 to keep. Each step title shows the math explicitly: e.g. `top 4 of 4 (every Step 1 beam) × 256 = 1024`. Dashed style means "this beam's descendants didn't make top-K at the next step," **not** "this beam wasn't expanded" — the multiplier `4` always counts every prev-step beam.
 
 ```mermaid
 graph TD
     BOS["history + BOS<br/>(prefill input)"]
 
-    subgraph step1["Step 1 · pick top 4 of 256"]
+    subgraph step1["Step 1 · top 4 of 1 (BOS context) × 256 = 256"]
         direction LR
         S88["(88)"]
         S89["(89)"]:::pruned
@@ -97,7 +97,7 @@ graph TD
         S200["(200)"]
     end
 
-    subgraph step2["Step 2 · pick top 4 of 4 × 256 = 1024"]
+    subgraph step2["Step 2 · top 4 of 4 (every Step 1 beam) × 256 = 1024"]
         direction LR
         subgraph p88["from (88)"]
             direction LR
@@ -114,7 +114,7 @@ graph TD
         end
     end
 
-    subgraph step3["Step 3 · pick top 4 of 4 × 256 = 1024"]
+    subgraph step3["Step 3 · top 4 of 4 (every Step 2 beam) × 256 = 1024"]
         direction LR
         subgraph p1230["from (12, 30) — cloned"]
             direction LR

@@ -447,7 +447,7 @@ def dense_mask_to_jagged_arbitrary_func(
     B, N, _ = valid_mask.shape
     device = valid_mask.device
 
-    # Detect interval boundaries via transitions
+    # Detect interval boundaries via transitions (vectorised on [B, N, N]).
     shifted = torch.zeros_like(valid_mask)
     shifted[:, :, 1:] = valid_mask[:, :, :-1]
     starts = valid_mask & ~shifted
@@ -457,35 +457,49 @@ def dense_mask_to_jagged_arbitrary_func(
     ends = valid_mask & ~ends_shifted
 
     max_intervals = int(starts.sum(dim=-1).max().item())
-    # max(2 * max_intervals + 1, 3) is always odd, so no extra parity fix-up.
+    # 2 * max_intervals + 1 is always odd, so no extra parity fix-up.
     n_func = max(2 * max_intervals + 1, 3)
 
     af = torch.zeros(
         1, 1, n_func, total_tokens + padding, dtype=torch.int32, device=device
     )
+    if max_intervals == 0:
+        return af  # mask is all-False; rows stay zero (F0=0 ⇒ no keys visible)
 
-    for b in range(B):
-        batch_start = offsets[b].item()
-        batch_end = offsets[b + 1].item()
-        seq_len = batch_end - batch_start
+    # Mask out positions outside each sample's [0, seq_len) range so the
+    # padded rows/cols never contribute spurious intervals.
+    seq_lens = offsets[1:] - offsets[:-1]  # [B]
+    batch_starts = offsets[:-1]  # [B]
+    arange_n = torch.arange(N, device=device)
+    in_range = arange_n.unsqueeze(0) < seq_lens.unsqueeze(-1)  # [B, N]
+    in_qk = in_range.unsqueeze(-1) & in_range.unsqueeze(-2)  # [B, N, N]
+    starts = starts & in_qk
+    ends = ends & in_qk
 
-        for local_q in range(seq_len):
-            global_q = batch_start + local_q
-            row = valid_mask[b, local_q, :seq_len]
-            if not row.any():
-                continue
+    # cumsum along the key axis assigns a 1-based interval index to each
+    # transition position; e.g. the 3rd True in starts[b, q, :] gets value 3.
+    iv_starts = starts.cumsum(dim=-1)  # [B, N, N]
+    iv_ends = ends.cumsum(dim=-1)  # [B, N, N]
 
-            start_pos = starts[b, local_q, :seq_len].nonzero(as_tuple=False).squeeze(-1)
-            end_pos = ends[b, local_q, :seq_len].nonzero(as_tuple=False).squeeze(-1) + 1
+    # Scatter all start transitions into af in a single op.
+    sc = starts.nonzero(as_tuple=False)  # [Ns, 3] = (b, q, k)
+    if sc.numel() > 0:
+        bs, qs, ks = sc[:, 0], sc[:, 1], sc[:, 2]
+        ivs = iv_starts[bs, qs, ks]  # [Ns] 1-based
+        global_qs = batch_starts[bs] + qs
+        global_ks = (batch_starts[bs] + ks).to(torch.int32)
+        af_row = (2 * (ivs - 1) + 1).long()
+        af[0, 0, af_row, global_qs] = global_ks
 
-            # In flattened coordinates, the first visible key is at
-            # batch_start (not 0), so F0 is always 0. All intervals go
-            # into the explicit (F1,F2), (F3,F4), ... slots.
-            for iv in range(len(start_pos)):
-                s = start_pos[iv].item() + batch_start
-                e = end_pos[iv].item() + batch_start
-                af[0, 0, 2 * iv + 1, global_q] = s
-                af[0, 0, 2 * iv + 2, global_q] = e
+    # Same for ends (exclusive: +1 because the loop version added +1).
+    ec = ends.nonzero(as_tuple=False)
+    if ec.numel() > 0:
+        be, qe, ke = ec[:, 0], ec[:, 1], ec[:, 2]
+        ive = iv_ends[be, qe, ke]
+        global_qe = batch_starts[be] + qe
+        global_ke = (batch_starts[be] + ke + 1).to(torch.int32)
+        af_row_e = (2 * (ive - 1) + 2).long()
+        af[0, 0, af_row_e, global_qe] = global_ke
 
     return af
 

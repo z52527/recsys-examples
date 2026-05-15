@@ -26,8 +26,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "model"))
 from attention_mask import (
     build_jagged_causal_arbitrary_func,
     dense_mask_to_arbitrary_func,
-    padded_target_aware_causal_mask,
 )
+from attention_mask import (
+    dense_mask_to_jagged_arbitrary_func as dense_mask_to_jagged_arbitrary_func_vec,
+)
+from attention_mask import padded_target_aware_causal_mask
 
 sys.path.pop(0)
 
@@ -262,3 +265,77 @@ class TestJaggedFlattenedArbitraryFunc:
             expected[s : s + sl, s : s + sl] = valid_3d[b, :sl, :sl]
 
         assert torch.equal(expected, recon)
+
+
+class TestDenseMaskToJaggedVectorisedMatchesLoop:
+    """The model's ``dense_mask_to_jagged_arbitrary_func`` is vectorised
+    (cumsum + scatter, one host sync) while the loop-based helper above
+    spells out the same algorithm row by row. Verify they agree on every
+    mask shape exercised by the rest of this file plus a couple of
+    pathological cases.
+    """
+
+    @staticmethod
+    def _both(valid_mask, offsets, total):
+        a = dense_mask_to_jagged_arbitrary_func(valid_mask, offsets, total)
+        b = dense_mask_to_jagged_arbitrary_func_vec(valid_mask, offsets, total)
+        assert a.shape == b.shape, (a.shape, b.shape)
+        assert torch.equal(a, b), f"vectorised != loop\nloop:\n{a}\nvec:\n{b}"
+
+    def test_jagged_causal(self):
+        offsets = torch.tensor([0, 3, 7], device="cuda")
+        B, total, max_seqlen = 2, 7, 4
+        per_batch = torch.zeros(
+            B, max_seqlen, max_seqlen, dtype=torch.bool, device="cuda"
+        )
+        for b in range(B):
+            sl = (offsets[b + 1] - offsets[b]).item()
+            per_batch[b, :sl, :sl] = torch.tril(
+                torch.ones(sl, sl, dtype=torch.bool, device="cuda")
+            )
+        self._both(per_batch, offsets, total)
+
+    @pytest.mark.parametrize("beam_width", [2, 3])
+    @pytest.mark.parametrize("candidate_len", [1, 3])
+    def test_target_grouped(self, beam_width, candidate_len):
+        hist_lens = torch.tensor([5, 3], device="cuda")
+        max_hist = 5
+        inverted = padded_target_aware_causal_mask(
+            hist_lens, max_hist, beam_width, candidate_len
+        )
+        valid = ~inverted
+        total_per_batch = (hist_lens + beam_width * candidate_len).tolist()
+        offsets = torch.tensor(
+            [0] + [sum(total_per_batch[: i + 1]) for i in range(2)],
+            device="cuda",
+        )
+        total = offsets[-1].item()
+        self._both(valid, offsets, total)
+
+    def test_all_zero_mask(self):
+        offsets = torch.tensor([0, 4, 8], device="cuda")
+        valid = torch.zeros(2, 4, 4, dtype=torch.bool, device="cuda")
+        self._both(valid, offsets, 8)
+
+    def test_multi_interval_per_row(self):
+        # Row 2 has TWO disjoint intervals (gap mid-row); exercises iv > 1.
+        offsets = torch.tensor([0, 5], device="cuda")
+        valid = torch.zeros(1, 5, 5, dtype=torch.bool, device="cuda")
+        valid[0, 2, 0] = True
+        valid[0, 2, 1] = True
+        valid[0, 2, 3] = True
+        valid[0, 2, 4] = True
+        self._both(valid, offsets, 5)
+
+    def test_uneven_seq_lens(self):
+        offsets = torch.tensor([0, 2, 8, 9], device="cuda")
+        B, total, max_seqlen = 3, 9, 6
+        per_batch = torch.zeros(
+            B, max_seqlen, max_seqlen, dtype=torch.bool, device="cuda"
+        )
+        for b in range(B):
+            sl = (offsets[b + 1] - offsets[b]).item()
+            per_batch[b, :sl, :sl] = torch.tril(
+                torch.ones(sl, sl, dtype=torch.bool, device="cuda")
+            )
+        self._both(per_batch, offsets, total)

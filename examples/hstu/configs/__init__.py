@@ -11,12 +11,7 @@ from .inference_config import (
     EmbeddingBackend,
     InferenceEmbeddingConfig,
     InferenceHSTUConfig,
-    KVCacheConfig,
-    KVCacheMetadata,
-    copy_kvcache_metadata,
     get_inference_hstu_config,
-    get_kvcache_config,
-    get_kvcache_metadata_buffer,
 )
 from .task_config import RankingConfig, RetrievalConfig
 
@@ -33,11 +28,6 @@ __all__ = [
     "RetrievalConfig",
     "KernelBackend",
     "HSTULayerType",
-    "KVCacheMetadata",
-    "KVCacheConfig",
-    "get_kvcache_config",
-    "get_kvcache_metadata_buffer",
-    "copy_kvcache_metadata",
     "EmbeddingBackend",
     "InferenceEmbeddingConfig",
     "InferenceHSTUConfig",

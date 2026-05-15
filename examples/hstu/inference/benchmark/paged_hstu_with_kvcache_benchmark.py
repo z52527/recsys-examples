@@ -16,19 +16,21 @@ import itertools
 import math
 from typing import List
 
-import paged_kvcache_ops
 import torch
 from commons.datasets.hstu_batch import FeatureConfig
-from configs import (
-    InferenceEmbeddingConfig,
-    KVCacheMetadata,
-    RankingConfig,
-    copy_kvcache_metadata,
-    get_inference_hstu_config,
-    get_kvcache_config,
-)
+from configs import InferenceEmbeddingConfig, RankingConfig, get_inference_hstu_config
+from kvcache_cpp import KVOnloadHandle
 from modules.inference_dense_module import InferenceDenseModule, copy_jagged_metadata
 from modules.jagged_data import JaggedData
+from recsys_kvcache_manager.host_kvstorage_manager import (
+    HostKVTaskHandle,
+    HostKVTaskStatus,
+)
+from recsys_kvcache_manager.kvcache_config import get_kvcache_config
+from recsys_kvcache_manager.kvcache_metadata import (
+    copy_kvcache_metadata,
+    get_kvcache_metadata_buffer,
+)
 
 _item_fea_name = "item_feat"
 _item_vocab_size = 10000
@@ -83,24 +85,37 @@ def benchmark_model(
         max_seq_len=total_max_seqlen,
     )
 
-    pages_in_primary_pool = (
+    num_primary_cache_pages = (
         math.ceil(math.ceil(max_batch_size * total_max_seqlen / page_size) / 10240)
         * 10240
     )
-    pages_in_primary_pool = max(num_pages, pages_in_primary_pool)
+    num_primary_cache_pages = max(num_pages, num_primary_cache_pages)
     reserved_pages = max_batch_size * total_max_seqlen / page_size
-    total_pages = pages_in_primary_pool + reserved_pages
+    total_pages = num_primary_cache_pages + reserved_pages
     cache_page_gmem = 2 * page_size * num_heads * head_dim
     kvcache_gmem = total_pages * cache_page_gmem * num_layers
     kvcache_gmem *= 4 if dtype == torch.float32 else 2
     kvcache_gmem /= 1024.0**3
     print("[[KVCache]] allocated {0} GiB".format(kvcache_gmem))
 
-    kv_cache_config = get_kvcache_config(
-        blocks_in_primary_pool=pages_in_primary_pool,
-        page_size=page_size,
-        offload_chunksize=offload_chunksize,
-    )
+    kvcache_args = {
+        "num_layers": hstu_config.num_layers,
+        "num_heads": hstu_config.num_heads,
+        "head_dim": hstu_config.head_dim,
+        "page_size": 32,
+        "offload_chunksize": 1024,
+        "num_primary_cache_pages": 10240,
+        "num_buffer_pages": 0,
+        "host_capacity_per_layer": 0,
+        "max_batch_size": hstu_config.max_batch_size,
+        "max_seq_len": math.ceil(hstu_config.max_seq_len * 2 / 32) * 32,
+        "dtype": torch.bfloat16,
+        "device": torch.cuda.current_device(),
+        "host_kvstorage_backend": "native",
+        "offload_timeout_ms": 0.0,
+        "offload_mode": "lazy",
+    }
+    kv_cache_config = get_kvcache_config(**kvcache_args)
     emb_configs = [
         InferenceEmbeddingConfig(
             feature_names=_context_fea_names + [_item_fea_name]
@@ -212,19 +227,27 @@ def test_input(
         # use input offset to force reading different kvcache pages
         kvcache_page_ids = torch.randperm(batch_pages) + i * batch_pages
         kvcache_page_ids = kvcache_page_ids % kvcache_num_pages
-        kvcache_metadata = KVCacheMetadata(
-            kv_indices=kvcache_page_ids.int().cuda(),
-            kv_indptr=kvcache_page_indptr.int().cuda(),
-            kv_last_page_len=kvcache_last_page_len.int().cuda(),
-            batch_indices=batch_indices.int().cuda(),
-            position=positions.int().cuda(),
-            new_history_nnz=new_history_nnz,
-            new_history_nnz_cuda=new_history_nnz_cuda.int().cuda(),
-            total_history_lengths=None,
-            total_history_offsets=kv_seqlen_offsets.int().cuda(),
-            kv_cache_table=kv_cache_table,
-            kv_onload_handle=paged_kvcache_ops.KVOnloadHandle(),
-            kv_offload_handle=paged_kvcache_ops.KVOffloadHandle(),
+        kvcache_metadata = get_kvcache_metadata_buffer(
+            batch_size=batch_size,
+            num_new_tokens=new_history_nnz,
+            num_pages=kvcache_page_ids.size(0),
+            page_ids_gpu_buffer=kvcache_page_ids.int().cuda(),
+            device=torch.cuda.current_device(),
+        )
+        kvcache_metadata.kv_indptr.copy_(kvcache_page_indptr.int().cuda())
+        kvcache_metadata.kv_last_page_len.copy_(kvcache_last_page_len.int().cuda())
+        kvcache_metadata.total_history_offsets.copy_(kv_seqlen_offsets.int().cuda())
+        kvcache_metadata.batch_indices.copy_(batch_indices.int().cuda())
+        kvcache_metadata.position.copy_(positions.int().cuda())
+        kvcache_metadata.new_history_nnz = new_history_nnz
+        kvcache_metadata.new_history_nnz_cuda.copy_(new_history_nnz_cuda.int().cuda())
+        kvcache_metadata.kv_seqlen_offsets.copy_(kv_seqlen_offsets.int().cuda())
+        kvcache_metadata.kv_onload_handle = HostKVTaskHandle(
+            backend="native",
+            user_ids=torch.empty(0, dtype=torch.int64),  # dummy user_ids.
+            handle=KVOnloadHandle(num_layers),
+            status=HostKVTaskStatus.LAUNCHED,
+            is_layerwise=True,
         )
         input_lists.append(
             (
@@ -261,10 +284,10 @@ def run_single_bench(
         0,
         model._hstu_config.num_layers,
         model._embedding_dim,
-        model.async_kvcache.page_size,
-        model.async_kvcache.num_cache_pages,
+        model.kvcache_config.page_size,
+        model.kvcache_config.num_primary_cache_pages,
         model._hidden_states.dtype,
-        model.async_kvcache.cache_table_list,
+        model.kvcache.gpu_kvcache_mgr.gpu_kvcache_tables,
     )
 
     num_warumps = 10
@@ -453,10 +476,7 @@ def run_benchmark():
             # skips
             if new_history_length > total_history_length:
                 continue
-            if (
-                new_history_length + num_targets
-                > model.async_kvcache.max_sequence_length
-            ):
+            if new_history_length + num_targets > model.kvcache_config.max_seq_len:
                 print("too large input length:", new_history_length + num_targets)
                 continue
             if batch_size > kwargs["max_batch_size"]:

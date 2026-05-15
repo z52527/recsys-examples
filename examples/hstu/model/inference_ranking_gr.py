@@ -17,9 +17,11 @@ from typing import Dict
 
 import torch
 from commons.datasets.hstu_batch import HSTUBatch
-from configs import InferenceHSTUConfig, KVCacheConfig, RankingConfig
+from configs import InferenceHSTUConfig, RankingConfig
 from modules.inference_dense_module import InferenceDenseModule
 from modules.inference_embedding import InferenceEmbedding
+from recsys_kvcache_manager.kvcache_config import KVCacheConfig
+from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 
 class InferenceRankingGR(torch.nn.Module):
@@ -81,6 +83,57 @@ class InferenceRankingGR(torch.nn.Module):
         self.sparse_module.load_checkpoint(checkpoint_dir, model_state_dict)
         self.dense_module.load_state_dict(model_state_dict, strict=False)
 
+    def strip_cached_tokens(self, batch, origin_num_cached):
+        torch.cuda.nvtx.range_push("strip_cached_tokens")
+
+        num_context = len(batch.contextual_feature_names)
+
+        num_cached = torch.clamp_min(origin_num_cached - num_context, 0).to(torch.int32)
+        num_cached_action = num_cached // 2
+        num_cached_item = num_cached - num_cached_action
+        num_hist_cached = torch.concat([num_cached_item, num_cached_action], dim=0)
+
+        old_offsets = batch.features.offsets().cpu()
+        old_lengths = batch.features.lengths().cpu()
+
+        item_offset = num_context * batch.batch_size
+
+        new_lengths = torch.zeros_like(old_lengths)
+        new_lengths[:item_offset] = torch.where(
+            (origin_num_cached == 0).view(-1, batch.batch_size),
+            old_lengths[:item_offset].view(-1, batch.batch_size),
+            new_lengths[:item_offset].view(-1, batch.batch_size),
+        ).view(-1)
+        new_lengths[item_offset:] = old_lengths[item_offset:] - num_hist_cached
+
+        startpos = (
+            old_offsets[item_offset : item_offset + 2 * batch.batch_size]
+            + num_hist_cached
+        )
+        endpos = old_offsets[item_offset + 1 :]
+
+        old_values = batch.features.values()
+        new_hist_value = [
+            old_values[startpos[idx] : endpos[idx]]
+            for idx in range(2 * batch.batch_size)
+        ]
+
+        new_context_value = [
+            old_values[idx : idx + 1]
+            for idx in range(num_context * batch.batch_size)
+            if int(new_lengths[idx]) > 0
+        ]
+
+        new_features = KeyedJaggedTensor(
+            values=torch.cat(new_context_value + new_hist_value, dim=0),
+            lengths=new_lengths.cuda(),
+            keys=batch.features.keys(),
+        )
+        batch.features = new_features
+
+        torch.cuda.nvtx.range_pop()
+        return batch
+
     def forward_with_kvcache(
         self,
         batch: HSTUBatch,
@@ -88,22 +141,22 @@ class InferenceRankingGR(torch.nn.Module):
         total_history_lengths: torch.Tensor,
     ):
         with torch.inference_mode():
-            prepare_kvcache_result = (
-                self.dense_module.async_kvcache.prepare_kvcache_async(
-                    batch.batch_size,
-                    user_ids.tolist(),
-                    total_history_lengths.tolist(),
-                    self.dense_module.async_kvcache.static_page_ids_gpu_buffer,
-                    self.dense_module.async_kvcache.static_offload_page_ids_gpu_buffer,
-                    self.dense_module.async_kvcache.static_metadata_gpu_buffer,
-                    self.dense_module.async_kvcache.static_onload_handle,
-                )
+            # lookup and allocate for kv cache
+            index_meta, lookup_res = self.dense_module.kvcache.lookup_kvcache(
+                user_ids,
+                total_history_lengths,
+            )
+            kvcache_metadata = self.dense_module.kvcache.allocate_kvcache(
+                index_meta, lookup_res
             )
 
-            old_cached_lengths = torch.tensor(
-                prepare_kvcache_result[0], dtype=torch.int32
+            # asynchronous kvdata onboard, overlapping with strip_cached and embedding lookup
+            self.dense_module.kvcache.onboard_launch(
+                index_meta, lookup_res, kvcache_metadata
             )
-            striped_batch = self.dense_module.async_kvcache.strip_cached_tokens(
+
+            old_cached_lengths = lookup_res.cached_lengths
+            striped_batch = self.strip_cached_tokens(
                 batch,
                 old_cached_lengths,
             )
@@ -112,13 +165,13 @@ class InferenceRankingGR(torch.nn.Module):
             embeddings = self.sparse_module(striped_batch.features)
             torch.cuda.nvtx.range_pop()
 
-            prepare_kvcache_result = [old_cached_lengths] + prepare_kvcache_result[1:]
+            kvcache_info = (index_meta, lookup_res, kvcache_metadata)
             logits = self.dense_module.forward_with_kvcache(
                 striped_batch,
                 embeddings,
                 user_ids,
                 total_history_lengths,
-                prepare_kvcache_result,
+                kvcache_info,
             )
 
         return logits

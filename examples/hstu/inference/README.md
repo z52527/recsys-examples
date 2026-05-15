@@ -2,18 +2,20 @@
 
 ## Key Features
 
-1. Asynchronous Cache Manager for KV data
+1. KV Cache Manager
 
-We use GPU memory and host storage for KV data cache as in `AsyncKVCacheManager`. This can help to reduce the recomputation of KV data. All the kvcache related operations are implemented as asynchronous, in order to hide the overhead with inference computation.
+We use GPU memory and host storage for KV data cache by `KVCacheManager` from package [`recsys_kvcache_manager`](../../../corelib/recsys_kvcache_manager/README.md). This can help to reduce the recomputation of KV data. All the kvcache related operations are implemented as asynchronous, in order to hide the overhead with inference computation.
 
-The GPU KV cache is organized as a paged KV-data table, and supports KV data adding/appending, lookup and eviction. When appending new data to the GPU cache, we will evict data from the oldest users according to the LRU policy if there is no empty page. The HSTU attention kernel also accepts KV data from a paged table.
+The GPU KV cache is organized as a paged KV-data table, and supports KV data adding/appending, lookup and eviction. When appending new data to the GPU cache, we will evict data from the oldest users according to the LRU policy if there is no empty page. The HSTU attention kernel also accepts KV data from a paged table. 
 
-The host KV data storage support adding/appending and lookup. We only present an example implementation, since this can be built over other database and can vary widely in the deployment.
+The host KV data storage support adding/appending and lookup. `recsys_kvcache_manager` integrates `native` backend using pinned host memory only, and `flexkv` backend based on [`FlexKV`](https://github.com/taco-project/FlexKV/tree/main).
+
+For its API and usage, please see [README.md](../../../corelib/recsys_kvcache_manager/README.md).
 
 2. Asynchronous H2D transfer of host KV data 
 
 By using asynchronous data copy on the side CUDA stream, we overlap the host-to-device KV data transfer with HSTU computation layer-wise, to reduce the latency of HSTU inference.
-
+**Note** this feature is only enabled with `native` backend in the kvcache manager. 
 
 3. Optimization with CUDA graph
 
@@ -39,22 +41,6 @@ path/to/model_archive
         └── weights/{emb_layer_module_name}.nve    # NVE weight data (LinearUVM)
 ```
 Start with the [guide](./GUIDE_TO_RUN_CPP_INFERENCE_DEMO.md) for HSTU Python to C++ inference example.
-
-
-## KVCache Manager for Inference
-
-### KVCache Usage
-
-1. KVCache Manager supports the following operations:
-* `prepare_kvcache_async`: to trigger the allocation for required KV cache pages, kvcache_metadata computation, and onload the KV data from Host KV storage to GPU KVCache in background.
-* `prepare_kvcache_wait`: to wait the new KV cache pages allocation and kvcache_metadata computation.
-* `paged_kvcache_ops.append_kvcache`: the cuda kernel to copy the `K, V` values into the allocated cache pages.
-* `offload_kvcache`: to trigger offloading the KV data from GPU KVCache to Host KV storage in background.
-* `evict_kv_cache`: to evict all the KV data in the KVCache Manager.
-
-2. Currently, the KVCache manager need to be accessed from a single inference stream. No multi-stream support.
-
-3. The KVCache manager accepts full user history sequence as input. The removal of cached tokens in sequences is completed within inference forward pass.
 
 
 ## How to Setup

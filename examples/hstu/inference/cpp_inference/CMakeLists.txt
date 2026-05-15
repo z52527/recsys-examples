@@ -17,7 +17,7 @@ find_library(FBGEMM_HSTU_EXPERIMENTAL_LIB fbgemm_gpu_experimental_hstu
   PATH_SUFFIXES lib lib64
   NO_DEFAULT_PATH)
 
-find_library(NVE_TORCH_OPS_LIB nve_torch_ops
+find_library(NVE_TORCH_OPS_LIB nve-torch-ops
   PATHS /usr/local/lib/python3.12/dist-packages/pynve
   PATH_SUFFIXES lib lib64
   NO_DEFAULT_PATH REQUIRED)
@@ -54,9 +54,9 @@ target_compile_definitions(inference_hstu_gr_ranking_exported_model PRIVATE HSTU
 
 target_include_directories(inference_hstu_gr_ranking_exported_model PRIVATE
     ${TORCH_INCLUDE_DIRS}
-    /workspace/nve
-    /workspace/nve/include
-    /workspace/nve/third_party/json/include/
+    /workspace/deps/nve
+    /workspace/deps/nve/include
+    /workspace/deps/nve/third_party/json/include/
 )
 
 # If fbgemm_gpu is found, link against it to register fbgemm operators

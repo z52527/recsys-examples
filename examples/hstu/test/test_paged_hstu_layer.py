@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import itertools
+import math
 import sys
 from typing import List, Optional
 
@@ -20,17 +21,21 @@ sys.path.append("../commons/utils")
 import pytest
 import torch
 import torch.nn.functional as F
-from configs import (
-    InferenceHSTUConfig,
-    KVCacheMetadata,
-    copy_kvcache_metadata,
-    get_kvcache_config,
-    get_kvcache_metadata_buffer,
-)
+from configs import InferenceHSTUConfig
 from hstu_assert_close import assert_hstu_close
+from kvcache_cpp import KVOnloadHandle
 from modules.hstu_block_inference import HSTUBlockInference
 from modules.jagged_data import JaggedData
-from paged_kvcache_ops import KVOffloadHandle, KVOnloadHandle
+from recsys_kvcache_manager.host_kvstorage_manager import (
+    HostKVTaskHandle,
+    HostKVTaskStatus,
+)
+from recsys_kvcache_manager.kvcache_config import get_kvcache_config
+from recsys_kvcache_manager.kvcache_metadata import (
+    KVCacheMetadata,
+    copy_kvcache_metadata,
+    get_kvcache_metadata_buffer,
+)
 from test_paged_hstu_attn_kernel import _hstu_attention_maybe_from_cache
 
 
@@ -494,25 +499,31 @@ def generate_test_input_data(
         has_interleaved_action=True,
         scaling_seqlen=scaling_seqlen,
     )
-
-    kvcache_metadata = KVCacheMetadata(
-        # paged cache metadata
-        kv_indices=torch.tensor(kv_page_indices, dtype=torch.int32, device=device),
-        kv_indptr=kv_page_indptr,
-        kv_last_page_len=torch.tensor(
-            kv_last_page_len, dtype=torch.int32, device=device
+    kvcache_metadata = get_kvcache_metadata_buffer(
+        batch_size=batchsize,
+        num_new_tokens=new_history_offsets[-1].item(),
+        num_pages=len(kv_page_indices),
+        page_ids_gpu_buffer=torch.tensor(
+            kv_page_indices, dtype=torch.int32, device=device
         ),
-        total_history_lengths=None,
-        total_history_offsets=total_history_offsets.cuda(),
-        # appending metadata
-        batch_indices=batch_indices,
-        position=position,
-        new_history_nnz=new_history_offsets[-1].item(),
-        new_history_nnz_cuda=torch.tensor(
-            [new_history_offsets[-1].item()], dtype=torch.int32, device=device
-        ),
-        kv_onload_handle=KVOnloadHandle(num_layers),
-        kv_offload_handle=KVOffloadHandle(),
+        device=torch.cuda.current_device(),
+    )
+    kvcache_metadata.kv_indptr.copy_(kv_page_indptr)
+    kvcache_metadata.kv_last_page_len.copy_(
+        torch.tensor(kv_last_page_len, dtype=torch.int32, device=device)
+    )
+    kvcache_metadata.total_history_offsets.copy_(total_history_offsets.cuda())
+    kvcache_metadata.batch_indices.copy_(batch_indices)
+    kvcache_metadata.position.copy_(position)
+    kvcache_metadata.new_history_nnz = new_history_offsets[-1].item()
+    kvcache_metadata.new_history_nnz_cuda.copy_(
+        torch.tensor([new_history_offsets[-1].item()], dtype=torch.int32, device=device)
+    )
+    kvcache_metadata.kv_onload_handle = HostKVTaskHandle(
+        backend="native",
+        user_ids=torch.empty(0, dtype=torch.int64),  # dummy user_ids.
+        handle=KVOnloadHandle(num_layers),
+        status=HostKVTaskStatus.LAUNCHED,
     )
 
     return (
@@ -539,11 +550,24 @@ class TestModule:
             max_seq_len=4096,
             bf16=True,
         )
-        self.kvcache_config = get_kvcache_config(
-            blocks_in_primary_pool=10240,
-            page_size=32,
-            offload_chunksize=1024,
-        )
+        kvcache_args = {
+            "num_layers": hstu_config.num_layers,
+            "num_heads": hstu_config.num_heads,
+            "head_dim": hstu_config.head_dim,
+            "page_size": 32,
+            "offload_chunksize": 1024,
+            "num_primary_cache_pages": 10240,
+            "num_buffer_pages": 0,
+            "host_capacity_per_layer": 0,
+            "max_batch_size": hstu_config.max_batch_size,
+            "max_seq_len": math.ceil(hstu_config.max_seq_len * 2 / 32) * 32,
+            "dtype": torch.bfloat16,
+            "device": torch.cuda.current_device(),
+            "host_kvstorage_backend": "native",
+            "offload_timeout_ms": 0.0,
+            "offload_mode": "lazy",
+        }
+        self.kvcache_config = get_kvcache_config(**kvcache_args)
         device = torch.cuda.current_device()
 
         self.embedding_dim = hstu_config.hidden_size
@@ -554,17 +578,15 @@ class TestModule:
         self.max_batchsize = hstu_config.max_batch_size
         self.max_len_per_seq = hstu_config.max_seq_len
 
-        self.hstu_block_inference = HSTUBlockInference(
-            hstu_config, kvcache_config=self.kvcache_config
-        )
+        self.hstu_block_inference = HSTUBlockInference(hstu_config)
         self.hstu_block_inference.bfloat16()
 
         self.page_size = self.kvcache_config.page_size
-        self.reserved_pages = (
-            self.max_batchsize * self.max_len_per_seq // self.page_size
+        self.reserved_pages = self.max_batchsize * int(
+            math.ceil(self.max_len_per_seq / self.page_size)
         )
         self.total_blocks = (
-            self.kvcache_config.blocks_in_primary_pool + self.reserved_pages
+            self.kvcache_config.num_primary_cache_pages + self.reserved_pages
         )
         self.kvcache_tables = [
             torch.empty(
@@ -584,14 +606,22 @@ class TestModule:
         self.static_jagged_metadata = get_jagged_metadata_buffer(
             self.max_batchsize, self.max_len_per_seq
         )
+        ((self.kvcache_config.max_seq_len + 31)) // 32 * 32
         self.static_kvcache_metadata = get_kvcache_metadata_buffer(
-            hstu_config, self.kvcache_config
+            batch_size=self.kvcache_config.max_batch_size,
+            num_new_tokens=self.kvcache_config.max_seq_len,
+            num_pages=self.reserved_pages,
+            device=torch.cuda.current_device(),
         )
         self.static_kvcache_metadata.kv_cache_table = [
             self.kvcache_tables[layer_idx] for layer_idx in range(self.num_layers)
         ]
-        self.static_kvcache_metadata.kv_onload_handle = KVOnloadHandle(self.num_layers)
-        self.static_kvcache_metadata.kv_offload_handle = KVOffloadHandle()
+        self.static_kvcache_metadata.kv_onload_handle = HostKVTaskHandle(
+            backend="native",
+            user_ids=torch.empty(0, dtype=torch.int64),  # dummy user_ids.
+            handle=KVOnloadHandle(self.num_layers),
+            status=HostKVTaskStatus.LAUNCHED,
+        )
 
         self.hstu_block_inference.set_cudagraph(
             self.max_batchsize,
@@ -610,15 +640,19 @@ class TestModule:
         if onload_num_pages == 0:
             return
         with torch.cuda.stream(self.side_stream):
-            kvcache_metadata.kv_onload_handle.reset()
+            if kvcache_metadata.kv_onload_handle.handle is not None:
+                del kvcache_metadata.kv_onload_handle.handle
+                kvcache_metadata.kv_onload_handle.handle = KVOnloadHandle(
+                    self.num_layers
+                )
             for layer_idx in range(self.num_layers):
                 kvcache_metadata.kv_cache_table[layer_idx][
-                    self.kvcache_config.blocks_in_primary_pool : self.kvcache_config.blocks_in_primary_pool
+                    self.kvcache_config.num_primary_cache_pages : self.kvcache_config.num_primary_cache_pages
                     + onload_num_pages
                 ].copy_(
                     host_kv_data[layer_idx, :onload_num_pages, ...], non_blocking=True
                 )
-                kvcache_metadata.kv_onload_handle.complete_host(layer_idx)
+                kvcache_metadata.kv_onload_handle.stream_wait_layer(layer_idx)
 
     def get_paged_hstu_output_with_kvcache(
         self,
@@ -704,12 +738,15 @@ class TestModule:
             self.page_size,
             self.kvcache_config.offload_chunksize,
             self.kvcache_tables,
-            self.kvcache_config.blocks_in_primary_pool,
+            self.kvcache_config.num_primary_cache_pages,
             self.dtype,
             scaling_seqlen,
         )
 
-        kvcache_metadata.total_history_offsets += jagged_metadata.num_candidates_offsets
+        kvcache_metadata.kv_seqlen_offsets = (
+            kvcache_metadata.total_history_offsets
+            + jagged_metadata.num_candidates_offsets
+        )
         copy_jagged_metadata(self.static_jagged_metadata, jagged_metadata)
         copy_kvcache_metadata(self.static_kvcache_metadata, kvcache_metadata)
         output = self.get_paged_hstu_output_with_kvcache(

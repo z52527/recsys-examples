@@ -43,7 +43,6 @@ setup(
         CUDAExtension(
             name="paged_kvcache_ops",
             sources=[
-                "ops/cuda_ops/csrc/kvcache_manager_impl.cpp",
                 "ops/cuda_ops/csrc/paged_kvcache_ops_cuda.cpp",
                 "ops/cuda_ops/csrc/paged_kvcache_ops_kernel.cu",
             ],

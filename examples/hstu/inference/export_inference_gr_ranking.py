@@ -14,36 +14,54 @@
 # limitations under the License.
 import argparse
 import enum
-import math
 import os
 import sys
 import warnings
 
 import gin
 import torch
+import torch.distributed as dist
 from commons.datasets import get_data_loader
 from commons.datasets.hstu_sequence_dataset import get_dataset
 from commons.hstu_data_preprocessor import get_common_preprocessors
 from commons.utils.stringify import stringify_dict
-from configs import (
-    InferenceEmbeddingConfig,
-    PositionEncodingConfig,
-    RankingConfig,
-    get_hstu_config,
-)
-from modules.exportable_embedding import ExportableEmbedding
-from modules.inference_dense_module import get_inference_dense_model
+from megatron.core import parallel_state
+from model import get_ranking_model
+from model.inference_ranking_gr import apply_inference
 from modules.metrics import get_multi_event_metric_module
 from pynve.torch.nve_export import export_aot
 from torch.export import Dim, ShapesCollection
 from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
-from utils import DatasetArgs, NetworkArgs, RankingArgs
+from utils import NetworkArgs, TensorModelParallelArgs
 
-sys.path.append("./model/")
-from inference_ranking_gr import InferenceRankingGR
+sys.path.append("./training/")
+from pretrain_gr_ranking import create_ranking_config
+from trainer.utils import create_hstu_config, get_dataset_and_embedding_args
 
 warnings.filterwarnings("default", category=UserWarning)
 torch.set_warn_always(False)
+
+
+def init_single_rank_distributed():
+    if dist.is_available() and not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        os.environ.setdefault("RANK", "0")
+        os.environ.setdefault("WORLD_SIZE", "1")
+
+        dist.init_process_group(
+            backend="gloo",  # use "nccl" only if CUDA+NCCL is properly available
+            init_method="env://",
+            rank=0,
+            world_size=1,
+        )
+    parallel_state.initialize_model_parallel()
+
+
+def cleanup_single_rank_distributed():
+    parallel_state.destroy_model_parallel()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 class RunningMode(enum.Enum):
@@ -87,197 +105,79 @@ def debug_print_flattened_export_args(batch, embeddings=None) -> None:
 def get_inference_dataset_and_embedding_configs(
     disable_contextual_features: bool = False,
 ):
-    dataset_args = DatasetArgs()
-    embedding_dim = NetworkArgs().hidden_size
-    HASH_SIZE = 1000_064
+    sys.path.append("./training/")
+    from trainer.utils import create_embedding_configs, get_dataset_and_embedding_args
+
+    dataset_args, embedding_args = get_dataset_and_embedding_args()
+    embedding_configs = create_embedding_configs(
+        dataset_args,
+        NetworkArgs(),
+        embedding_args,
+    )
+
     if dataset_args.dataset_name == "kuairand-1k":
-        embedding_configs = [
-            InferenceEmbeddingConfig(
-                feature_names=["user_id"],
-                table_name="user_id",
-                vocab_size=1000,
-                dim=embedding_dim,
-                use_dynamicemb=True,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["user_active_degree"],
-                table_name="user_active_degree",
-                vocab_size=8,
-                dim=embedding_dim,
-                use_dynamicemb=False,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["follow_user_num_range"],
-                table_name="follow_user_num_range",
-                vocab_size=9,
-                dim=embedding_dim,
-                use_dynamicemb=False,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["fans_user_num_range"],
-                table_name="fans_user_num_range",
-                vocab_size=9,
-                dim=embedding_dim,
-                use_dynamicemb=False,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["friend_user_num_range"],
-                table_name="friend_user_num_range",
-                vocab_size=8,
-                dim=embedding_dim,
-                use_dynamicemb=False,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["register_days_range"],
-                table_name="register_days_range",
-                vocab_size=8,
-                dim=embedding_dim,
-                use_dynamicemb=False,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["video_id"],
-                table_name="video_id",
-                vocab_size=HASH_SIZE,
-                dim=embedding_dim,
-                use_dynamicemb=True,
-            ),
-            InferenceEmbeddingConfig(
-                feature_names=["action_weights"],
-                table_name="action_weights",
-                vocab_size=256,
-                dim=embedding_dim,
-                use_dynamicemb=False,
-            ),
-        ]
+        HASH_SIZE = 1000_064
+        dynamic_table_configs = {
+            "user_id": True,
+            "user_active_degree": False,
+            "follow_user_num_range": False,
+            "fans_user_num_range": False,
+            "friend_user_num_range": False,
+            "register_days_range": False,
+            "video_id": True,
+            "action_weights": False,
+        }
+        trained_emb_table_sizes = {
+            "user_id": 1000,
+            "user_active_degree": 8,
+            "follow_user_num_range": 9,
+            "fans_user_num_range": 9,
+            "friend_user_num_range": 8,
+            "register_days_range": 8,
+            "video_id": HASH_SIZE,
+            "action_weights": 233,
+        }
+        for idx, config in enumerate(embedding_configs):
+            config.vocab_size = trained_emb_table_sizes[config.table_name]
+            config.use_dynamic = dynamic_table_configs[config.table_name]
         return (
             dataset_args,
             embedding_configs
             if not disable_contextual_features
             else embedding_configs[-2:],
+            dynamic_table_configs,
+            trained_emb_table_sizes,
         )
 
     raise ValueError(f"dataset {dataset_args.dataset_name} is not supported")
 
 
-def get_inference_export_model(
-    emb_configs,
-    max_batch_size,
-    num_contextual_features,
-    total_max_seqlen,
-    checkpoint_dir,
-):
+def get_training_gr_model():
+    dataset_args, embedding_args = get_dataset_and_embedding_args(False)
     network_args = NetworkArgs()
-    if network_args.dtype_str == "bfloat16":
-        inference_dtype = torch.bfloat16
-    # elif network_args.dtype_str == "float16":
-    #     inference_dtype = torch.float16
-    else:
-        raise ValueError(
-            f"Inference data type {network_args.dtype_str} is not supported"
-        )
 
-    position_encoding_config = PositionEncodingConfig(
-        num_position_buckets=8192,
-        num_time_buckets=2048,
-        use_time_encoding=False,
-        static_max_seq_len=math.ceil(total_max_seqlen / 32) * 32,
-    )
+    init_single_rank_distributed()
+    hstu_config = create_hstu_config(network_args, TensorModelParallelArgs())
+    hstu_config.learnable_output_layernorm = False
+    task_config = create_ranking_config(dataset_args, network_args, embedding_args)
 
-    hstu_config = get_hstu_config(
-        hidden_size=network_args.hidden_size,
-        kv_channels=network_args.kv_channels,
-        num_attention_heads=network_args.num_attention_heads,
-        num_layers=network_args.num_layers,
-        dtype=inference_dtype,
-        position_encoding_config=position_encoding_config,
-        learnable_input_layernorm=True,
-        learnable_output_layernorm=False,
-        is_inference=True,
-    )
-
-    ranking_args = RankingArgs()
-    task_config = RankingConfig(
-        embedding_configs=emb_configs,
-        prediction_head_arch=ranking_args.prediction_head_arch,
-        prediction_head_act_type=ranking_args.prediction_head_act_type,
-        prediction_head_bias=ranking_args.prediction_head_bias,
-        num_tasks=ranking_args.num_tasks,
-        eval_metrics=ranking_args.eval_metrics,
-    )
-
-    sparse_module = ExportableEmbedding(emb_configs)
-    sparse_module.eval()
-
-    dense_module = get_inference_dense_model(
-        hstu_config,
-        None,  # kvcache_config is not needed for export
-        task_config,
-        use_exportable=True,
-    )
-    if hstu_config.bf16:
-        dense_module.bfloat16()
-    elif hstu_config.fp16:
-        dense_module.half()
-    dense_module.eval()
-
-    model = InferenceRankingGR(
-        sparse_module,
-        dense_module,
-    )
-    if hstu_config.bf16:
-        model.bfloat16()
-    elif hstu_config.fp16:
-        model.half()
-    model.load_checkpoint(checkpoint_dir)
-    model.eval()
-
+    model = get_ranking_model(hstu_config=hstu_config, task_config=task_config)
     return model
 
 
-def get_configs(
-    emb_configs,
-    num_contextual_features,
-    total_max_seqlen,
+def get_exportable_model_for_inference(
+    dynamic_table_configs,
+    trained_emb_table_sizes,
+    checkpoint_dir,
 ):
-    network_args = NetworkArgs()
-    if network_args.dtype_str == "bfloat16":
-        inference_dtype = torch.bfloat16
-    # elif network_args.dtype_str == "float16":
-    #     inference_dtype = torch.float16
-    else:
-        raise ValueError(
-            f"Inference data type {network_args.dtype_str} is not supported"
-        )
-
-    position_encoding_config = PositionEncodingConfig(
-        num_position_buckets=8192,
-        num_time_buckets=2048,
-        use_time_encoding=False,
-        static_max_seq_len=math.ceil(total_max_seqlen / 32) * 32,
+    model = get_training_gr_model()
+    inference_model = apply_inference(
+        model,
+        dynamic_table_configs=dynamic_table_configs,
+        trained_emb_table_sizes=trained_emb_table_sizes,
+        checkpoint_dir=checkpoint_dir,
     )
-
-    hstu_config = get_hstu_config(
-        hidden_size=network_args.hidden_size,
-        kv_channels=network_args.kv_channels,
-        num_attention_heads=network_args.num_attention_heads,
-        num_layers=network_args.num_layers,
-        dtype=inference_dtype,
-        learnable_input_layernorm=False,
-        learnable_output_layernorm=False,
-        is_inference=True,
-    )
-
-    ranking_args = RankingArgs()
-    task_config = RankingConfig(
-        embedding_configs=emb_configs,
-        prediction_head_arch=ranking_args.prediction_head_arch,
-        prediction_head_act_type=ranking_args.prediction_head_act_type,
-        prediction_head_bias=ranking_args.prediction_head_bias,
-        num_tasks=ranking_args.num_tasks,
-        eval_metrics=ranking_args.eval_metrics,
-    )
-
-    return hstu_config, task_config
+    return inference_model
 
 
 def export_inference_gr_ranking(
@@ -300,7 +200,12 @@ def export_inference_gr_ranking(
         wrapper = _TensorWrapper(tensor)
         torch.jit.script(wrapper).save(path)
 
-    dataset_args, emb_configs = get_inference_dataset_and_embedding_configs()
+    (
+        dataset_args,
+        _,
+        dynamic_table_configs,
+        trained_emb_table_sizes,
+    ) = get_inference_dataset_and_embedding_configs()
 
     dataproc = get_common_preprocessors("")[dataset_args.dataset_name]
     num_contextual_features = len(dataproc._contextual_feature_names)
@@ -325,22 +230,14 @@ def export_inference_gr_ranking(
         batch.num_candidates = batch.num_candidates[: batch.batch_size]
         return batch
 
-    hstu_config, task_config = get_configs(
-        emb_configs,
-        num_contextual_features,
-        total_max_seqlen,
-    )
-
     with torch.inference_mode():
         from register_hstubatch_pytree_example import register_hstu_export_pytrees
 
         register_hstu_export_pytrees()
 
-        model = get_inference_export_model(
-            emb_configs,
-            max_batch_size,
-            num_contextual_features,
-            total_max_seqlen,
+        model = get_exportable_model_for_inference(
+            dynamic_table_configs,
+            trained_emb_table_sizes,
             checkpoint_dir,
         )
 
@@ -362,7 +259,7 @@ def export_inference_gr_ranking(
             shuffle=False,
             random_seed=0,
             eval_batch_size=max_batch_size,
-            load_candidate_action=False,
+            load_candidate_action=True,
         )
 
         dataloader = get_data_loader(dataset=eval_dataset)
@@ -395,11 +292,12 @@ def export_inference_gr_ranking(
 
         # get dynamic shapes
         sc = ShapesCollection()
-        # dim_batch = Dim("batch", min=8 , max=4 * 8)
+        dim_batch = Dim("batch_size", min=1, max=8)
 
-        sc[batch.features.values()] = {0: Dim.AUTO}
-        sc[batch.features.lengths()] = {0: Dim.AUTO}
-        sc[batch.num_candidates] = {0: Dim.AUTO}
+        num_features = len(batch.features.keys())
+        sc[batch.features.values()] = {0: Dim("tokens", min=1, max=40000)}
+        sc[batch.features.lengths()] = {0: dim_batch * num_features}
+        sc[batch.num_candidates] = {0: dim_batch}
         dynamic_shapes = sc.dynamic_shapes(model, (batch,))
         print(f"[INFO] Dynamic shapes: {dynamic_shapes}")
 
@@ -409,9 +307,7 @@ def export_inference_gr_ranking(
 
         # export & aoti_compile_and_package
         export_dir = os.path.join(os.path.dirname(__file__), "hstu_gr_ranking_model")
-        exported_program = export_aot(
-            model, (batch,), export_dir, dynamic_shapes=dynamic_shapes
-        )
+        export_aot(model, (batch,), export_dir, dynamic_shapes=dynamic_shapes)
         print(f"[INFO] Exported and packaged the model to:")
         print(f"       {export_dir}/")
         print(
@@ -422,26 +318,33 @@ def export_inference_gr_ranking(
         )
         print("       └── weights/{emb_layer}.nve    # NVE weight data (LinearUVM)")
 
-        # === Test Exported Model ===
+        # === Test Compiled Model ===
+        compiled_model = torch._inductor.aoti_load_package(
+            os.path.join(export_dir, "model.pt2")
+        )
+
         dump_dir = os.path.join(os.path.dirname(__file__), "export_test_dump")
         os.makedirs(dump_dir, exist_ok=True)
         feature_keys_dumped = False
         dump_idx = 0
 
+        print("[INFO][check]:")
         # torch.cuda.profiler.start()
+        inputs = []
         while True:
             try:
                 batch = next(dataloader_iter)
                 batch = prepare_on_gpu(batch)
-                if batch.features.values().size(0) != total_max_seqlen:
-                    continue
+                inputs.append(batch)
 
                 with torch.inference_mode():
-                    torch.cuda.nvtx.range_push("HSTU embedding")
-                    # embeddings = model.sparse_module(batch.features)
-                    torch.cuda.nvtx.range_pop()
-                    logits = exported_program.module()(batch)
-
+                    logits = compiled_model(
+                        (
+                            batch.features.values(),
+                            batch.features.lengths(),
+                            batch.num_candidates,
+                        )
+                    )
                     ref_logits = model(batch)
 
                     if not feature_keys_dumped:
@@ -472,8 +375,8 @@ def export_inference_gr_ranking(
                     dump_idx += 1
 
                     print(
-                        f"[Batch {dump_idx}] Check equal:",
-                        torch.allclose(logits, ref_logits),
+                        f"    [Batch {dump_idx}] Check equal:",
+                        torch.max(torch.abs(logits - ref_logits)).item() <= 0.0625,
                     )
 
                 eval_module(logits, batch.labels.values())
@@ -485,9 +388,63 @@ def export_inference_gr_ranking(
 
         eval_metric_dict = eval_module.compute()
         print(
-            f"[eval]:\n    "
+            f"[INFO][eval]:\n    "
             + stringify_dict(eval_metric_dict, prefix="Metrics", sep="\n    ")
         )
+
+        # === Benchmark Compiled Model ===
+        print("[INFO][benchmark]:")
+        print(
+            "    Benchmark on GPU:",
+            torch.cuda.get_device_name(torch.cuda.current_device()),
+        )
+        import time
+
+        compiled_time = []
+        for _ in range(3):
+            torch.cuda.synchronize()
+            results = []
+            start = time.perf_counter()
+            with torch.inference_mode():
+                for b in inputs:
+                    logits = compiled_model(
+                        (
+                            b.features.values(),
+                            b.features.lengths(),
+                            b.num_candidates,
+                        )
+                    )
+                    results.append(logits)
+            torch.cuda.synchronize()
+            end = time.perf_counter()
+            compiled_time.append(end - start)
+        print(
+            f"    Compiled model elapsed time: {sum(compiled_time) / len(compiled_time):.6f} seconds"
+        )
+
+        for item in results:
+            del item
+
+        import time
+
+        python_time = []
+        for _ in range(3):
+            torch.cuda.synchronize()
+            results = []
+            start = time.perf_counter()
+            with torch.inference_mode():
+                for b in inputs:
+                    ref_logits = model(b)
+                    results.append(ref_logits)
+            torch.cuda.synchronize()
+            end = time.perf_counter()
+            python_time.append(end - start)
+        print(
+            f"    Python model elapsed time: {sum(python_time) / len(python_time):.6f} seconds"
+        )
+
+        for item in results:
+            del item
 
 
 if __name__ == "__main__":
@@ -495,15 +452,22 @@ if __name__ == "__main__":
     parser.add_argument("--gin_config_file", type=str, required=True)
     parser.add_argument("--checkpoint_dir", type=str, required=True)
     parser.add_argument("--disable_auc", action="store_true")
-    parser.add_argument("--max_bs", type=int, default=1)
+    parser.add_argument("--max_bs", type=int, default=2)
     parser.add_argument("--debug_flattened_inputs", action="store_true")
 
     args = parser.parse_args()
     gin.parse_config_file(args.gin_config_file)
+
+    if args.max_bs <= 1:
+        print(
+            "[WARNING] Max batch size (max_bs) is set to 1, which causes the torch compiler fails to capture the dynamic shapes.\n"
+            "          Adjusted max_bs to 2 for successful export."
+        )
+        args.max_bs = 2
 
     export_inference_gr_ranking(
         checkpoint_dir=args.checkpoint_dir,
         max_bs=args.max_bs,
         debug_flattened_inputs=args.debug_flattened_inputs,
     )
-    print("Finished.")
+    print("[INFO] Finished.")

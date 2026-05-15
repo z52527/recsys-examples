@@ -27,8 +27,6 @@
 #include <torch/extension.h>
 #include <torch/serialize/tensor.h>
 
-#include "kvcache_manager_impl.h"
-
 template <typename DType, typename IdType>
 cudaError_t AppendPagedKVCache(DType* k_data,
                                DType* v_data,
@@ -270,60 +268,4 @@ void gather_paged_kv_cache_all_layers(uint16_t *gather_kv_gpu_buffer,
 PYBIND11_MODULE(paged_kvcache_ops, m) {
   m.def("append_kvcache", &append_paged_kv_cache, "append paged kv cache on GPU", py::call_guard<py::gil_scoped_release>());
   m.def("gather_kvcache", &gather_paged_kv_cache, "gather paged kv cache on GPU", py::call_guard<py::gil_scoped_release>());
-
-  py::class_<kvcache::HostKVStorageImpl>(m, "HostKVStorageImpl")
-    .def(py::init<int, int, int, int, int64_t>(), 
-         py::arg("num_layers"),
-         py::arg("num_kv_heads"),
-         py::arg("kv_headdim"),
-         py::arg("num_tokens_per_page"),
-         py::arg("num_tokens_per_chunk"))
-    .def("get_kvdata_tensor", &kvcache::HostKVStorageImpl::get_kvdata_tensor)
-    .def("init_random_kvdata", &kvcache::HostKVStorageImpl::init_random_kvdata)
-  ;
-
-  py::class_<kvcache::GPUKVCacheMangerImpl>(m, "GPUKVCacheMangerImpl")
-    .def(py::init<int, int, int, int, int, int, int, int, int, int, at::Tensor, kvcache::HostKVStorageImpl&, size_t, int, int, int, bool>(),
-         py::arg("num_layers"),
-         py::arg("num_kv_heads"),
-         py::arg("kv_headdim"),
-         py::arg("num_tokens_per_page"),
-         py::arg("num_primary_cache_pages"),
-         py::arg("num_onload_buffer_pages"),
-         py::arg("num_reserved_buffer_pages"),
-         py::arg("num_tokens_per_chunk"), 
-         py::arg("max_num_sequences"),
-         py::arg("max_sequence_length"),
-         py::arg("cache_table"),
-         py::arg("host_kv_mgr"),
-         py::arg("max_queued_offload_tokens"),
-         py::arg("num_onload_buffer_chunks") = 1,
-         py::arg("num_offload_buffer_chunks") = 8,
-         py::arg("num_memcpy_workers") = 4,
-         py::arg("enable_nvcomp") = false)
-    .def("get_total_cache_length", &kvcache::GPUKVCacheMangerImpl::get_total_cache_length)
-    .def("evict_all", &kvcache::GPUKVCacheMangerImpl::evict_all)
-    .def("onload_kvcache", &kvcache::GPUKVCacheMangerImpl::onload_kvcache, py::call_guard<py::gil_scoped_release>())
-    .def("offload_kvcache", &kvcache::GPUKVCacheMangerImpl::offload_kvcache, py::call_guard<py::gil_scoped_release>())
-    .def("is_busy_offloading", &kvcache::GPUKVCacheMangerImpl::is_busy_offloading)
-    .def("init_random_offload_status", &kvcache::GPUKVCacheMangerImpl::init_random_offload_status)
-  ;
-
-  py::class_<kvcache::KVOnloadHandle>(m, "KVOnloadHandle")
-    .def(py::init<>())
-    .def(py::init<int>(), py::arg("num_layers"))
-    // .def("wait", &kvcache::KVOnloadHandle::wait)
-    .def("complete_host", static_cast<void (kvcache::KVOnloadHandle::*)(int)>(&kvcache::KVOnloadHandle::complete_host))
-    .def("wait_host", &kvcache::KVOnloadHandle::wait_host)
-    .def("reset", &kvcache::KVOnloadHandle::reset)
-  ;
-
-  py::class_<kvcache::KVOffloadHandle>(m, "KVOffloadHandle")
-    .def(py::init<>())
-    .def(py::init<int, kvcache::GPUKVCacheMangerImpl&, bool>(), py::arg("num_layers"), py::arg("gpu_kv_mgr"), py::arg("has_offload"))
-    .def("mark_ready", &kvcache::KVOffloadHandle::mark_ready)
-    .def("set_no_offload", &kvcache::KVOffloadHandle::set_no_offload)
-  ;
-
-  m.def("prepare_kvcache", &kvcache::prepare_kvcache, "prepare_kvcache", py::call_guard<py::gil_scoped_release>());
 }

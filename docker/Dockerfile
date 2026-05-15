@@ -3,16 +3,16 @@ ARG DEVEL_IMAGE=devel
 
 FROM ${BASE_IMAGE} AS devel
 ARG TARGETPLATFORM
-ARG INFERENCEBUILD
 ARG TRITONSERVER_BUILD
 
 WORKDIR /workspace/deps
 
 # -- Layer 1: system setup, arch symlinks, tritonserver deps ---
-RUN if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
+RUN apt-get update -y --fix-missing && apt-get install -y liburing-dev libxxhash-dev libssl-dev && \
+    if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
       ln /bin/python3 /bin/python && \
-      apt-get update -y --fix-missing && apt-get install -y cmake patchelf && \
-      pip3 install pandas rich cloudpickle psutil && \
+      apt-get install -y cmake patchelf && \
+      pip3 install pandas rich cloudpickle psutil cython && \
       pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130; \
     fi && \
     ARCH=$([ "${TARGETPLATFORM}" = "linux/arm64" ] && echo "aarch64" || echo "x86_64") && \
@@ -36,25 +36,17 @@ RUN if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
     apt autoremove -y && apt clean && rm -rf /var/lib/apt/lists/*
 
 # -- Layer 2: pip dependencies + Megatron-LM ---
-# Megatron-LM core_v0.13.1: contains d9608004f which gates
-# ChainedOptimizer.count_zeros_fp32 on log_num_zeros_in_grad (~4 ms/step
-# saving on HSTU bf16); 0.12.x always pays the cost.
-# nvidia-cutlass-dsl: --no-deps + --no-cache-dir + 3 explicit subpackages
-# avoids a poisoned base-image pip cache wheel; keep the re-pins on the
-# bundled install too.
-RUN pip uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-cu13 || true && \
-    rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl* && \
-    pip install --no-cache-dir --no-deps \
-        'nvidia-cutlass-dsl==4.4.1' \
-        'nvidia-cutlass-dsl-libs-base==4.4.1' \
-        'nvidia-cutlass-dsl-libs-cu13==4.4.1' && \
-    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace" && \
-    git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
+# Bump from core_v0.12.1 -> core_v0.13.1 to pick up
+# d9608004f "Add an option to skip counting zeros in grad of ChainedOptimizer"
+# (gates ChainedOptimizer.count_zeros on log_num_zeros_in_grad). 0.12.x release
+# line still ships the unconditional count_zeros_fp32 call inside
+# ChainedOptimizer.step, which costs ~4 ms / step on HSTU bf16 even when the
+# stat is unused. Earliest tag containing the fix is core_v0.13.0; using 0.13.1
+# (latest 0.13.x patch) for stability.
+RUN git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
     pip install --no-deps -e ./megatron-lm && \
-    pip install --no-cache-dir torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers \
-        cloudpickle triton==3.6.0 \
-        'nvidia-cutlass-dsl==4.4.1' 'nvidia-cutlass-dsl-libs-base==4.4.1' 'nvidia-cutlass-dsl-libs-cu13==4.4.1' \
-        'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.6' torch-c-dlpack-ext pre-commit
+    pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers expiring_dict \
+    cloudpickle triton==3.6.0 nvidia-cutlass-dsl==4.3.0 --no-cache pre-commit
 
 # -- Layer 3: FBGEMM (long build, own layer for caching) ---
 RUN pip install --no-cache-dir setuptools-git-versioning scikit-build && \
@@ -68,15 +60,27 @@ RUN pip install --no-deps tensordict orjson && \
     cd torchrec && \
     pip install --no-deps .
 
-# flash_attn.cute is shipped as a standalone subpackage (flash-attn-cute)
-# in jiayus-nvidia/flash-attention; install only that to skip the 30+ min
-# CUDA build the root package triggers. Pin via SHA for reproducibility.
+# -- Layer 5: FlashAttention --
 ARG FLASH_ATTN_ARBITRARY_MASK_COMMIT=b56db721d65afadd8cfe154cd12e83693bf0aba3
-RUN git clone -b arbitrary_mask https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
+RUN git clone https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_ARBITRARY_MASK_COMMIT} && \
-    pip install --no-deps -e ./flash_attn/cute && \
-    python -c "from flash_attn.cute.interface import flash_attn_func"
+    pip install --no-deps --no-build-isolation -e ./flash_attn/cute
+
+# -- Layer 6, 7: FlexKV and NVE : both inference dependency --
+COPY third_party/FlexKV /workspace/deps/FlexKV
+RUN cd FlexKV && mkdir -p build && cd build && \
+    TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0" cmake .. && \
+    TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0" cmake --build . -j8 && \
+    cd .. && mkdir -p flexkv/lib && cp -P build/lib/*.so* flexkv/lib/ && \
+    MAX_JOBS=8 FLEXKV_DEBUG=0 TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0" python3 setup.py install && \
+    cd /tmp && python3 -c "from flexkv.kvmanager import KVManager; print('flexkv import ok')" && \
+    cd /workspace/deps && \
+    git clone --recursive https://github.com/NVIDIA/nv-embedding-cache.git nve && \
+    cd nve && git submodule update --init --recursive && \
+    cd third_party/ && git clone https://github.com/NVIDIA/NVTX.git NVTX && cd .. && \
+    TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0" PYNVE_WITH_TORCH_BINDINGS=1 PYNVE_DISABLE_AVX512=1 \
+    CPLUS_INCLUDE_PATH=$(realpath ./third_party/NVTX/c/include/):${CPLUS_INCLUDE_PATH} pip install --no-deps .
 
 # Install fbgemm_gpu_hstu (package: fbgemm_gpu_hstu, import: hstu) from submodule
 COPY third_party/FBGEMM /workspace/deps/fbgemm_hstu
@@ -97,10 +101,6 @@ ARG TRITONSERVER_BUILD
 WORKDIR /workspace/recsys-examples
 COPY . .
 
-# corelib/gr_decode_atten uses top-level imports (`from src.common ...`,
-# `from interface import beam_decode_attn`); put its root on PYTHONPATH.
-ENV PYTHONPATH=/workspace/recsys-examples/corelib/gr_decode_atten
-
 RUN cd /workspace/recsys-examples/corelib/dynamicemb && \
     python setup.py install && \
     cd /workspace/deps && rm -rf nvcomp && \
@@ -110,6 +110,8 @@ RUN cd /workspace/recsys-examples/corelib/dynamicemb && \
     rm nvcomp-linux-x86_64-5.1.0.21_cuda12-archive.tar.xz && \
     cd /workspace/recsys-examples/examples/commons && \
     TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0" python3 setup.py install && \
+    cd /workspace/recsys-examples/corelib/recsys_kvcache_manager && \
+    TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0" pip3 install --no-build-isolation . && \
     if [ "${TRITONSERVER_BUILD}" != "1" ]; then \
       rm -f /usr/lib/$(uname -m)-linux-gnu/libcuda.so.1 && \
       ln -s /usr/local/cuda-13.1/compat/lib.real/libcuda.so.1  /usr/lib/$(uname -m)-linux-gnu/libcuda.so.1 && \

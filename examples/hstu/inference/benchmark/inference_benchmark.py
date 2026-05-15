@@ -13,18 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import math
 import sys
 
 import torch
 from commons.datasets import get_data_loader
 from commons.datasets.hstu_batch import FeatureConfig
 from commons.datasets.random_inference_dataset import RandomInferenceDataset
-from configs import (
-    InferenceEmbeddingConfig,
-    RankingConfig,
-    get_inference_hstu_config,
-    get_kvcache_config,
-)
+from configs import InferenceEmbeddingConfig, RankingConfig, get_inference_hstu_config
+from recsys_kvcache_manager.kvcache_config import get_kvcache_config
 
 sys.path.append("./model/")
 from inference_ranking_gr import get_inference_ranking_gr
@@ -73,14 +70,30 @@ def run_ranking_gr_inference(disable_kvcache: bool):
         dtype=inference_dtype,
     )
 
-    _blocks_in_primary_pool = 10240
     _page_size = 32
     _offload_chunksize = 8192
-    kv_cache_config = get_kvcache_config(
-        blocks_in_primary_pool=_blocks_in_primary_pool,
-        page_size=_page_size,
-        offload_chunksize=_offload_chunksize,
+    _num_primary_cache_pages = 10240
+    host_capacity_per_layer = (
+        _num_primary_cache_pages * 2 * _page_size * (num_heads * head_dim) * 2
     )
+    kvcache_args = {
+        "num_layers": num_layers,
+        "num_heads": num_heads,
+        "head_dim": head_dim,
+        "page_size": _page_size,
+        "offload_chunksize": _offload_chunksize,
+        "num_primary_cache_pages": _num_primary_cache_pages,
+        "num_buffer_pages": 0,
+        "host_capacity_per_layer": host_capacity_per_layer,
+        "max_batch_size": max_batch_size,
+        "max_seq_len": math.ceil(max_seqlen / 32) * 32,
+        "dtype": torch.bfloat16,
+        "device": torch.cuda.current_device(),
+        "host_kvstorage_backend": "native",
+        "offload_timeout_ms": 100.0,
+        "offload_mode": "lazy",
+    }
+    kv_cache_config = get_kvcache_config(**kvcache_args)
     emb_configs = [
         InferenceEmbeddingConfig(
             feature_names=["context_feat", "item_feat"]

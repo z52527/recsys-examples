@@ -39,21 +39,22 @@ RUN if [ "${TRITONSERVER_BUILD}" = "1" ]; then \
 # Megatron-LM core_v0.13.1: contains d9608004f which gates
 # ChainedOptimizer.count_zeros_fp32 on log_num_zeros_in_grad (~4 ms/step
 # saving on HSTU bf16); 0.12.x always pays the cost.
-#
-# nvidia-cutlass-dsl: base image ships 4.3.0 with a .pth that survives
-# pip uninstall, so we rm -rf the tree before installing 4.4.x (which
-# adds ProxyKind / SharedSpace, required by flash_attn.cute). The final
-# `python -c "from cutlass.cute.arch ..."` fails the build immediately
-# if the upgrade ever stops taking effect.
+# nvidia-cutlass-dsl: --no-deps + --no-cache-dir + 3 explicit subpackages
+# avoids a poisoned base-image pip cache wheel; keep the re-pins on the
+# bundled install too.
 RUN pip uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-cu13 || true && \
     rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl* && \
+    pip install --no-cache-dir --no-deps \
+        'nvidia-cutlass-dsl==4.4.1' \
+        'nvidia-cutlass-dsl-libs-base==4.4.1' \
+        'nvidia-cutlass-dsl-libs-cu13==4.4.1' && \
+    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace" && \
     git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
     pip install --no-deps -e ./megatron-lm && \
-    pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers \
-    cloudpickle triton==3.6.0 'nvidia-cutlass-dsl[cu13]==4.4.1' \
-    'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.6' torch-c-dlpack-ext \
-    --no-cache pre-commit && \
-    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace"
+    pip install --no-cache-dir torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers \
+        cloudpickle triton==3.6.0 \
+        'nvidia-cutlass-dsl==4.4.1' 'nvidia-cutlass-dsl-libs-base==4.4.1' 'nvidia-cutlass-dsl-libs-cu13==4.4.1' \
+        'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.6' torch-c-dlpack-ext pre-commit
 
 # -- Layer 3: FBGEMM (long build, own layer for caching) ---
 RUN pip install --no-cache-dir setuptools-git-versioning scikit-build && \

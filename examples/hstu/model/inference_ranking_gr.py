@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from typing import Dict
 
 import torch
 from commons.datasets.hstu_batch import HSTUBatch
@@ -172,3 +173,49 @@ def get_inference_ranking_gr(
     )
 
     return InferenceRankingGR(inference_sparse, inference_dense)
+
+
+def apply_inference(
+    training_model: torch.nn.Module,
+    dynamic_table_configs: Dict[str, int],
+    trained_emb_table_sizes: Dict[str, int],
+    checkpoint_dir: str,
+):
+    from dynamicemb.exportable_tables import apply_inference_embedding_collection
+    from modules.exportable_embedding import apply_inference_sparse
+    from modules.inference_dense_module import apply_inference_hstu_dense
+
+    # Step.1 - [General] Convert ModuleDict[Embedding] to InferenceEmbeddingCollection
+    model = apply_inference_embedding_collection(
+        training_model,
+        dynamic_table_configs,
+        trained_emb_table_sizes,
+    )
+
+    # Step.2 - [Recsys Example Structure Specific] Apply model specific training to inference conversion
+    #          Convert ShardingEmbedding into ExportableEmbedding
+    #          Convert dense module into InferenceDenseModule
+    #          Convert RankingGR into InferenceRankingGR
+    sparse_module = apply_inference_sparse(model._embedding_collection)
+    dense_module = apply_inference_hstu_dense(
+        hstu_config=model._hstu_config,
+        kvcache_config=None,  # kvcache_config is not needed for export
+        task_config=model._task_config,
+        use_exportable=True,
+        hstu_block=model._hstu_block,
+        mlp=model._mlp,
+    )
+
+    inference_model = InferenceRankingGR(
+        sparse_module,
+        dense_module,
+    )
+    if model._hstu_config.bf16:
+        inference_model.bfloat16()
+    elif model._hstu_config.fp16:
+        inference_model.half()
+
+    inference_model.load_checkpoint(checkpoint_dir)
+    inference_model = inference_model.eval()
+
+    return inference_model

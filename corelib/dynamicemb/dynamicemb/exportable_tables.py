@@ -9,12 +9,17 @@ This module owns:
 3. The `InferenceLinearBucketTable` and `InferenceEmbeddingTable` implementations
 """
 
+import itertools
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pynve.torch.nve_layers as nve_layers
 import torch
-from dynamicemb import DynamicEmbTableOptions
+from dynamicemb import (
+    DynamicEmbInitializerArgs,
+    DynamicEmbInitializerMode,
+    DynamicEmbTableOptions,
+)
 from dynamicemb.batched_dynamicemb_tables import (
     encode_meta_json_file_path,
     get_loading_files,
@@ -22,6 +27,8 @@ from dynamicemb.batched_dynamicemb_tables import (
 from dynamicemb.key_value_table import _iter_batches_from_files, load_from_json
 from dynamicemb.scored_hashtable import ScorePolicy
 from dynamicemb_extensions import table_insert
+from torch.nn import ModuleDict
+from torchrec.modules.embedding_configs import EmbeddingConfig
 
 # ---------------------------------------------------------------------------
 # Helpers for InferenceEmbeddingTable construction
@@ -182,7 +189,7 @@ class InferenceLinearBucketTable(torch.nn.Module):
         return score_out, founds, indices
 
 
-class InferenceEmbeddingTable(torch.nn.Module):
+class InferenceEmbeddingCollection(torch.nn.Module):
     """Export-compatible embedding table using custom ops.
 
     The pooling mode is fixed at construction time so that each exported
@@ -195,15 +202,18 @@ class InferenceEmbeddingTable(torch.nn.Module):
 
     def __init__(
         self,
-        table_options: List["DynamicEmbTableOptions"],
+        table_options: List["EmbeddingConfig"],
+        use_dynamic_hash: bool,
         pooling_mode: int,
         table_names: Optional[List[str]] = None,
+        feature_names: Optional[List[str]] = None,
         feature_table_map: Optional[List[int]] = None,
         output_dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         key_type: torch.dtype = torch.int64,
     ):
         super().__init__()
+        self.embedding_configs: List[EmbeddingConfig] = table_options
 
         if pooling_mode not in (-1, 1, 2):
             raise ValueError(
@@ -248,6 +258,7 @@ class InferenceEmbeddingTable(torch.nn.Module):
         self.key_type_ = key_type
         self.num_tables_ = num_tables
         self.table_names_ = table_names
+        self.feature_names_ = feature_names
         self.pooling_mode_ = (
             pooling_mode  # plain Python int – compile-time constant for torch.export
         )
@@ -280,18 +291,17 @@ class InferenceEmbeddingTable(torch.nn.Module):
             out=self.table_offsets_,
         )
 
-        self.hash_table = InferenceLinearBucketTable(
-            capacity=capacities,
-            key_type=key_type,
-            bucket_capacity=128,
-            device=device,
-        )
+        self.use_dynamic_hash = use_dynamic_hash
+        if use_dynamic_hash:
+            self.hash_table = InferenceLinearBucketTable(
+                capacity=capacities,
+                key_type=key_type,
+                bucket_capacity=128,
+                device=device,
+            )
 
         self.emb_dim_ = _resolve_embedding_dim(table_options)
         total_rows = int(self.capacity_list_.sum().item())
-        print(
-            f"[INFO] Total embedding rows: {total_rows}, embedding dim: {self.emb_dim_}"
-        )
         dtype_size = torch.finfo(output_dtype).bits // 8
         total_size_bytes = total_rows * self.emb_dim_ * dtype_size
         self.gpu_cache_size_ = _resolve_gpu_cache_size(table_options, total_size_bytes)
@@ -322,7 +332,50 @@ class InferenceEmbeddingTable(torch.nn.Module):
                 device=device,
             )
 
-    def load(
+    def load_from_embedding_table(self, table_weights: torch.Tensor) -> None:
+        """Load embedding weights from a pre-extracted table tensor.
+
+        This is used when the training checkpoint contains a pre-extracted embedding table
+        that can be directly copied into the NVE weight, bypassing the hash table insertion.
+
+        Args:
+            table_weights: (sum of all table capacities, emb_dim) float tensor containing the embedding weights for all tables, ordered by table and then by row within each table.
+        """
+        assert (
+            table_weights.size(0)
+            <= self.nve_embedding_.weight.size(0) - self.num_tables_
+        ), f"Provided table_weights has more rows ({table_weights.size(0)}) than the NVE embedding capacity ({self.nve_embedding_.weight.size(0) - self.num_tables_} excluding for reserved 'not found' rows)"
+        assert (
+            table_weights.size(1) == self.emb_dim_
+        ), f"Provided table_weights has embedding dim {table_weights.size(1)}, expected {self.emb_dim_}"
+
+        self.nve_embedding_.weight.data.zero_()  # zero out the "not found" row in each table
+        for table_id in range(self.num_tables_):
+            self.nve_embedding_.weight.data[
+                self.table_offsets_[table_id].item(), :
+            ].zero_()
+
+            current_offsets = self.table_offsets_[
+                table_id
+            ].item()  # table_offsets_ already skipped the reserved row
+            original_offsets = self.table_offsets_[table_id].item() - table_id - 1
+            num_rows = (
+                int(self.capacity_list_[table_id].item()) - 1
+            )  # exclude reserved row
+            if table_id == self.num_tables_ - 1:
+                num_rows = (
+                    table_weights.size(0) - original_offsets
+                )  # use remaining rows for the last table
+
+            self.nve_embedding_.weight.data[
+                current_offsets : current_offsets + num_rows, :
+            ].copy_(
+                table_weights[original_offsets : original_offsets + num_rows, :].to(
+                    self.nve_embedding_.weight.dtype
+                )
+            )
+
+    def load_from_dynamicemb_file(
         self,
         save_dir: str,
         table_names: Optional[List[str]] = None,
@@ -471,20 +524,26 @@ class InferenceEmbeddingTable(torch.nn.Module):
                         - ``pooling_mode_ == 1 or 2``: ``(B, D)`` float tensor of pooled
               embeddings, where ``B = pooling_offsets.size(0) - 1``.
         """
-        num_elements = keys.size(0)
-
         # Derive per-key table id from the table-segment offsets.
         table_ids = torch.ops.INFERENCE_EMB.expand_table_ids(
-            offsets, keys, self.feature_offsets_, self.num_tables_, 1, num_elements
+            offsets,
+            keys,
+            self.feature_offsets_,
+            self.num_tables_,
+            1,
         )
 
-        # Hash-table lookup: keys → per-table row indices.
-        _scores, _founds, table_indices = self.hash_table.lookup(
-            keys=keys,
-            table_ids=table_ids,
-            score_value=None,
-            score_policy=self.score_policy,
-        )
+        if self.use_dynamic_hash:
+            # Hash-table lookup: keys → per-table row indices.
+            _scores, _founds, table_indices = self.hash_table.lookup(
+                keys=keys,
+                table_ids=table_ids,
+                score_value=None,
+                score_policy=self.score_policy,
+            )
+        else:
+            # Use identical-mapping per-table indices
+            table_indices = keys
 
         # Convert per-table indices to absolute embedding row ids.
         global_table_offsets = torch.index_select(self.table_offsets_, 0, table_ids)
@@ -503,3 +562,155 @@ class InferenceEmbeddingTable(torch.nn.Module):
                 pooling_offsets,  # (B+1,) – CSR bag boundaries
                 per_sample_weights,  # optional per-key weights
             )
+
+
+def create_inference_embedding_collection(
+    embedding_configs: List[EmbeddingConfig],
+    pooling_mode: int = -1,  # non pooling
+    use_dynamic: bool = True,
+) -> InferenceEmbeddingCollection:
+    table_names = [config.name for config in embedding_configs]
+    feature_names = list(
+        itertools.chain(*[config.feature_names for config in embedding_configs])
+    )
+    feature_table_map = list(
+        itertools.chain(
+            *[
+                [idx] * len(config.feature_names)
+                for idx, config in enumerate(embedding_configs)
+            ]
+        )
+    )
+    table_options = [
+        DynamicEmbTableOptions(
+            embedding_dtype=torch.float32,
+            dim=config.embedding_dim,
+            max_capacity=config.num_embeddings,
+            local_hbm_for_values=0,
+            bucket_capacity=128,
+            initializer_args=DynamicEmbInitializerArgs(
+                mode=DynamicEmbInitializerMode.NORMAL,
+            ),
+            training=False,
+        )
+        for config in embedding_configs
+    ]
+    return InferenceEmbeddingCollection(
+        table_options,
+        use_dynamic,
+        pooling_mode,
+        table_names,
+        feature_names,
+        feature_table_map,
+        device=torch.device("cuda"),
+    )
+
+
+def apply_inference_embedding_collection(
+    model: torch.nn.Module,
+    dynamic_table_configs: Dict[str, bool],
+    trained_emb_table_sizes: Dict[str, int],
+):
+    """
+    Replace torchrec.EmbeddingCollection in the model with dynamicemb.InferenceEmbeddingCollection.
+
+    Args:
+        model (torch.nn.Module): The input training model.
+        dynamic_table_configs (Dict[str, bool]): A dictionary mapping table names to their use_dynamic flag.
+        trained_emb_table_sizes (Dict[str, int]): A dictionary mapping table names to their corresponding vocabulary sizes in the trained model.
+    Returns:
+        torch.nn.Module: The training model with the exportable embedding.
+    """
+    from torch.nn.modules.sparse import Embedding
+
+    check_modules = set()
+    while True:
+        name = None
+        for name, module in model.named_modules():
+            if isinstance(module, ModuleDict):
+                submodules = [
+                    submodule
+                    for name, submodule in module.named_modules()
+                    if name != ""
+                ]
+                # skip if not torchrec.EmbeddingCollection
+                if len({type(m) for m in submodules}) != 1 or not isinstance(
+                    submodules[0], Embedding
+                ):
+                    continue
+                # skip if already converted
+                if (
+                    isinstance(module, nve_layers.NVEmbedding)
+                    or isinstance(module, nve_layers.NVEmbeddingBag)
+                    or isinstance(module, InferenceEmbeddingCollection)
+                ):
+                    continue
+                # skip if already checked
+                if name in check_modules:
+                    continue
+                break
+        else:
+            break
+
+        embedding_configs = None
+        for parent_name, parent_module in model.named_modules():
+            if parent_name == name.removesuffix(".embeddings"):
+                embedding_configs = parent_module.embedding_configs()
+                break
+        assert (
+            embedding_configs is not None
+        ), f"Cannot find embedding configs from parent module {name.removesuffix('.embeddings')}"
+
+        parent_name = name.removesuffix(".embeddings")
+        check_modules.add(name)
+        check_modules.add(parent_name)
+
+        # Adjust training vocab sizes to inference vocab sizes based on trained_emb_table_sizes
+        # TODO(junyiq): Try exact the freezed vocab size from embedding files/model states.
+        for config in embedding_configs:
+            if config.name not in trained_emb_table_sizes:
+                print(
+                    f"[WARNING] Table {config.name} in module {name} is missing the trained vocab size for inference.\n"
+                    + f"          Using {config.vocab_size} rows from the training config."
+                )
+            config.num_embeddings = trained_emb_table_sizes.get(
+                config.name, config.num_embeddings
+            )
+
+        use_dynamic = {
+            config.name: dynamic_table_configs[config.name]
+            for config in embedding_configs
+            if config.name in dynamic_table_configs
+        }
+        assert (
+            len(use_dynamic) > 0
+        ), "At least one table in the embedding collection module should have a config in dynamic_table_configs."
+        assert (
+            len(set(use_dynamic.values())) == 1
+        ), f"All tables in the same embedding collection module should have the same config in dynamic_table_configs. Got:\n{use_dynamic}"
+        use_dynamic = list(use_dynamic.values())[0]
+
+        pooling_config = getattr(embedding_configs[0], "pooling", "NONE")
+        if pooling_config == "NONE":
+            pooling_mode = -1
+        elif pooling_config == "SUM":
+            pooling_mode = 1
+        elif pooling_config == "MEAN":
+            pooling_mode = 2
+        else:
+            raise ValueError(f"Unsupported pooling config: {pooling_config}")
+
+        embedding_collection = create_inference_embedding_collection(
+            embedding_configs,
+            pooling_mode,
+            use_dynamic,
+        )
+        assert isinstance(embedding_collection, InferenceEmbeddingCollection)
+        embedding_collection.embedding_configs = embedding_configs
+
+        exec("model." + parent_name + "=embedding_collection")
+        print(
+            f"[INFO] converting {parent_name} to InferenceEmbeddingCollection with use_dynamic={use_dynamic} and tables={embedding_collection.table_names_}"
+        )
+
+    return model

@@ -31,7 +31,6 @@ def _expand_table_ids_fake(
     table_offsets_in_feature: Optional[torch.Tensor] = None,
     num_tables: int = 0,
     local_batch_size: int = 1,
-    num_elements: int = 0,
 ):
     del num_tables
 
@@ -45,10 +44,7 @@ def _expand_table_ids_fake(
             "INFERENCE_EMB::expand_table_ids expects local_batch_size > 0"
         )
 
-    if num_elements < 0:
-        raise RuntimeError("INFERENCE_EMB::expand_table_ids expects num_elements >= 0")
-
-    return offsets.new_empty((indices.size(0),), dtype=torch.int64)
+    return torch.empty_like(indices, dtype=torch.int64)
 
 
 def register_index_range_fake() -> bool:
@@ -58,9 +54,9 @@ def register_index_range_fake() -> bool:
         torch.library.register_fake("INFERENCE_EMB::get_table_range")(
             _get_table_range_fake
         )
-        torch.library.register_fake("INFERENCE_EMB::expand_table_ids")(
-            _expand_table_ids_fake
-        )
+        # torch.library.register_fake("INFERENCE_EMB::expand_table_ids")(
+        #     _expand_table_ids_fake
+        # )
         return True
     except Exception as e:
         warnings.warn(

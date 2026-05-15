@@ -175,8 +175,7 @@ def test_forward_backward_verification(
         create_test_jagged_tensor(batch_size, max_len, hidden_dim, dtype)
         for _ in range(num)
     ]
-    max_seqlens = [max(jt.lengths()) for jt in jt_list]
-    max(max_seqlens)
+    max_seqlens = [max(jt.lengths()).item() for jt in jt_list]
     from commons.ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 
     if num == 2:
@@ -281,13 +280,13 @@ def test_cudaop_vs_pytorch_benchmark(
             create_test_jagged_tensor(batch_size, max_len, hidden_dim)
             for _ in range(num)
         ]
-        max_seqlens = [max(jt.lengths()) for jt in jt_list]
+        max_seqlens = [max(jt.lengths()).item() for jt in jt_list]
 
         jt_list2 = [
             create_test_jagged_tensor(batch_size, max_len, hidden_dim)
             for _ in range(num)
         ]
-        max_seqlens2 = [max(jt.lengths()) for jt in jt_list2]
+        max_seqlens2 = [max(jt.lengths()).item() for jt in jt_list2]
     max_seqlen1 = max(max_seqlens)
     max_seqlen2 = max(max_seqlens2)
     from commons.ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat

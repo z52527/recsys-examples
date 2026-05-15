@@ -137,22 +137,109 @@ std::vector<at::Tensor> lengths_splits_cuda(const at::Tensor& lengths_1d, int64_
   return lengths_splits_impl(lengths_1d, num_splits, /*expect_cuda=*/true);
 }
 
+
+std::vector<at::Tensor> permute_and_split_impl(
+    const at::Tensor& jagged_features,
+    const at::Tensor& jagged_lengths,
+    const at::Tensor& jagged_offsets,
+    int64_t num_static_features,
+    int64_t num_dynamic_features,
+    const std::vector<int64_t>& features_order,
+    bool expect_cuda) {
+  int64_t num_features = num_static_features + num_dynamic_features;
+  TORCH_CHECK(jagged_features.dim() == 1, "jagged_features must be 1D, got dim=", jagged_features.dim());
+  TORCH_CHECK(jagged_lengths.dim() == 1, "jagged_lengths must be 1D, got dim=", jagged_lengths.dim());
+  TORCH_CHECK(num_static_features > 0, "num_static_features must be > 0");
+  TORCH_CHECK(num_dynamic_features > 0, "num_dynamic_features must be > 0");
+  TORCH_CHECK(
+      jagged_lengths.numel() % num_features == 0,
+      "jagged_lengths.numel()=", jagged_lengths.numel(), " must be divisible by num_features=", num_features);
+
+  if (expect_cuda) {
+    TORCH_CHECK(jagged_features.is_cuda(), "jagged_features must be a CUDA tensor for CUDA impl");
+    TORCH_CHECK(jagged_lengths.is_cuda(), "jagged_lengths must be a CUDA tensor for CUDA impl");
+  } else {
+    TORCH_CHECK(jagged_features.device().is_cpu(), "jagged_features must be a CPU tensor for CPU impl");
+    TORCH_CHECK(jagged_lengths.device().is_cpu(), "jagged_lengths must be a CPU tensor for CPU impl");
+  }
+  TORCH_CHECK(num_features == features_order.size(), "features_order size must match total number of features");
+
+  const int64_t batch = jagged_lengths.numel() / num_features;
+
+  std::vector<at::Tensor> permuted_lengths_vec(num_features);
+  for (int64_t i = 0; i < num_features; ++i) {
+    permuted_lengths_vec[i] = jagged_lengths.narrow(/*dim=*/0, /*start=*/features_order[i] * batch, /*length=*/batch);
+  }
+  auto permuted_lengths = at::cat(permuted_lengths_vec, /*dim=*/0);
+
+  std::vector<at::Tensor> static_features_vec(num_static_features);
+  std::vector<at::Tensor> dynamic_features_vec(num_dynamic_features);
+
+  auto jagged_offsets_cpu = jagged_offsets.to(at::kCPU);
+
+  for (int64_t i = 0; i < num_static_features; ++i) {
+    auto numel = permuted_lengths_vec[i].sum().item<int64_t>();
+    auto original_index = features_order[i] * batch;
+    static_features_vec[i] = jagged_features.narrow(/*dim=*/0, /*start=*/jagged_offsets_cpu[original_index].item<int64_t>(), /*length=*/numel);
+  }
+
+  for (int64_t i = 0; i < num_dynamic_features; ++i) {
+    auto numel = permuted_lengths_vec[num_static_features + i].sum().item<int64_t>();
+    auto original_index = features_order[num_static_features + i] * batch;
+    dynamic_features_vec[i] = jagged_features.narrow(/*dim=*/0, /*start=*/jagged_offsets_cpu[original_index].item<int64_t>(), /*length=*/numel);
+  }
+
+  auto static_lengths = permuted_lengths.narrow(/*dim=*/0, /*start=*/0, /*length=*/batch * num_static_features);
+  auto dynamic_lengths = permuted_lengths.narrow(/*dim=*/0, /*start=*/batch * num_static_features, /*length=*/batch * num_dynamic_features);
+
+  auto static_features = at::cat(static_features_vec, /*dim=*/0);
+  auto dynamic_features = at::cat(dynamic_features_vec, /*dim=*/0);
+
+  std::vector<at::Tensor> out{ static_features, dynamic_features, static_lengths, dynamic_lengths };
+  return out;
+}
+
+std::vector<at::Tensor> permute_and_split_cpu(
+    const at::Tensor& jagged_features,
+    const at::Tensor& jagged_lengths,
+    const at::Tensor& jagged_offsets,
+    int64_t num_static_features,
+    int64_t num_dynamic_features,
+    const std::vector<int64_t>& features_order
+) {
+  return permute_and_split_impl(jagged_features, jagged_lengths, jagged_offsets, num_static_features, num_dynamic_features, features_order, /*expect_cuda=*/false);
+}
+
+std::vector<at::Tensor> permute_and_split_cuda(
+    const at::Tensor& jagged_features,
+    const at::Tensor& jagged_lengths,
+    const at::Tensor& jagged_offsets,
+    int64_t num_static_features,
+    int64_t num_dynamic_features,
+    const std::vector<int64_t>& features_order
+) {
+  return permute_and_split_impl(jagged_features, jagged_lengths, jagged_offsets, num_static_features, num_dynamic_features, features_order, /*expect_cuda=*/true);
+}
+
 } // namespace
 
 TORCH_LIBRARY_FRAGMENT(hstu_cuda_ops, m) {
   m.def("split_by_lengths(Tensor values, Tensor lengths_1d, int num_splits) -> Tensor[]");
   m.def("lengths_reduce_dim1(Tensor lengths_1d, int num_splits) -> Tensor");
   m.def("lengths_splits(Tensor lengths_1d, int num_splits) -> Tensor[]");
+  m.def("permute_and_split(Tensor jagged_features, Tensor jagged_lengths, Tensor jagged_offsets, int num_static_features, int num_dynamic_features, int[] features_order) -> Tensor[]");
 }
 
 TORCH_LIBRARY_IMPL(hstu_cuda_ops, CPU, m) {
   m.impl("split_by_lengths", split_by_lengths_cpu);
   m.impl("lengths_reduce_dim1", lengths_reduce_dim1_cpu);
   m.impl("lengths_splits", lengths_splits_cpu);
+  m.impl("permute_and_split", permute_and_split_cpu);
 }
 
 TORCH_LIBRARY_IMPL(hstu_cuda_ops, CUDA, m) {
   m.impl("split_by_lengths", split_by_lengths_cuda);
   m.impl("lengths_reduce_dim1", lengths_reduce_dim1_cuda);
   m.impl("lengths_splits", lengths_splits_cuda);
+  m.impl("permute_and_split", permute_and_split_cuda);
 }

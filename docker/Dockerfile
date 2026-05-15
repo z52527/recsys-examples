@@ -43,10 +43,22 @@ RUN apt-get update -y --fix-missing && apt-get install -y liburing-dev libxxhash
 # ChainedOptimizer.step, which costs ~4 ms / step on HSTU bf16 even when the
 # stat is unused. Earliest tag containing the fix is core_v0.13.0; using 0.13.1
 # (latest 0.13.x patch) for stability.
-RUN git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
+# nvidia-cutlass-dsl: --no-deps + --no-cache-dir + 3 explicit subpackages
+# avoids a poisoned base-image pip cache wheel; keep the re-pins on the
+# bundled install too.
+RUN pip uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-cu13 || true && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl* && \
+    pip install --no-cache-dir --no-deps \
+        'nvidia-cutlass-dsl==4.4.1' \
+        'nvidia-cutlass-dsl-libs-base==4.4.1' \
+        'nvidia-cutlass-dsl-libs-cu13==4.4.1' && \
+    python -c "from cutlass.cute.arch import ProxyKind, SharedSpace" && \
+    git clone -b core_v0.13.1 https://github.com/NVIDIA/Megatron-LM.git megatron-lm && \
     pip install --no-deps -e ./megatron-lm && \
-    pip install torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers expiring_dict \
-    cloudpickle triton==3.6.0 nvidia-cutlass-dsl==4.3.0 --no-cache pre-commit
+    pip install --no-cache-dir torchx gin-config torchmetrics==1.0.3 typing-extensions iopath pyvers expiring_dict \
+        cloudpickle triton==3.6.0 \
+        'nvidia-cutlass-dsl==4.4.1' 'nvidia-cutlass-dsl-libs-base==4.4.1' 'nvidia-cutlass-dsl-libs-cu13==4.4.1' \
+        'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.6' torch-c-dlpack-ext pre-commit
 
 # -- Layer 3: FBGEMM (long build, own layer for caching) ---
 RUN pip install --no-cache-dir setuptools-git-versioning scikit-build && \
@@ -65,7 +77,8 @@ ARG FLASH_ATTN_ARBITRARY_MASK_COMMIT=b56db721d65afadd8cfe154cd12e83693bf0aba3
 RUN git clone https://github.com/jiayus-nvidia/flash-attention.git flash-attention && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_ARBITRARY_MASK_COMMIT} && \
-    pip install --no-deps --no-build-isolation -e ./flash_attn/cute
+    pip install --no-deps --no-build-isolation -e ./flash_attn/cute && \
+    python -c "from flash_attn.cute.interface import flash_attn_func"
 
 # -- Layer 6, 7: FlexKV and NVE : both inference dependency --
 COPY third_party/FlexKV /workspace/deps/FlexKV

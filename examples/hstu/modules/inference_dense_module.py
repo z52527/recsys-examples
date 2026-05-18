@@ -225,9 +225,10 @@ class InferenceDenseModule(torch.nn.Module):
             max_batch_size = hstu_config.max_batch_size
             self._kvcache_metadata = None
             if self._use_kvcache:
-                max_num_pages = math.ceil(
-                    hstu_config.max_seq_len / kvcache_config.page_size
-                ) * max_batch_size
+                max_num_pages = (
+                    math.ceil(hstu_config.max_seq_len / kvcache_config.page_size)
+                    * max_batch_size
+                )
                 max_num_tokens = hstu_config.max_seq_len * max_batch_size
                 self._kvcache_metadata = get_kvcache_metadata_buffer(
                     batch_size=max_batch_size,

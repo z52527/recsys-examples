@@ -27,6 +27,8 @@ Architecture per layer (standard pre-norm GPT):
 
 Reference: examples/hstu/modules/native_hstu_layer.py
 """
+import os
+import sys
 from typing import List, Optional, Tuple
 
 import torch
@@ -40,6 +42,17 @@ import torch.nn.functional as F
 # Falls back to a pure-PyTorch reference implementation when the CuTe kernel
 # is not installed (requires ``quack`` / flash_attn CuTe DSL environment).
 _beam_decode_attn = None
+_beam_decode_attn_import_error: Optional[ImportError] = None
+
+
+def _ensure_gr_decode_atten_on_path() -> None:
+    """Prefer the repo-vendored beam_decode_attn interface when present."""
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..")
+    )
+    gr_decode_dir = os.path.join(repo_root, "corelib", "gr_decode_atten")
+    if os.path.isdir(gr_decode_dir) and gr_decode_dir not in sys.path:
+        sys.path.insert(0, gr_decode_dir)
 
 
 def _beam_decode_attn_reference(
@@ -146,13 +159,16 @@ def _beam_decode_attn_reference(
 
 
 def _get_beam_decode_attn():
-    global _beam_decode_attn
+    global _beam_decode_attn, _beam_decode_attn_import_error
     if _beam_decode_attn is None:
+        _ensure_gr_decode_atten_on_path()
         try:
             from interface import beam_decode_attn
 
             _beam_decode_attn = beam_decode_attn
-        except ImportError:
+            _beam_decode_attn_import_error = None
+        except ImportError as exc:
+            _beam_decode_attn_import_error = exc
             _beam_decode_attn = _beam_decode_attn_reference
     return _beam_decode_attn
 

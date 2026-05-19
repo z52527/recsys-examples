@@ -38,26 +38,23 @@ from typing import Callable, Dict, List
 
 import torch
 
-# Make tests/ importable so we can reuse the model factory, and the local
-# benchmark directory so _validate is reachable.
+# Make tests/ importable so we can reuse the model factory.
 _SID_GR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _SID_GR_ROOT not in sys.path:
     sys.path.insert(0, _SID_GR_ROOT)
-_BENCH_DIR = os.path.dirname(__file__)
-if _BENCH_DIR not in sys.path:
-    sys.path.insert(0, _BENCH_DIR)
 
-# Heavy imports — require the full Docker stack
+# Heavy imports require the full Docker stack.
 import commons.utils as init  # noqa: E402
-
-# Lightweight (no benchmark runtime deps) — imported before the heavy stack
-# so the test suite can also pull validate_compare_outputs from _validate.
-from _validate import validate_compare_outputs, validate_pair_outputs  # noqa: E402
 from commons.checkpoint import get_unwrapped_module  # noqa: E402
 from commons.datasets.gpt_sid_batch import FeatureConfig, GPTSIDBatch  # noqa: E402
 from commons.modules.embedding import ShardedEmbeddingConfig  # noqa: E402
 from commons.ops.length_to_offsets import length_to_complete_offsets  # noqa: E402
-from tests.test_utils import create_sid_gr_model_and_optimizer  # noqa: E402
+from model import jagged_flash_attn_block as jfab  # noqa: E402
+from tests.test_utils import (  # noqa: E402
+    create_sid_gr_model_and_optimizer,
+    validate_compare_outputs,
+    validate_pair_outputs,
+)
 
 
 def time_fn(fn: Callable[[], None], num_warmup: int, num_iter: int) -> Dict[str, float]:
@@ -137,6 +134,26 @@ def _resolve_dtype(name: str) -> torch.dtype:
             f"Unknown dtype '{name}'. Choose from {list(_DTYPE_MAP.keys())}"
         )
     return _DTYPE_MAP[name]
+
+
+def require_beam_decode_kernel() -> None:
+    """Fail early if the benchmark would run against the PyTorch fallback."""
+    kernel = jfab._get_beam_decode_attn()
+    if kernel is jfab._beam_decode_attn_reference:
+        import_error = jfab._beam_decode_attn_import_error
+        detail = f" Last import error: {import_error!r}" if import_error else ""
+        raise RuntimeError(
+            "benchmark_beam_decode.py requires the real CuTe "
+            "beam_decode_attn kernel. The resolver fell back to the "
+            "PyTorch reference path, which is only for correctness "
+            "debugging and makes benchmark timings invalid. Ensure "
+            "corelib/gr_decode_atten is available in this checkout and "
+            f"that the Docker image has the CuTe/CUTLASS dependencies.{detail}"
+        )
+
+    interface_mod = sys.modules.get("interface")
+    interface_path = getattr(interface_mod, "__file__", "<unknown>")
+    print(f"Using beam_decode_attn kernel from {interface_path}")
 
 
 def build_model(args, dtype: torch.dtype):
@@ -684,6 +701,7 @@ def main():
     init.initialize_model_parallel(1)
 
     with init.auto_destroy_global_state():
+        require_beam_decode_kernel()
         if args.compare_kv_modes:
             run_compare_kv_modes(args)
         elif args.sweep:

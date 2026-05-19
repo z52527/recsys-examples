@@ -1013,13 +1013,11 @@ def test_compare_kv_modes_default_raises_on_validation_failure():
     """``run_compare_kv_modes`` must raise by default when validation
     fails. Pass ``--allow_validation_fail`` to suppress.
 
-    We exercise the validator directly with mismatched sids/lp tensors,
-    then replicate the post-sweep raise block so the test stays
-    dependency-light (no benchmark runtime, no GPU).
+    We exercise the shared test_utils validator directly with mismatched
+    sids/lp tensors, then replicate the post-sweep raise block without
+    importing the benchmark module.
     """
-    bench_dir = os.path.join(os.path.dirname(__file__), "..", "benchmark")
-    sys.path.insert(0, bench_dir)
-    from _validate import validate_compare_outputs  # noqa: E402
+    from tests.test_utils import validate_compare_outputs  # noqa: E402
 
     B, K, H = 2, 5, 3
     torch.manual_seed(0)

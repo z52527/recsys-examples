@@ -1022,23 +1022,17 @@ def test_compare_kv_modes_default_raises_on_validation_failure():
     B, K, H = 2, 5, 3
     torch.manual_seed(0)
     sids_a = torch.randint(0, 100, (B, K, H), dtype=torch.int64)
-    lp_a = torch.randn(B, K)
+    # Validator uses top-K set overlap >= 70%. Shift every beam of
+    # sample 0 so the resulting overlap is 0% regardless of K — the
+    # synthetic mismatch must keep failing if someone tunes K later.
     sids_b = sids_a.clone()
-    sids_b[0, 0, 0] = (sids_a[0, 0, 0] + 1) % 100  # top-1 mismatch
-    lp_b = lp_a.clone()
+    sids_b[0, :, 0] = (sids_a[0, :, 0] + 1) % 100
     sids_c = sids_a.clone()
-    lp_c = lp_a.clone()
 
-    passed, summary = validate_compare_outputs(
-        sids_a,
-        lp_a,
-        sids_b,
-        lp_b,
-        sids_c,
-        lp_c,
-    )
+    passed, summary, overlap = validate_compare_outputs(sids_a, sids_b, sids_c)
     assert not passed, "synthetic mismatch should fail validation"
-    assert "top-1 mismatch" in summary
+    assert "overlap" in summary
+    assert overlap < 0.7
 
     # Drive the strict-mode raise path.
     args_strict = argparse.Namespace(allow_validation_fail=False)

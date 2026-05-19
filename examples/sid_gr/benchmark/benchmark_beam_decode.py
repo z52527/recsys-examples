@@ -302,15 +302,14 @@ def run_one_config(args) -> None:
 def run_sweep(base_args) -> None:
     """Run a sweep over (max_hist_len, beam_width, dtype) and print a markdown table.
 
-    Pass ``--validate_outputs`` to add an untimed A-vs-B correctness pass
-    per config (same thresholds as ``--compare_kv_modes``: top-1 exact,
-    |lp delta| < 0.15, top-K overlap >= 70%). Off by default to keep the
-    headline numbers from doubling in wall time.
+    Every config also runs an untimed A-vs-B correctness pass (top-K
+    beam set overlap >= 70%). The overlap-only check is scale-invariant
+    — strict top-1 and absolute log-prob bounds live in the unit tests,
+    where the config is fixed and the noise floor is calibrated.
     """
     hist_lens = [int(x) for x in base_args.sweep_hist.split(",")]
     beam_widths = [int(x) for x in base_args.sweep_beam.split(",")]
     dtypes = [s.strip() for s in base_args.sweep_dtype.split(",")]
-    validate = getattr(base_args, "validate_outputs", False)
 
     rows = []
     val_passes = 0
@@ -327,24 +326,18 @@ def run_sweep(base_args) -> None:
                 init.set_random_seed(cfg.seed)
                 model, optimizer, model_unwrapped, batch = build_model(cfg, dtype)
 
-                if validate:
-                    with torch.no_grad():
-                        sids_a, lp_a = model_unwrapped.generate(batch)
-                        sids_b, lp_b = model_unwrapped.generate_beam_decode(
-                            batch,
-                            backend=cfg.backend,
-                            use_jagged_kv=cfg.use_jagged_kv,
-                        )
-                    val_ok, val_msg = validate_pair_outputs(
-                        sids_a,
-                        lp_a,
-                        sids_b,
-                        lp_b,
+                with torch.no_grad():
+                    sids_a, _ = model_unwrapped.generate(batch)
+                    sids_b, _ = model_unwrapped.generate_beam_decode(
+                        batch,
+                        backend=cfg.backend,
+                        use_jagged_kv=cfg.use_jagged_kv,
                     )
-                    if val_ok:
-                        val_passes += 1
-                    else:
-                        val_fails.append(f"[{dtype_name} hist={hl} bw={bw}] {val_msg}")
+                val_ok, val_msg, val_overlap = validate_pair_outputs(sids_a, sids_b)
+                if val_ok:
+                    val_passes += 1
+                else:
+                    val_fails.append(f"[{dtype_name} hist={hl} bw={bw}] {val_msg}")
 
                 @torch.no_grad()
                 def run_orig():
@@ -386,9 +379,9 @@ def run_sweep(base_args) -> None:
                     f"(prefill={phase['prefill_ms_median']:.2f} + "
                     f"decode_loop={phase['decode_loop_ms_median']:.2f}), "
                     f"speedup={rows[-1]['speedup']:.2f}x"
+                    f"  [overlap={val_overlap*100:.0f}% "
+                    f"{'PASS' if val_ok else 'FAIL'}]"
                 )
-                if validate:
-                    line += f"  [validate: {'PASS' if val_ok else 'FAIL'}]"
                 print(line)
 
                 # Free memory between configs
@@ -421,29 +414,27 @@ def run_sweep(base_args) -> None:
             f"{r['speedup']:>6.2f}x |"
         )
 
-    if validate:
-        total = val_passes + len(val_fails)
-        print()
-        if val_fails:
-            print(
-                f"## Validation: {val_passes}/{total} configs PASS, "
-                f"{len(val_fails)} FAIL"
+    total = val_passes + len(val_fails)
+    print()
+    if val_fails:
+        print(
+            f"## Validation: {val_passes}/{total} configs PASS, "
+            f"{len(val_fails)} FAIL"
+        )
+        for line in val_fails:
+            print(f"  - {line}")
+        if not getattr(base_args, "allow_validation_fail", False):
+            raise RuntimeError(
+                f"Validation detected {len(val_fails)}/{total} configs "
+                f"where generate() and generate_beam_decode() disagree on "
+                f"more than 30% of the top-K beam set. Pass "
+                f"--allow_validation_fail to continue anyway."
             )
-            for line in val_fails:
-                print(f"  - {line}")
-            if not getattr(base_args, "allow_validation_fail", False):
-                raise RuntimeError(
-                    f"--validate_outputs detected {len(val_fails)}/{total} "
-                    f"configs that disagree between generate() and "
-                    f"generate_beam_decode(). Pass --allow_validation_fail "
-                    f"to continue anyway."
-                )
-        else:
-            print(
-                f"## Validation: {val_passes}/{total} configs PASS "
-                f"(top-1 exact match, |lp delta| < 0.15, "
-                f"top-K overlap >= 70%)"
-            )
+    else:
+        print(
+            f"## Validation: {val_passes}/{total} configs PASS "
+            f"(top-K overlap >= 70%)"
+        )
 
 
 def run_compare_kv_modes(base_args) -> None:
@@ -453,8 +444,8 @@ def run_compare_kv_modes(base_args) -> None:
     dense" section in RESULTS.md.
 
     Each config is validated for output equivalence before timing
-    (top-1 exact match, |lp delta| < 0.15, top-K overlap >= 70%). Any
-    failure raises ``RuntimeError`` after the table is printed; pass
+    (top-K beam set overlap >= 70% across all 3 pairs). Any failure raises
+    ``RuntimeError`` after the table is printed; pass
     ``--allow_validation_fail`` to continue on failure for diagnostic
     sweeps.
     """
@@ -480,24 +471,19 @@ def run_compare_kv_modes(base_args) -> None:
                 # 1. Untimed correctness pass first. If thresholds fail,
                 # we still time and report — but flag the validation.
                 with torch.no_grad():
-                    sids_a, lp_a = model_unwrapped.generate(batch)
-                    sids_b, lp_b = model_unwrapped.generate_beam_decode(
+                    sids_a, _ = model_unwrapped.generate(batch)
+                    sids_b, _ = model_unwrapped.generate_beam_decode(
                         batch,
                         backend="3kernel",
                         use_jagged_kv=False,
                     )
-                    sids_c, lp_c = model_unwrapped.generate_beam_decode(
+                    sids_c, _ = model_unwrapped.generate_beam_decode(
                         batch,
                         backend="3kernel",
                         use_jagged_kv=True,
                     )
-                val_ok, val_msg = validate_compare_outputs(
-                    sids_a,
-                    lp_a,
-                    sids_b,
-                    lp_b,
-                    sids_c,
-                    lp_c,
+                val_ok, val_msg, val_overlap = validate_compare_outputs(
+                    sids_a, sids_b, sids_c
                 )
                 if val_ok:
                     val_passes += 1
@@ -562,7 +548,7 @@ def run_compare_kv_modes(base_args) -> None:
                     f"B(dense)={ms_b:5.2f}(pre={phase_b['prefill_ms_median']:.2f},dec={phase_b['decode_loop_ms_median']:.2f})  "
                     f"C(jagged)={ms_c:5.2f}(pre={phase_c['prefill_ms_median']:.2f},dec={phase_c['decode_loop_ms_median']:.2f})  "
                     f"B_ms/C_ms={ms_b/ms_c:.3f}x  "  # >1: C faster, <1: B faster
-                    f"[validate: {val_tag}]"
+                    f"[overlap={val_overlap*100:.0f}% {val_tag}]"
                 )
 
                 del model, optimizer, model_unwrapped, batch
@@ -607,8 +593,7 @@ def run_compare_kv_modes(base_args) -> None:
     else:
         print(
             f"## Validation: {val_passes}/{total} configs PASS "
-            f"(top-1 exact match, |lp delta| < 0.15, "
-            f"top-K overlap >= 70% on all 3 pairs)"
+            f"(top-K overlap >= 70% on all 3 pairs)"
         )
 
 
@@ -681,18 +666,10 @@ def main():
         "Implies sweep semantics; uses --sweep_hist/--sweep_beam.",
     )
     parser.add_argument(
-        "--validate_outputs",
-        action="store_true",
-        help="In --sweep mode, also run an untimed A-vs-B "
-        "output-equivalence check per config (top-1 exact, "
-        "|lp delta| < 0.15, top-K overlap >= 70%). "
-        "Off by default to keep the headline timings fast.",
-    )
-    parser.add_argument(
         "--allow_validation_fail",
         action="store_true",
-        help="Allow --compare_kv_modes / --validate_outputs to "
-        "exit successfully even when validation fails. "
+        help="Allow --sweep / --compare_kv_modes to exit successfully "
+        "even when the overlap-based output validation fails. "
         "Default: validation failures raise RuntimeError.",
     )
     args = parser.parse_args()

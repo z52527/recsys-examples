@@ -290,15 +290,98 @@ def export_inference_gr_ranking(
         )
         batch.labels = None
 
-        # get dynamic shapes
+        # ---- Plain-tuple input wrapper (Triton AOTI call_spec compatibility) ----
+        # Triton's PyTorch AOTI backend (call_spec.cc) only accepts pytree types
+        # builtins.{dict,list,tuple} + value.tensor. Exporting a model whose top-level
+        # input is a custom HSTUBatch / KeyedJaggedTensor pytree node makes Triton
+        # reject the .pt2 at load time:
+        #   "Value of `type` property ('...HSTUBatch') is unsupported."
+        # So we export a thin wrapper that takes 3 PLAIN tensors
+        # (values, lengths, num_candidates) and rebuilds the HSTUBatch internally.
+        # Static metadata (feature keys/names, max seqlens, ...) is captured at export
+        # time and baked into the compiled graph as constants.
+        from commons.datasets.hstu_batch import HSTUBatch
+
+        class _PlainInputWrapper(torch.nn.Module):
+            def __init__(self, inner, example_batch):
+                super().__init__()
+                self.inner = inner
+                # static metadata -> compile-time constants
+                # (matches what the original pytree export bakes into `context`)
+                self._batch_size = int(example_batch.batch_size)
+                self._keys = list(example_batch.features.keys())
+                self._contextual_feature_names = list(
+                    example_batch.contextual_feature_names
+                )
+                self._item_feature_name = example_batch.item_feature_name
+                self._action_feature_name = example_batch.action_feature_name
+                self._feature_to_max_seqlen = dict(example_batch.feature_to_max_seqlen)
+                self._max_num_candidates = int(example_batch.max_num_candidates)
+                self._actual_batch_size = (
+                    int(example_batch.actual_batch_size)
+                    if example_batch.actual_batch_size is not None
+                    else None
+                )
+
+            def forward(self, values, lengths, num_candidates):
+                # offsets via fbgemm cumsum: GPU-only, no host sync -> trace-safe
+                # (avoids KeyedJaggedTensor.from_lengths_sync which D2H-syncs and
+                # breaks torch.export).
+                offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths.long())
+                features = KeyedJaggedTensor(
+                    keys=self._keys,
+                    values=values,
+                    lengths=lengths,
+                    offsets=offsets,
+                )
+                rebuilt = HSTUBatch(
+                    features=features,
+                    # static int (HSTUBatch.__post_init__ asserts isinstance int);
+                    # same as the original pytree export, which stored batch_size
+                    # in the (static) context, not as a traced tensor dim.
+                    batch_size=self._batch_size,
+                    feature_to_max_seqlen=self._feature_to_max_seqlen,
+                    contextual_feature_names=self._contextual_feature_names,
+                    actual_batch_size=self._actual_batch_size,
+                    item_feature_name=self._item_feature_name,
+                    action_feature_name=self._action_feature_name,
+                    max_num_candidates=self._max_num_candidates,
+                    num_candidates=num_candidates,
+                )
+                return self.inner(rebuilt)
+
+        export_model = _PlainInputWrapper(model, batch)
+
+        # flat tensor inputs for export (no custom pytree types in the spec)
+        example_values = batch.features.values()
+        example_lengths = batch.features.lengths()
+        example_num_candidates = batch.num_candidates
+        example_inputs = (example_values, example_lengths, example_num_candidates)
+
+        # ---- TEST Layer 0: eager equivalence (wrapper vs original model) ----
+        # Before paying for compilation, confirm the wrapper rebuilds the batch
+        # correctly. Same kernels, just re-wrapped -> expect ~bit-exact.
+        with torch.inference_mode():
+            ref_eager = model(batch)
+            wrapped_eager = export_model(*example_inputs)
+            max_diff = torch.max(
+                torch.abs(wrapped_eager.float() - ref_eager.float())
+            ).item()
+        print(f"[INFO][L0 wrapper-eager-check] max|wrapper - model| = {max_diff:.6g}")
+        assert max_diff < 1e-3, (
+            f"Wrapper output differs from original model in eager mode "
+            f"(max_diff={max_diff}); batch reconstruction logic is wrong."
+        )
+
+        # get dynamic shapes (now keyed on the 3 plain tensors)
         sc = ShapesCollection()
         dim_batch = Dim("batch_size", min=1, max=8)
 
         num_features = len(batch.features.keys())
-        sc[batch.features.values()] = {0: Dim("tokens", min=1, max=40000)}
-        sc[batch.features.lengths()] = {0: dim_batch * num_features}
-        sc[batch.num_candidates] = {0: dim_batch}
-        dynamic_shapes = sc.dynamic_shapes(model, (batch,))
+        sc[example_values] = {0: Dim("tokens", min=1, max=40000)}
+        sc[example_lengths] = {0: dim_batch * num_features}
+        sc[example_num_candidates] = {0: dim_batch}
+        dynamic_shapes = sc.dynamic_shapes(export_model, example_inputs)
         print(f"[INFO] Dynamic shapes: {dynamic_shapes}")
 
         if debug_flattened_inputs:
@@ -307,7 +390,9 @@ def export_inference_gr_ranking(
 
         # export & aoti_compile_and_package
         export_dir = os.path.join(os.path.dirname(__file__), "hstu_gr_ranking_model")
-        export_aot(model, (batch,), export_dir, dynamic_shapes=dynamic_shapes)
+        export_aot(
+            export_model, example_inputs, export_dir, dynamic_shapes=dynamic_shapes
+        )
         print(f"[INFO] Exported and packaged the model to:")
         print(f"       {export_dir}/")
         print(
